@@ -1,0 +1,26 @@
+# Local build trees, virtual environments, and installed Chrono artifacts.
+# These are regenerated with environment/*.sh and environment/copy_tree_two_pass.py.
+chrono-build/
+chrono-env/
+chrono-install/
+chrono-src/
+deme-env/
+pychrono-env/
+
+# Simulation output and large generated result sets.
+Output_*/
+output/
+
+# Python bytecode and caches.
+__pycache__/
+*.py[cod]
+
+# Temporary mesher files and crash dumps.
+tetgen-tmpfile_*
+core
+core.*
+
+# Editor/OS files.
+.DS_Store
+*.swp
+*.swo

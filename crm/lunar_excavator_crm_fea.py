@@ -1,0 +1,860 @@
+#!/usr/bin/env python3
+"""Lunar bucket-drum excavator -- spindle-driven FEA structural check.
+
+This variant couples the generated solid PLA tetrahedral mesh to the same
+Chrono::CRM SPH soil used by ``lunar_excavator_crm.py``.  It is a targeted
+structural check, not a replacement for the rigid-body production design
+driver.
+
+The drum is not added as a rigid FSI obstacle.  Instead:
+
+* a rigid spindle body follows the analytic drum pose;
+* every bore/hub FEA node is tied to that spindle with ``ChLinkNodeFrame``;
+* the rest of the tetrahedral PLA mesh is free to deform;
+* ``terrain.AddFeaMesh(mesh, False)`` provides two-way CRM contact on the
+  boundary faces of the solid mesh.
+
+The spindle is fixed in the multibody sense: its pose and velocities are
+prescribed each step, so it does not drift under the link reactions.  Drive
+torque is reconstructed from the sum of the hub-link reaction moments about the
+prescribed global spin axis.
+
+Requirements
+------------
+The local Chrono 10 source build with FSI/SPH, vehicle, CRM, and Python modules
+is required.  The generated tetrahedral mesh must exist::
+
+    fea/LunarDrumScrew_m_fea.node
+    fea/LunarDrumScrew_m_fea.ele
+
+Usage
+-----
+    ./crm/run_fea.sh --smoke-test --no-output
+    ./crm/run_fea.sh --duration 1.0 --spacing 0.012 --fps 5 \
+        --output-dir Output_CRM_LunarExcavator_FEA
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import sys
+
+import numpy as np
+import time
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import lunar_excavator_crm as rigid  # noqa: E402
+from lunar_excavator_config import DEFAULT as MOTION_DEFAULT  # noqa: E402
+
+
+@dataclass(frozen=True)
+class PlaParams:
+    """Linear-elastic isotropic PLA properties for a first structural check."""
+
+    youngs_modulus: float = 3.0e9       # Pa, 100% infill starting estimate
+    poisson_ratio: float = 0.38         # -
+    density: float = MOTION_DEFAULT.drum_density  # kg/m^3
+    rayleigh_beta: float = 0.01         # s, numerical damping
+    hub_radius: float = 0.0015          # m, bore radius from the STEP model
+    min_nodal_mass: float = 0.0         # kg, optional floor for sliver nodes
+
+    def __post_init__(self) -> None:
+        if self.youngs_modulus <= 0.0:
+            raise ValueError("PLA Young's modulus must be positive")
+        if not -1.0 < self.poisson_ratio < 0.5:
+            raise ValueError("PLA Poisson ratio must be in (-1, 0.5)")
+        if self.density <= 0.0:
+            raise ValueError("PLA density must be positive")
+        if self.rayleigh_beta < 0.0:
+            raise ValueError("Rayleigh damping cannot be negative")
+        if self.hub_radius <= 0.0:
+            raise ValueError("hub radius must be positive")
+        if self.min_nodal_mass < 0.0:
+            raise ValueError("minimum nodal mass cannot be negative")
+
+    def summary(self) -> str:
+        return "\n".join(
+            [
+                "PLA drum (linear elastic, isotropic):",
+                f"  density               {self.density:,.1f} kg/m^3",
+                f"  Young's modulus       {self.youngs_modulus:.4g} Pa",
+                f"  Poisson ratio         {self.poisson_ratio:.3f}",
+                f"  Rayleigh beta         {self.rayleigh_beta:.4g} s",
+                f"  rigid hub radius      {self.hub_radius * 1000:.3f} mm",
+                f"  nodal mass floor      {self.min_nodal_mass:.4g} kg",
+            ]
+        )
+
+
+FEA_METRIC_FIELDS = rigid.METRIC_FIELDS + [
+    "spindle_axis_torque_nm",
+    "spindle_reaction_force_n",
+    "max_nodal_displacement_m",
+    "max_von_mises_pa",
+]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = rigid.build_parser()
+    p.description = __doc__
+    # The rigid driver's OBJ switches do not apply to this solid-FEA model.
+    for action in list(p._actions):
+        if any(flag in {"--mesh", "--mesh-file"} for flag in action.option_strings):
+            p._remove_action(action)
+        elif "--dt" in action.option_strings:
+            action.help = "CRM/FSI step size in seconds (default: 2.5e-4 for FEA)"
+
+    default_node = ROOT / "fea" / "LunarDrumScrew_m_fea_decim8k.node"
+    p.add_argument("--fea-node", type=Path, default=default_node,
+                   help="TetGen .node file for the PLA solid mesh (default: stable 8k mesh)")
+    p.add_argument("--fea-ele", type=Path, default=None,
+                   help="TetGen .ele file (default: same prefix as --fea-node)")
+    p.add_argument("--use-contact-skin", action="store_true",
+                   help="experimental: use a coarse shell skin for CRM contact")
+    p.add_argument("--contact-obj", type=Path, default=None,
+                   help="coarse welded OBJ for --use-contact-skin (default: 2000-face skin)")
+    p.add_argument("--pla-youngs-modulus", type=float, default=None,
+                   help="PLA Young's modulus in Pa (default: 3.0e9)")
+    p.add_argument("--pla-poisson-ratio", type=float, default=None,
+                   help="PLA Poisson ratio (default: 0.38)")
+    p.add_argument("--pla-density", type=float, default=None,
+                   help="PLA density in kg/m^3 (default: shared config, 1240)")
+    p.add_argument("--rayleigh-beta", type=float, default=None,
+                   help="FEA Rayleigh damping beta in s (default: 0.01)")
+    p.add_argument("--hub-radius", type=float, default=None,
+                   help="rigid spindle hub radius in m (default: 0.0015)")
+    p.add_argument("--min-nodal-mass", type=float, default=None,
+                   help="floor FEA nodal masses at this value in kg (default: 0, off)")
+    p.add_argument("--stress-stride", type=int, default=1,
+                   help="evaluate von Mises stress on every Nth element at output (default: 1)")
+    p.add_argument("--solver-iterations", type=int, default=20,
+                   help="GMRES iterations per MBS step with FEA stiffness (default: 20)")
+    p.add_argument("--solver-tolerance", type=float, default=1.0e-3,
+                   help="GMRES residual tolerance with FEA stiffness (default: 1e-3)")
+    p.add_argument("--debug-fea", action="store_true",
+                   help="print nodal displacement and extents after every step")
+    p.add_argument("--debug-stress", action="store_true",
+                   help="print worst stress element and displacement node at output frames")
+    p.add_argument("--bce-layers", type=int, default=1,
+                   help="flexible BCE layers for FEA/SPH contact (default: 1, stability choice)")
+    p.add_argument("--initial-gap", type=float, default=0.0,
+                   help="raise the initial drum by this distance in m to avoid STEP/SPH overlap")
+    p.add_argument("--spin-ramp-time", type=float, default=0.0,
+                   help="linearly ramp spin speed over this duration in s (default: 0, immediate)")
+    p.set_defaults(output_dir=Path("Output_CRM_LunarExcavator_FEA"))
+    return p
+
+
+def make_pla(args: argparse.Namespace) -> PlaParams:
+    values = {
+        "youngs_modulus": args.pla_youngs_modulus,
+        "poisson_ratio": args.pla_poisson_ratio,
+        "density": args.pla_density,
+        "rayleigh_beta": args.rayleigh_beta,
+        "hub_radius": args.hub_radius,
+        "min_nodal_mass": args.min_nodal_mass,
+    }
+    overrides = {k: v for k, v in values.items() if v is not None}
+    return PlaParams(**overrides)
+
+
+def resolve_fea_mesh(args: argparse.Namespace) -> tuple[Path, Path]:
+    node = args.fea_node.resolve()
+    ele = args.fea_ele.resolve() if args.fea_ele is not None else node.with_suffix(".ele")
+    if not node.is_file():
+        raise SystemExit(
+            f"missing FEA node file {node}; generate it with "
+            "`./chrono-env/bin/python step_to_chrono_fea.py ...`"
+        )
+    if not ele.is_file():
+        raise SystemExit(f"missing FEA element file {ele}")
+    if args.use_contact_skin:
+        contact = (args.contact_obj or ROOT / "fea" / "LunarDrumScrew_m_fea_contact_2000.obj").resolve()
+        if not contact.is_file():
+            raise SystemExit(
+                f"missing CRM contact skin {contact}; generate it from the surface STL "
+                "with trimesh decimation to about 2000 faces"
+            )
+    if args.stress_stride < 1:
+        raise SystemExit("--stress-stride must be at least 1")
+    if args.solver_iterations < 1:
+        raise SystemExit("--solver-iterations must be at least 1")
+    if args.solver_tolerance <= 0.0:
+        raise SystemExit("--solver-tolerance must be positive")
+    if args.bce_layers < 1:
+        raise SystemExit("--bce-layers must be at least 1")
+    if args.spin_ramp_time < 0.0:
+        raise SystemExit("--spin-ramp-time cannot be negative")
+    return node, ele
+
+
+def create_spindle(chrono, system, motion):
+    """Create the fixed body that carries the imposed drum pose."""
+    spindle = chrono.ChBody()
+    spindle.SetName("drum_spindle")
+    spindle.SetMass(motion.drum_mass)
+    spindle.SetInertiaXX(chrono.ChVector3d(*motion.drum_moi))
+    spindle.SetFixed(True)
+    if hasattr(spindle, "SetUseSleeping"):
+        spindle.SetUseSleeping(False)
+    spindle.SetPos(chrono.ChVector3d(0.0, 0.0, motion.drum_center_z0))
+    spindle.SetRot(rigid.initial_chrono_quat(chrono, motion))
+    system.Add(spindle)
+    return spindle
+
+
+def cast_xyz_nodes(fea, mesh) -> list:
+    nodes = []
+    for i in range(mesh.GetNumNodes()):
+        base = fea.CastToChNodeFEAbase(mesh.GetNode(i))
+        node = fea.CastToChNodeFEAxyz(base)
+        if node is None:
+            raise SystemExit(
+                "the FEA mesh contains a node type other than ChNodeFEAxyz; "
+                "regenerate it with ChContinuumElastic/TetGen"
+            )
+        nodes.append(node)
+    return nodes
+
+
+def assign_nodal_masses(fea, mesh, nodes, density: float, min_mass: float) -> tuple[float, int]:
+    """Lump element mass to nodes; FromTetGenFile does not do this.
+
+    Chrono's TetGen loader creates ChNodeFEAxyz objects with zero mass.  The
+    multibody solver needs a mass matrix, especially once CRM contact loads are
+    applied to the surface nodes, so distribute each tetrahedron's mass equally
+    to its four nodes.  A small floor is optional because the CAD-derived mesh
+    contains a few extremely thin sliver elements.
+    """
+    mass_by_node = {}
+    for i in range(mesh.GetNumElements()):
+        element = fea.CastToChElementTetraCorot_4(mesh.GetElement(i))
+        if element is None:
+            continue
+        volume = abs(element.ComputeVolume())
+        share = density * volume / 4.0
+        for j in range(4):
+            node = element.GetTetrahedronNode(j)
+            key = rigid.vec_parts(node.GetX0())
+            mass_by_node[key] = mass_by_node.get(key, 0.0) + share
+
+    total = 0.0
+    floored = 0
+    for node in nodes:
+        key = rigid.vec_parts(node.GetX0())
+        mass = mass_by_node.get(key, 0.0)
+        if min_mass > 0.0 and mass < min_mass:
+            mass = min_mass
+            floored += 1
+        node.SetMass(mass)
+        total += mass
+    return total, floored
+
+
+def load_fea_drum(chrono, fea, system, motion, node_path: Path, ele_path: Path, pla: PlaParams):
+    """Load the transformed tet mesh and return nodes, hub nodes, and material."""
+    mesh = fea.ChMesh()
+    mesh.SetName("pla_excavator_drum")
+    material = fea.ChContinuumElastic(
+        pla.youngs_modulus, pla.poisson_ratio, pla.density
+    )
+    material.SetRayleighDampingBeta(pla.rayleigh_beta)
+
+    q0 = rigid.initial_chrono_quat(chrono, motion)
+    pos_transform = chrono.ChVector3d(0.0, 0.0, motion.drum_center_z0)
+    rot_transform = chrono.ChMatrix33d(q0)
+    fea.ChMeshFileLoader.FromTetGenFile(
+        mesh, str(node_path), str(ele_path), material, pos_transform, rot_transform
+    )
+    if mesh.GetNumNodes() == 0 or mesh.GetNumElements() == 0:
+        raise SystemExit("the generated FEA mesh is empty")
+
+    system.Add(mesh)
+    nodes = cast_xyz_nodes(fea, mesh)
+    total_mass, floored = assign_nodal_masses(
+        fea, mesh, nodes, pla.density, pla.min_nodal_mass
+    )
+    print(
+        f"FEA nodal masses: total={total_mass:.6g} kg, "
+        f"min={min(node.GetMass() for node in nodes):.6g} kg, "
+        f"max={max(node.GetMass() for node in nodes):.6g} kg, "
+        f"floored={floored}",
+        flush=True,
+    )
+
+    q0_tuple = rigid.quat_parts(q0)
+    center = rigid.vec_parts(pos_transform)
+    hub_nodes = []
+    for node in nodes:
+        p = rigid.vec_parts(node.GetPos())
+        local = rigid.quat_rotate(rigid.quat_conj(q0_tuple),
+                                  (p[0] - center[0], p[1] - center[1], p[2] - center[2]))
+        if math.hypot(local[0], local[1]) <= pla.hub_radius:
+            hub_nodes.append(node)
+    if not hub_nodes:
+        raise SystemExit(
+            f"no FEA nodes found inside the {pla.hub_radius:g} m hub; "
+            "check --hub-radius and the generated mesh"
+        )
+    return mesh, nodes, hub_nodes, material
+
+
+def nearest_targets(query: np.ndarray, targets: np.ndarray, chunk: int = 256) -> np.ndarray:
+    """For each query point, return the index of the nearest target point."""
+    result = []
+    for start in range(0, len(query), chunk):
+        block = query[start:start + chunk]
+        squared = ((block[:, None, :] - targets[None, :, :]) ** 2).sum(axis=2)
+        result.extend(np.argmin(squared, axis=1).tolist())
+    return np.asarray(result, dtype=int)
+
+
+def create_contact_skin(chrono, fea, system, nodes, contact_path: Path, motion, pla: PlaParams):
+    """Create a coarse shell skin for CRM contact and tie it to the solid mesh.
+
+    The tetrahedral mesh is needed for PLA stress, but its thousands of surface
+    nodes would create far too many full-mass BCE markers.  A decimated welded
+    shell with roughly 1,000 nodes gives a marker count comparable to the SPH
+    particle count.  Its nodes are tied to the nearest structural nodes, so SPH
+    forces still reach the tetrahedral solid while stress is measured on the
+    original fine mesh.
+    """
+    shell_mesh = fea.ChMesh()
+    shell_mesh.SetName("crm_contact_skin")
+    elasticity = fea.ChElasticityKirchhoffIsothropic(pla.youngs_modulus, pla.poisson_ratio)
+    shell_material = fea.ChMaterialShellKirchhoff(elasticity)
+    shell_material.SetDensity(pla.density)
+
+    q0 = rigid.initial_chrono_quat(chrono, motion)
+    center = chrono.ChVector3d(0.0, 0.0, motion.drum_center_z0)
+    rot = chrono.ChMatrix33d(q0)
+    fea.ChMeshFileLoader.BSTShellFromObjFile(
+        shell_mesh, str(contact_path), shell_material, 0.001, center, rot
+    )
+    if shell_mesh.GetNumNodes() == 0 or shell_mesh.GetNumElements() == 0:
+        raise SystemExit("the CRM contact skin OBJ produced an empty shell mesh")
+
+    skin_nodes = cast_xyz_nodes(fea, shell_mesh)
+    solid_points = np.array([rigid.vec_parts(n.GetPos()) for n in nodes], dtype=float)
+    skin_points = np.array([rigid.vec_parts(n.GetPos()) for n in skin_nodes], dtype=float)
+    nearest = nearest_targets(skin_points, solid_points)
+    distances = np.linalg.norm(skin_points - solid_points[nearest], axis=1)
+
+    for skin_node, target_index in zip(skin_nodes, nearest):
+        # Give the carrier node a mass comparable to the structural node it
+        # follows.  A near-zero mass makes the node-to-node constraint
+        # ill-conditioned and launches SPH particles out of the domain.
+        target = nodes[int(target_index)]
+        # Start the carrier exactly on its structural target.  Leaving the
+        # coarse-surface offset in place gives the node-node link an initial
+        # position error of up to 3.7 mm and produces an impulsive launch.
+        skin_node.SetPos(target.GetPos())
+        if hasattr(skin_node, "SetPosDt"):
+            skin_node.SetPosDt(target.GetPosDt())
+        skin_node.SetMass(max(target.GetMass(), 1.0e-8))
+        link = fea.ChLinkNodeNode()
+        link.Initialize(skin_node, target)
+        system.Add(link)
+
+    # Add the mesh only after its node states and masses are finalized so the
+    # system's initial state matches what the node-to-node links expect.
+    system.Add(shell_mesh)
+    print(
+        f"CRM contact skin: {len(skin_nodes)} nodes, {shell_mesh.GetNumElements()} shells, "
+        f"tied to solid; nearest distance median={np.median(distances):.4g} m, "
+        f"max={distances.max():.4g} m",
+        flush=True,
+    )
+    return shell_mesh
+
+
+def attach_hub_nodes(fea, system, spindle, hub_nodes) -> list:
+    """Tie each bore node to the rigid spindle; each link removes 3 DOFs."""
+    links = []
+    for node in hub_nodes:
+        link = fea.ChLinkNodeFrame()
+        # No attachment point is supplied: Initialize() captures the current
+        # node location in the spindle's local frame.
+        link.Initialize(node, spindle)
+        system.Add(link)
+        links.append(link)
+    return links
+
+
+def spin_ramp_omega(motion, t: float, ramp_time: float) -> float:
+    """Instantaneous spin speed for an optional linear spin-up ramp."""
+    elapsed = max(0.0, t - motion.settle_time)
+    if ramp_time <= 0.0 or elapsed >= ramp_time:
+        return motion.drum_omega
+    return motion.drum_omega * elapsed / ramp_time
+
+
+def spin_ramp_angle(motion, t: float, ramp_time: float) -> float:
+    """Spin angle whose derivative is ``spin_ramp_omega``."""
+    elapsed = max(0.0, t - motion.settle_time)
+    if ramp_time <= 0.0:
+        return motion.drum_omega * elapsed
+    if elapsed >= ramp_time:
+        return motion.drum_omega * (elapsed - 0.5 * ramp_time)
+    return 0.5 * motion.drum_omega * elapsed * elapsed / ramp_time
+
+
+def set_fea_drum_state(chrono, spindle, motion, t: float, ramp_time: float) -> None:
+    """Kinematic spindle state with the FEA-specific spin-up ramp."""
+    omega = spin_ramp_omega(motion, t, ramp_time)
+    angle = spin_ramp_angle(motion, t, ramp_time)
+    z = motion.drum_z(t)
+    axis = rigid.axis_vector(chrono, motion.drum_spin_axis)
+    q0 = rigid.initial_chrono_quat(chrono, motion)
+    q_spin = chrono.QuatFromAngleAxis(angle, axis)
+
+    spindle.SetPos(chrono.ChVector3d(0.0, 0.0, z))
+    spindle.SetRot(q_spin * q0)
+    moving = t >= motion.settle_time and z > motion.z_target
+    spindle.SetPosDt(chrono.ChVector3d(0.0, 0.0, -motion.lower_speed if moving else 0.0))
+    if motion.drum_spin_axis.upper() == "X":
+        omega_vec = (omega, 0.0, 0.0)
+    elif motion.drum_spin_axis.upper() == "Y":
+        omega_vec = (0.0, omega, 0.0)
+    else:
+        omega_vec = (0.0, 0.0, omega)
+    spindle.SetAngVelParent(chrono.ChVector3d(*omega_vec))
+
+
+def spin_axis_tuple(motion) -> tuple[float, float, float]:
+    axis = motion.drum_spin_axis.upper()
+    return {
+        "X": (1.0, 0.0, 0.0),
+        "Y": (0.0, 1.0, 0.0),
+        "Z": (0.0, 0.0, 1.0),
+    }[axis]
+
+
+def cross(a, b) -> tuple[float, float, float]:
+    return (
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    )
+
+
+def spindle_reaction(links, spindle, motion) -> tuple[float, float]:
+    """Return drive-axis torque and total force from all hub-link reactions."""
+    center = rigid.vec_parts(spindle.GetPos())
+    q = rigid.quat_parts(spindle.GetRot())
+    axis = spin_axis_tuple(motion)
+
+    torque = 0.0
+    total_force = [0.0, 0.0, 0.0]
+    for link in links:
+        local_force = rigid.vec_parts(link.GetReactionOnBody())
+        force = rigid.quat_rotate(q, local_force)
+        point = rigid.vec_parts(link.GetConstrainedNode().GetPos())
+        arm = (point[0] - center[0], point[1] - center[1], point[2] - center[2])
+        moment = cross(arm, force)
+        torque += moment[0] * axis[0] + moment[1] * axis[1] + moment[2] * axis[2]
+        for i in range(3):
+            total_force[i] += force[i]
+    return torque, math.sqrt(sum(v * v for v in total_force))
+
+
+def sph_positions(fluid, fsi, terrain) -> list:
+    """Return only SPH fluid positions, not CRM boundary/FEA BCE markers."""
+    positions = rigid.particle_positions(fluid, fsi)
+    return positions[: terrain.GetNumSPHParticles()]
+
+
+def max_nodal_displacement(nodes) -> float:
+    largest = 0.0
+    for node in nodes:
+        p = rigid.vec_parts(node.GetPos())
+        x0 = rigid.vec_parts(node.GetX0())
+        d2 = sum((p[i] - x0[i]) ** 2 for i in range(3))
+        largest = max(largest, d2)
+    return math.sqrt(largest)
+
+
+def max_von_mises(fea, mesh, stride: int) -> float:
+    return worst_stress_info(fea, mesh, stride)[1]
+
+
+def worst_stress_info(fea, mesh, stride: int) -> tuple[int, float, float, tuple[float, float, float]]:
+    """Return index, von Mises stress, volume, and centroid of the hot element."""
+    worst_index = -1
+    largest = 0.0
+    volume = 0.0
+    centroid = (0.0, 0.0, 0.0)
+    for i in range(0, mesh.GetNumElements(), stride):
+        element = fea.CastToChElementTetraCorot_4(mesh.GetElement(i))
+        if element is None:
+            continue
+        value = element.GetStress().GetEquivalentVonMises()
+        if value > largest:
+            largest = value
+            worst_index = i
+            volume = abs(element.ComputeVolume())
+            points = [rigid.vec_parts(element.GetTetrahedronNode(j).GetPos()) for j in range(4)]
+            centroid = tuple(sum(p[k] for p in points) / 4.0 for k in range(3))
+    return worst_index, largest, volume, centroid
+
+
+def worst_disp_info(nodes) -> tuple[int, float, tuple[float, float, float]]:
+    """Return index, magnitude, and vector of the largest displacement."""
+    worst_index = -1
+    largest = 0.0
+    vector = (0.0, 0.0, 0.0)
+    for i, node in enumerate(nodes):
+        p = rigid.vec_parts(node.GetPos())
+        x0 = rigid.vec_parts(node.GetX0())
+        d = tuple(p[k] - x0[k] for k in range(3))
+        mag2 = sum(v * v for v in d)
+        if mag2 > largest:
+            largest = mag2
+            worst_index = i
+            vector = d
+    return worst_index, math.sqrt(largest), vector
+
+
+def write_fea_config(path: Path, soil, run, pla: PlaParams, motion, node_path: Path,
+                     ele_path: Path, mesh, hub_nodes, capacity_volume: float,
+                     particle_mass: float, particle_mass_source: str,
+                     spin_ramp_time: float, contact_path: Path | None) -> None:
+    config = {
+        "model": "Chrono::CRM + FEA solid drum (spindle-driven)",
+        "soil": asdict(soil),
+        "friction_angle_deg": soil.friction_angle_deg,
+        "run": {**asdict(run), "active_box": list(run.active_box)},
+        "pla": asdict(pla),
+        "spin_ramp_time_s": spin_ramp_time,
+        "fea": {
+            "node_file": str(node_path),
+            "ele_file": str(ele_path),
+            "nodes": mesh.GetNumNodes(),
+            "elements": mesh.GetNumElements(),
+            "hub_nodes": len(hub_nodes),
+            "link_constraints": 3 * len(hub_nodes),
+            "contact": (
+                "terrain.AddFeaMesh(contact_mesh, False); no rigid drum obstacle"
+                if contact_path is not None
+                else "terrain.AddFeaMesh(mesh, False); no rigid drum obstacle"
+            ),
+            "contact_skin_file": str(contact_path) if contact_path is not None else None,
+        },
+        "geometry": {
+            "drum_radius_m": motion.drum_radius,
+            "drum_half_length_m": motion.drum_half_length,
+            "bed_height_m": motion.bed_height,
+            "target_bottom_clearance_m": motion.target_bottom_clearance,
+            "spin_axis_global": motion.drum_spin_axis,
+            "capacity_volume_m3": capacity_volume,
+            "capacity_source": "user override" if run.capacity_volume else "pi*r_i^2*L",
+        },
+        "particle_mass_kg": particle_mass,
+        "particle_mass_source": particle_mass_source,
+        "fill_ratio_definition": "retained SPH mass / (bulk density * nominal cavity volume)",
+    }
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2)
+        handle.write("\n")
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    # The rigid driver defaults to 5e-4 s; the FEA/SPH system is only stable on
+    # the promoted mesh at 2.5e-4 s.  An explicit --dt still wins.
+    if args.dt is None:
+        args.dt = 2.5e-4
+    soil = rigid.make_soil(args)
+    run = rigid.make_run_params(args)
+    pla = make_pla(args)
+
+    if args.print_soil:
+        print(soil.summary())
+        return 0
+
+    node_path, ele_path = resolve_fea_mesh(args)
+    motion = replace(
+        MOTION_DEFAULT,
+        t_max=run.duration,
+        settle_time=run.settle_time,
+        lower_speed=run.descent_speed,
+        drum_omega=run.omega,
+        bed_height=run.bed_height,
+        drum_spin_axis=run.spin_axis,
+        drum_rest_clearance=MOTION_DEFAULT.drum_rest_clearance + args.initial_gap,
+    )
+    capacity_volume = (
+        run.capacity_volume
+        if run.capacity_volume is not None
+        else math.pi * run.inner_radius**2 * (2.0 * motion.drum_half_length)
+    )
+    if capacity_volume <= 0.0:
+        raise SystemExit("capacity volume must be positive")
+
+    surface_z = motion.floor_z + motion.bed_height
+    print(soil.summary(), flush=True)
+    print(pla.summary(), flush=True)
+    print(
+        "\n".join(
+            [
+                f"CRM+FEA run: spacing={run.spacing:g} m, dt={run.dt:g} s, "
+                f"duration={run.duration:g} s, fps={run.fps:g}",
+                f"FEA mesh: {node_path.name} / {ele_path.name}",
+                f"drum: R={motion.drum_radius:g} m, half-length={motion.drum_half_length:g} m, "
+                f"spin={motion.drum_spin_axis.upper()}, omega={run.omega:g} rad/s",
+                f"descent: {run.descent_speed:g} m/s, z0={motion.drum_center_z0:.4f} m -> "
+                f"{motion.z_target:.4f} m, bed surface z={surface_z:.4f} m",
+                f"active SPH box: {run.active_box}, capacity={capacity_volume:.6g} m^3 "
+                f"({capacity_volume * soil.density:.4f} kg)",
+                f"spin-up ramp: {args.spin_ramp_time:g} s",
+            ]
+        ),
+        flush=True,
+    )
+
+    chrono, fsi, veh = rigid.import_crm_modules()
+    try:
+        import pychrono.fea as fea
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise SystemExit("this PyChrono build does not expose pychrono.fea") from exc
+
+    out_dir = args.output_dir.resolve()
+    if not args.no_output:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    chrono.SetChronoOutputPath(str(out_dir) + "/")
+
+    system = chrono.ChSystemNSC()
+    if hasattr(system, "SetCollisionSystemType") and hasattr(chrono, "ChCollisionSystem"):
+        system.SetCollisionSystemType(chrono.ChCollisionSystem.Type_BULLET)
+    system.SetTimestepperType(chrono.ChTimestepper.Type_EULER_IMPLICIT_LINEARIZED)
+    # Barzilai-Borwein and PSOR (used elsewhere in this project) reject systems
+    # with FEA stiffness/damping matrices.  A diagonally preconditioned GMRES
+    # solver with a bounded iteration count is a practical compromise here.
+    solver = chrono.ChSolverGMRES()
+    solver.SetMaxIterations(args.solver_iterations)
+    solver.SetTolerance(args.solver_tolerance)
+    solver.EnableDiagonalPreconditioner(True)
+    system.SetSolver(solver)
+
+    terrain = veh.CRMTerrain(system, run.spacing)
+    terrain.SetVerbose(False)
+    terrain.SetGravitationalAcceleration(chrono.ChVector3d(0.0, 0.0, MOTION_DEFAULT.gravity))
+    terrain.SetStepSizeCFD(run.dt)
+    if hasattr(terrain, "SetStepsizeMBD"):
+        terrain.SetStepsizeMBD(run.dt)
+    terrain.SetActiveDomain(chrono.ChVector3d(*run.active_box))
+    if hasattr(terrain, "SetFreeFlowDuration"):
+        terrain.SetFreeFlowDuration(run.settle_time)
+    elif hasattr(terrain, "SetActiveDomainDelay"):
+        terrain.SetActiveDomainDelay(run.settle_time)
+
+    soil.apply(fsi, terrain)
+    rigid.configure_sph(fsi, terrain, run)
+
+    spindle = create_spindle(chrono, system, motion)
+    mesh, nodes, hub_nodes, _material = load_fea_drum(
+        chrono, fea, system, motion, node_path, ele_path, pla
+    )
+    contact_mesh = mesh
+    contact_path = None
+    if args.use_contact_skin:
+        contact_path = (
+            args.contact_obj or ROOT / "fea" / "LunarDrumScrew_m_fea_contact_2000.obj"
+        ).resolve()
+        contact_mesh = create_contact_skin(
+            chrono, fea, system, nodes, contact_path, motion, pla
+        )
+    links = attach_hub_nodes(fea, system, spindle, hub_nodes)
+    print(
+        f"FEA drum: {mesh.GetNumNodes()} nodes, {mesh.GetNumElements()} tets, "
+        f"{len(hub_nodes)} hub nodes, {3 * len(links)} spindle constraints",
+        flush=True,
+    )
+
+    # Two-way contact on the tetrahedral solid's boundary faces.  The FEA tire
+    # demo in Chrono uses inward 2-D BCE markers; the default centered pattern
+    # places markers on both sides of a thin shell/solid surface and produces
+    # grossly excessive contact forces.  The spindle is intentionally NOT
+    # registered with AddRigidBody: only the FEA mesh contacts the soil.
+    fluid_early = rigid.get_fluid_system(terrain, fsi)
+    fluid_early.SetNumBCELayers(args.bce_layers)
+    if hasattr(terrain, "SetBcePattern2D"):
+        terrain.SetBcePattern2D(fsi.BcePatternMesh2D_INWARD, False)
+    terrain.AddFeaMesh(contact_mesh, False)
+
+    box_size = chrono.ChVector3d(
+        2.0 * motion.bed_x_half, 2.0 * motion.bed_y_half, motion.bed_height
+    )
+    box_center = chrono.ChVector3d(0.0, 0.0, motion.floor_z)
+    terrain.Construct(box_size, box_center, rigid.side_flags_open_top(fsi))
+    terrain.Initialize()
+
+    fluid = rigid.get_fluid_system(terrain, fsi)
+    particle_mass, mass_source = rigid.get_particle_mass(fluid, soil, run.spacing)
+    flex_markers = fluid.GetNumFlexBodyMarkers() if hasattr(fluid, "GetNumFlexBodyMarkers") else 0
+    print(
+        f"SPH particles: {terrain.GetNumSPHParticles()}, "
+        f"boundary BCE: {terrain.GetNumBoundaryBCEMarkers()}, "
+        f"FEA flex BCE: {flex_markers}, "
+        f"particle mass: {particle_mass:.6g} kg ({mass_source})",
+        flush=True,
+    )
+
+    writer = None
+    state_file = None
+    if not args.no_output:
+        write_fea_config(
+            out_dir / "config.json", soil, run, pla, motion, node_path, ele_path,
+            mesh, hub_nodes, capacity_volume, particle_mass, mass_source,
+            args.spin_ramp_time,
+            contact_path,
+        )
+        state_file = (out_dir / "summary.csv").open("w", newline="", encoding="utf-8")
+        writer = csv.DictWriter(state_file, fieldnames=FEA_METRIC_FIELDS)
+        writer.writeheader()
+
+    peak_fill = 0.0
+    work_j = 0.0
+    last_row = {}
+    frame = 0
+    wall_start = time.perf_counter()
+    next_progress = 0.0
+
+    def record(t: float, axis_torque: float, reaction_force: float) -> None:
+        nonlocal frame, peak_fill, last_row
+        positions = sph_positions(fluid, fsi, terrain)
+        with_flags = bool(args.save_particles and not args.no_output)
+        metrics, flags = rigid.compute_metrics(
+            positions, spindle, run, motion, soil, particle_mass,
+            capacity_volume, surface_z, with_flags=with_flags,
+        )
+        peak_fill = max(peak_fill, metrics["fill_ratio_mass"])
+        angle = math.degrees(spin_ramp_angle(motion, t, args.spin_ramp_time))
+        stress_index, max_stress, stress_volume, stress_center = worst_stress_info(
+            fea, mesh, args.stress_stride
+        )
+        disp_index, max_disp, disp_vector = worst_disp_info(nodes)
+        row = {
+            "frame": frame,
+            "time_s": f"{t:.6f}",
+            "wall_s": f"{time.perf_counter() - wall_start:.3f}",
+            "drum_z_m": f"{rigid.vec_parts(spindle.GetPos())[2]:.7f}",
+            "spin_deg": f"{angle:.3f}",
+            "omega_rad_s": f"{run.omega:.6g}",
+            "sph_particles": metrics["sph_particles"],
+            "inside_drum": metrics["inside_drum"],
+            "lifted": metrics["lifted"],
+            "excavated": metrics["excavated"],
+            "fill_ratio_count": f"{metrics['fill_ratio_count']:.6f}",
+            "fill_ratio_mass": f"{metrics['fill_ratio_mass']:.6f}",
+            "peak_fill_ratio_mass": f"{peak_fill:.6f}",
+            "capacity_m3": f"{capacity_volume:.9g}",
+            "particle_mass_kg": f"{particle_mass:.9g}",
+            "fluid_torque_x_nm": f"{axis_torque:.6g}",
+            "input_power_w": f"{max(0.0, -axis_torque * run.omega):.6g}",
+            "work_j": f"{work_j:.6g}",
+            "specific_energy_j_kg": f"{work_j / max(metrics['excavated_mass_kg'], 1e-12):.6g}",
+            "spindle_axis_torque_nm": f"{axis_torque:.6g}",
+            "spindle_reaction_force_n": f"{reaction_force:.6g}",
+            "max_nodal_displacement_m": f"{max_disp:.6g}",
+            "max_von_mises_pa": f"{max_stress:.6g}",
+        }
+        if writer is not None:
+            writer.writerow(row)
+            state_file.flush()
+        if flags is not None:
+            rigid.write_particle_csv(out_dir / f"particles_{frame:06d}.csv", positions, flags)
+        last_row = row
+        frame += 1
+        print(
+            f"frame {frame - 1:05d}  t={t:7.3f}s  inside={metrics['inside_drum']:6d}  "
+            f"fill={metrics['fill_ratio_mass']:.4f}  peak={peak_fill:.4f}  "
+            f"disp={max_disp:.4g}m  vm={max_stress / 1e6:.4g}MPa  "
+            f"tau={axis_torque:.4g}Nm",
+            flush=True,
+        )
+        if args.debug_stress:
+            print(
+                f"  hot element {stress_index}: vm={max_stress / 1e6:.6g} MPa, "
+                f"volume={stress_volume:.6g} m^3, "
+                f"centroid={tuple(round(v, 5) for v in stress_center)}; "
+                f"disp node {disp_index}: |d|={max_disp:.6g} m, "
+                f"d={tuple(round(v, 6) for v in disp_vector)}",
+                flush=True,
+            )
+
+    set_fea_drum_state(chrono, spindle, motion, 0.0, args.spin_ramp_time)
+    axis_torque, reaction_force = spindle_reaction(links, spindle, motion)
+    record(0.0, axis_torque, reaction_force)
+    next_output = 1.0 / run.fps
+
+    t = 0.0
+    try:
+        while t < run.duration - 1.0e-12:
+            h = min(run.dt, run.duration - t)
+            set_fea_drum_state(chrono, spindle, motion, t, args.spin_ramp_time)
+            terrain.Synchronize(t)
+            terrain.Advance(h)
+            t += h
+            set_fea_drum_state(chrono, spindle, motion, t, args.spin_ramp_time)
+
+            if args.debug_fea:
+                disp = max_nodal_displacement(nodes)
+                extent = max(
+                    abs(component)
+                    for node in nodes
+                    for component in rigid.vec_parts(node.GetPos())
+                )
+                forces = [rigid.vec_parts(node.GetForce()) for node in nodes]
+                fmags = [math.sqrt(sum(v * v for v in f)) for f in forces]
+                worst = max(range(len(fmags)), key=fmags.__getitem__)
+                wpos = rigid.vec_parts(nodes[worst].GetPos())
+                print(
+                    f"  step {frame:05d}: max_disp={disp:.6g} m, max_abs={extent:.6g} m, "
+                    f"max_F={fmags[worst]:.6g} N at {tuple(round(v, 5) for v in wpos)}, "
+                    f"sum_F={sum(fmags):.6g} N",
+                    flush=True,
+                )
+
+            axis_torque, reaction_force = spindle_reaction(links, spindle, motion)
+            fluid_power = max(0.0, -axis_torque * run.omega)
+            work_j += fluid_power * h
+
+            if t >= next_output - 1.0e-12 or t >= run.duration - 1.0e-12:
+                record(t, axis_torque, reaction_force)
+                next_output += 1.0 / run.fps
+
+            if t >= next_progress:
+                print(f"  t={t:7.3f}s / {run.duration:g}s", flush=True)
+                next_progress += 1.0
+    finally:
+        if state_file is not None:
+            state_file.close()
+
+    print(
+        "\nCRM+FEA run complete: "
+        f"final_fill={last_row.get('fill_ratio_mass')} "
+        f"peak_fill={peak_fill:.6f} "
+        f"inside={last_row.get('inside_drum')} "
+        f"excavated={last_row.get('excavated')} "
+        f"max_disp={last_row.get('max_nodal_displacement_m')} m "
+        f"max_von_mises={last_row.get('max_von_mises_pa')} Pa "
+        f"axis_torque={axis_torque:.4g} Nm "
+        f"work={work_j:.4g} J",
+        flush=True,
+    )
+    if not args.no_output:
+        print(f"Output: {out_dir}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

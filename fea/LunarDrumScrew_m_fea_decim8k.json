@@ -1,0 +1,50 @@
+{
+  "source_step": "/mnt/P3/Programs/Linux/pychrono/geometry/LunarDrumScrew_m.step",
+  "pipeline": "OpenCASCADE STL -> MeshFix -> TetGen",
+  "outputs": {
+    "abaqus": "/tmp/opencode/feamesh8k.inp",
+    "tetgen_node": "/tmp/opencode/feamesh8k.node",
+    "tetgen_ele": "/tmp/opencode/feamesh8k.ele",
+    "surface_stl": "/tmp/opencode/feamesh8k_surface.stl"
+  },
+  "units": "metres",
+  "unit_scale": 0.001,
+  "cad_solids": 1,
+  "cad_faces": 53,
+  "surface_deflection_m": 0.0006000000000000001,
+  "angular_deflection_rad": 0.15,
+  "max_surface_edge_m": 0.012,
+  "surface_target_faces": 8000,
+  "surface_faces_before_decimation": 20436,
+  "surface_points": 8721,
+  "surface_faces": 17446,
+  "tetgen_switches": "pYQ",
+  "rotation_axis": "Z",
+  "nodes": 8721,
+  "tetrahedra": 32321,
+  "hub_node_set": "HUB",
+  "hub_nodes": 220,
+  "hub_selection": "radial distance <= 0.0015 m about Z axis",
+  "surface_node_set": "SURFACE",
+  "surface_nodes": 8721,
+  "bbox_min_m": [
+    -0.06103704452514649,
+    -0.06102738952636719,
+    -0.03300001907348633
+  ],
+  "bbox_max_m": [
+    0.06103704452514649,
+    0.06102738952636719,
+    0.03300004577636719
+  ],
+  "cad_volume_m3": 7.84079956219858e-05,
+  "mesh_volume_m3": 7.900593554726561e-05,
+  "volume_relative_error": 0.007626007023091796,
+  "edge_quality": {
+    "min_edge_m": 6.91877024421388e-05,
+    "median_edge_m": 0.0040859719366467765,
+    "max_edge_m": 0.017434835851861362,
+    "min_max_edge_ratio": 0.010350463046850198,
+    "median_max_edge_ratio": 0.21345187838287216
+  }
+}

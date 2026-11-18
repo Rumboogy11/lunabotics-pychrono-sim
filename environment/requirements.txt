@@ -1,0 +1,17 @@
+# GPU DEME port -- install in a Python 3.10+ environment with an NVIDIA GPU.
+deme[cuda12]==3.1.0
+
+# Default DEME frame viewer (Matplotlib/Tk). Install in the same DEME env.
+matplotlib>=3.8
+
+# CPU PyChrono core port -- current PyPI wheel is CPython 3.12 only.
+# This wheel lacks pychrono.fsi/vehicle, so it cannot run the CRM driver.
+pychrono==10.0.0rc1
+
+# Chrono::CRM (primary) is the local source build in chrono-src/chrono-env/,
+# Python 3.12 + CMake 3.31 + SWIG + CUDA 12.9. It is not a pip requirement.
+
+# Optional preprocessing only (regenerating OBJ / simplified DEME mesh).
+# The generated files are already shipped, so these are not needed to run.
+trimesh>=4.0
+fast-simplification>=0.2
