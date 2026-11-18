@@ -44,6 +44,12 @@ Keep the rigid kinematic CRM model as the production design driver. See
 [`crm/FEA_COUPLING.md`](crm/FEA_COUPLING.md) for the stable settings,
 mesh-generation route, and unresolved contact/rigid-rotation issues.
 
+A combined production runner is also available:
+`./run_full_model.sh` executes the rigid CRM design run and the FEA structural
+run with shared settings and writes `combined_report.json` plus
+`combined_summary.csv`. See [`FULL_MODEL.md`](FULL_MODEL.md); the FEA stage is
+included intentionally despite the validation caveats above.
+
 Actual lunar regolith is mostly tens to hundreds of micrometres in size. The
 current 1.8 mm DEM grains are roughly 10–40× too large relative to the 61 mm
 drum radius, so their absolute grain size is not physically representative.
