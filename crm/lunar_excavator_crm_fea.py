@@ -135,6 +135,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="floor FEA nodal masses at this value in kg (default: 0, off)")
     p.add_argument("--stress-stride", type=int, default=1,
                    help="evaluate von Mises stress on every Nth element at output (default: 1)")
+    p.add_argument("--solver", choices=("gmres", "sparse-lu", "sparse-qr"), default="gmres",
+                   help="MBS linear solver for the FEA stiffness matrix (default: gmres)")
     p.add_argument("--solver-iterations", type=int, default=20,
                    help="GMRES iterations per MBS step with FEA stiffness (default: 20)")
     p.add_argument("--solver-tolerance", type=float, default=1.0e-3,
@@ -145,10 +147,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="print worst stress element and displacement node at output frames")
     p.add_argument("--bce-layers", type=int, default=1,
                    help="flexible BCE layers for FEA/SPH contact (default: 1, stability choice)")
+    p.add_argument("--check-fea-embedded", action="store_true",
+                   help="prune SPH particles embedded in the FEA solid at initialization")
     p.add_argument("--initial-gap", type=float, default=0.0,
                    help="raise the initial drum by this distance in m to avoid STEP/SPH overlap")
     p.add_argument("--spin-ramp-time", type=float, default=0.0,
                    help="linearly ramp spin speed over this duration in s (default: 0, immediate)")
+    p.add_argument("--no-initial-solid-velocity", action="store_true",
+                   help="start solid nodes at rest instead of with the rigid spindle velocity")
+    p.add_argument("--timestepper", choices=("euler", "hht"), default="euler",
+                   help="MBD timestepper for the FEA system (default: euler)")
     p.set_defaults(output_dir=Path("Output_CRM_LunarExcavator_FEA"))
     return p
 
@@ -407,6 +415,36 @@ def spin_ramp_angle(motion, t: float, ramp_time: float) -> float:
     return 0.5 * motion.drum_omega * elapsed * elapsed / ramp_time
 
 
+def set_solid_initial_velocity(chrono, nodes, motion, t0: float = 0.0) -> None:
+    """Start every solid node with the rigid-body spindle velocity.
+
+    Without this, the hub nodes jump to full spindle velocity at the first step
+    while the rest of the PLA starts at rest.  The shaft then has to spin the
+    whole drum through the tiny bore, producing a large initial torsional wave
+    and artificial stress growth.
+    """
+    omega = motion.drum_omega if t0 >= motion.settle_time else 0.0
+    axis = motion.drum_spin_axis.upper()
+    omega_vec = {
+        "X": (omega, 0.0, 0.0),
+        "Y": (0.0, omega, 0.0),
+        "Z": (0.0, 0.0, omega),
+    }[axis]
+    center = (0.0, 0.0, motion.drum_center_z0)
+    moving = t0 >= motion.settle_time and center[2] > motion.z_target
+    descent = (0.0, 0.0, -motion.lower_speed if moving else 0.0)
+
+    for node in nodes:
+        p = rigid.vec_parts(node.GetPos())
+        r = tuple(p[k] - center[k] for k in range(3))
+        rotational = cross(omega_vec, r)
+        velocity = tuple(rotational[k] + descent[k] for k in range(3))
+        node.SetPosDt(chrono.ChVector3d(*velocity))
+        if hasattr(node, "SetPosDt2"):
+            centripetal = cross(omega_vec, rotational)
+            node.SetPosDt2(chrono.ChVector3d(*centripetal))
+
+
 def set_fea_drum_state(chrono, spindle, motion, t: float, ramp_time: float) -> None:
     """Kinematic spindle state with the FEA-specific spin-up ramp."""
     omega = spin_ramp_omega(motion, t, ramp_time)
@@ -632,16 +670,34 @@ def main() -> int:
     chrono.SetChronoOutputPath(str(out_dir) + "/")
 
     system = chrono.ChSystemNSC()
+    system.SetGravitationalAcceleration(
+        chrono.ChVector3d(0.0, 0.0, MOTION_DEFAULT.gravity)
+    )
     if hasattr(system, "SetCollisionSystemType") and hasattr(chrono, "ChCollisionSystem"):
         system.SetCollisionSystemType(chrono.ChCollisionSystem.Type_BULLET)
-    system.SetTimestepperType(chrono.ChTimestepper.Type_EULER_IMPLICIT_LINEARIZED)
+    if args.timestepper == "hht":
+        system.SetTimestepperType(chrono.ChTimestepper.Type_HHT)
+        hht = chrono.CastToChTimestepperHHT(system.GetTimestepper())
+        hht.SetAlpha(-0.2)
+        hht.SetMaxIters(5)
+        hht.SetAbsTolerances(1.0e-2)
+        hht.SetStepControl(False)
+        hht.SetMinStepSize(run.dt)
+    else:
+        system.SetTimestepperType(chrono.ChTimestepper.Type_EULER_IMPLICIT_LINEARIZED)
     # Barzilai-Borwein and PSOR (used elsewhere in this project) reject systems
-    # with FEA stiffness/damping matrices.  A diagonally preconditioned GMRES
-    # solver with a bounded iteration count is a practical compromise here.
-    solver = chrono.ChSolverGMRES()
-    solver.SetMaxIterations(args.solver_iterations)
-    solver.SetTolerance(args.solver_tolerance)
-    solver.EnableDiagonalPreconditioner(True)
+    # with FEA stiffness/damping matrices.  Chrono's own FEA tire demo uses a
+    # direct sparse solver, so expose the available direct solvers as well as
+    # the previously used diagonally preconditioned GMRES fallback.
+    if args.solver == "sparse-lu":
+        solver = chrono.ChSolverSparseLU()
+    elif args.solver == "sparse-qr":
+        solver = chrono.ChSolverSparseQR()
+    else:
+        solver = chrono.ChSolverGMRES()
+        solver.SetMaxIterations(args.solver_iterations)
+        solver.SetTolerance(args.solver_tolerance)
+        solver.EnableDiagonalPreconditioner(True)
     system.SetSolver(solver)
 
     terrain = veh.CRMTerrain(system, run.spacing)
@@ -663,6 +719,8 @@ def main() -> int:
     mesh, nodes, hub_nodes, _material = load_fea_drum(
         chrono, fea, system, motion, node_path, ele_path, pla
     )
+    if not args.no_initial_solid_velocity:
+        set_solid_initial_velocity(chrono, nodes, motion)
     contact_mesh = mesh
     contact_path = None
     if args.use_contact_skin:
@@ -688,7 +746,7 @@ def main() -> int:
     fluid_early.SetNumBCELayers(args.bce_layers)
     if hasattr(terrain, "SetBcePattern2D"):
         terrain.SetBcePattern2D(fsi.BcePatternMesh2D_INWARD, False)
-    terrain.AddFeaMesh(contact_mesh, False)
+    terrain.AddFeaMesh(contact_mesh, args.check_fea_embedded)
 
     box_size = chrono.ChVector3d(
         2.0 * motion.bed_x_half, 2.0 * motion.bed_y_half, motion.bed_height
@@ -817,10 +875,18 @@ def main() -> int:
                 fmags = [math.sqrt(sum(v * v for v in f)) for f in forces]
                 worst = max(range(len(fmags)), key=fmags.__getitem__)
                 wpos = rigid.vec_parts(nodes[worst].GetPos())
+                center = rigid.vec_parts(spindle.GetPos())
+                axis = spin_axis_tuple(motion)
+                contact_torque = 0.0
+                for node, force in zip(nodes, forces):
+                    p = rigid.vec_parts(node.GetPos())
+                    arm = tuple(p[k] - center[k] for k in range(3))
+                    moment = cross(arm, force)
+                    contact_torque += moment[0] * axis[0] + moment[1] * axis[1] + moment[2] * axis[2]
                 print(
                     f"  step {frame:05d}: max_disp={disp:.6g} m, max_abs={extent:.6g} m, "
                     f"max_F={fmags[worst]:.6g} N at {tuple(round(v, 5) for v in wpos)}, "
-                    f"sum_F={sum(fmags):.6g} N",
+                    f"sum_F={sum(fmags):.6g} N, nodal_tau={contact_torque:.6g} Nm",
                     flush=True,
                 )
 
