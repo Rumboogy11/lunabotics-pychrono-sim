@@ -13,25 +13,52 @@ drum, and the same CRM SPH soil as the production driver. The supported default
 mesh is `fea/LunarDrumScrew_m_fea_decim8k.node` /
 `fea/LunarDrumScrew_m_fea_decim8k.ele`.
 
-The path is **numerically stable for short runs, but the stress and fill results
-are not engineering-validated**. Treat it as a feasibility check only:
+The path is **improved for short runs, but the stress and fill results are not
+engineering-validated**. Treat it as a feasibility check only.
 
-- default smoke result: final fill `0.00551`, peak fill `0.00551`, inside `2`,
-  excavated `3`, maximum nodal displacement `2.96e-4 m`, maximum von Mises
-  stress `9.94e+8 Pa` (`~994 MPa`), spindle torque `~-61.7 N·m`, work `9.72 J`;
-- the same case in a repeat run gave `~974 MPa` and `~-60.2 N·m`;
-- the production rigid-body CRM case with the same SPH spacing reaches fill
-  around `0.20` over `1.0 s`. The FEA fill is therefore grossly under-predicted;
-- PLA strength is roughly `50–70 MPa`, while reported FEA stress exceeds that
-  within `0.05 s`. Those magnitudes are a modeling artifact, not a design result;
-- a default `1.0 s` run does not remain stable. It reaches `2.46 GPa` and
-  `1.12 mm` displacement by `0.2 s`, `57.8 GPa` and `17.3 mm` by `0.4 s`, then
-  aborts near `0.8 s` with `[calcHashD] ... out of min boundary ...`.
+Driver and SPH-coupling fixes applied in the local source/runtime:
+
+- spindle motion is prescribed by Chrono motor constraints with motion functions
+  (ground guide -> prismatic linear-position descent motor -> slider -> revolute
+  rotation-speed motor -> spindle), instead of per-step state overrides on a
+  fixed/free body; FEA hub nodes remain tied to the spindle with
+  `ChLinkNodeFrame`;
+- default FEA spin-up uses a `0.5 s` linear speed ramp and FEA nodal masses are
+  floored by default (`1e-6 kg`) to stabilize sliver nodes;
+- local `chrono-src` CRM/SPH RHS handling for flex BCE coupling was hardened
+  (no constitutive stress-rate evolution written for non-fluid BCE markers,
+  no FSI RHS force for BCE markers without fluid-neighbor support, degenerate
+  pair guard), and rebuilt FSI artifacts were copy-installed into
+  `chrono-install` (`libChrono_fsisph.so`, `libChrono_fsi.so`,
+  `share/chrono/python/pychrono/_fsi.so`). `chrono-src`/build/install remain
+  local to this workspace.
+
+Short-run validation with the defaults below (12 mm, 2.5e-4 s, 1 BCE layer,
+GMRES 20/1e-3, spin ramp 0.5 s):
+
+- `0.05 s`: final/peak fill `0.00551`, inside `2`, excavated `3`, max
+  displacement `1.49e-5 m`, max von Mises `6.58 MPa`, spindle torque
+  `0.176 N·m`, work `0.105 J` (log: `/tmp/opencode/fea_fixed_005.log`);
+- `0.20 s`: final/peak fill `0.00551`, inside `2`, excavated `3`, max
+  displacement `1.29e-4 m`, max von Mises `59.3 MPa`, spindle torque
+  `1.48 N·m`, work `0.290 J` (log: `/tmp/opencode/fea_fixed_02.log`).
+  Stress/displacement trend upward over this interval (near PLA strength by
+  0.2 s) and should not be interpreted as converged.
+
+Longer-run behavior remains non-physical:
+
+- `0.50 s` (same settings, 20 fps sampling): stress/displacement grow after the
+  early stable phase to `3907 MPa` and `6.21 mm` by `0.50 s` with large torque
+  excursions (`156 N·m`, work `14.9 J`, log: `/tmp/opencode/fea_fixed_05.log`);
+- rigid CRM comparison at `0.20 s` / 12 mm: final fill `0.165`, peak `0.198`,
+  inside `60`, excavated `93`, work `0.326 J` (`./crm/run.sh ...`). The FEA case
+  therefore still severely under-predicts fill/excavation and is not suitable
+  for torque/energy comparison.
 
 Keep the rigid-body CRM model as the production design driver. Do not report FEA
-stress or torque as structural validation until the contact and rigid-rotation
-issues below are resolved. The FEA path is currently a short-run feasibility
-demo only.
+stress or torque as structural validation. The FEA path is currently a short-run
+feasibility/diagnostic tool pending further stabilization (kernel support/BCE
+layering, contact density and initial contact, and long-run coupled dynamics).
 
 ## What Chrono supports
 
@@ -65,10 +92,16 @@ CRM demo is
 
 - loads the TetGen solid mesh with `fea.ChMeshFileLoader.FromTetGenFile`;
 - assigns nodal masses manually from element volume and PLA density because
-  `FromTetGenFile` creates `ChNodeFEAxyz` nodes with zero mass;
+  `FromTetGenFile` creates `ChNodeFEAxyz` nodes with zero mass, and floors
+  sliver-node masses by default (`--min-nodal-mass`, default `1e-6 kg`);
 - selects hub nodes from the loaded mesh itself (radius `<= 0.0015 m`), so a
   mesh converter with an empty `HUB` set is still usable;
-- creates a kinematic rigid spindle body that follows the analytic drum pose;
+- creates a ground guide, translating slider, and rotating spindle connected by
+  Chrono motor constraints with motion functions (prismatic linear-position
+  descent and revolute rotation-speed spin with configurable ramp), avoiding
+  per-step body state overrides;
+- initializes spindle/FEA node kinematics consistently with the prescribed
+  motion at `t=0`;
 - ties hub nodes to the spindle with `fea.ChLinkNodeFrame` (three constraints
   per node), leaving the rest of the PLA solid deformable;
 - reconstructs spindle drive torque from hub-link reaction moments about the
@@ -140,10 +173,11 @@ The FEA-specific defaults are:
 | timestep | `2.5e-4 s` | FEA/SPH is unstable at the rigid default `5e-4 s` |
 | BCE layers | `1` | more layers trigger domain/boundary instability here |
 | BCE pattern | `BcePatternMesh2D_INWARD` | required for a closed solid boundary |
-| GMRES | `20 / 1e-3` | tighter solves crashed the SPH domain |
-| spin ramp | `0 s` | optional `--spin-ramp-time` did not fix stress drift |
+| GMRES | `20 / 1e-3` | practical direct/iterative choice for FEA stiffness coupling |
+| spin ramp | `0.5 s` | avoids impulsive startup; motion prescribed by motor functions |
+| nodal mass floor | `1e-6 kg` | stabilizes sliver nodes from CAD-derived tetrahedral mesh |
 
-Reproduce the smoke case explicitly:
+Reproduce the short-run check explicitly:
 
 ```bash
 ./crm/run_fea.sh --duration 0.05 --spacing 0.012 --dt 0.00025 \
@@ -152,54 +186,45 @@ Reproduce the smoke case explicitly:
 ```
 
 `--bce-layers 1` emits Chrono's warning that fewer than three layers may cause
-insufficient kernel support and particle leakage. It is accepted only because
-the tested multi-layer configurations are unstable; it is not a validated
-contact setup.
-
-A solver test with `100 / 1e-6` crashed after the first output with
-`[calcHashD] index ... out of min boundary ...`, so tighter convergence is not a
-solution.
+insufficient kernel support and particle leakage. It remains a likely contributor
+to long-run instability and under-predicted excavation, but tested multi-layer
+configurations were not stable in this setup.
 
 ### Long-run behavior
 
-A `1.0 s` run from these defaults was attempted with the promoted mesh:
-
-```bash
-./crm/run_fea.sh --duration 1.0 --spacing 0.012 --fps 5 \
-    --no-output --stress-stride 200
-```
-
-Fill stayed at `0.00551` (two SPH particles inside) for the whole run, while
-stress, displacement, and torque grew without bound:
+With the motor-driven spindle, nodal-mass flooring, and local SPH RHS fixes,
+short runs are stable and physically plausible in magnitude (`0.05 s`: ~6.6 MPa;
+`0.20 s`: ~59 MPa, trending upward). However, longer runs still diverge:
 
 | Time | Max von Mises | Max displacement | Spindle torque |
 |---:|---:|---:|---:|
-| 0.2 s | 2.46 GPa | 1.12 mm | -145 N·m |
-| 0.4 s | 57.8 GPa | 17.3 mm | -554 N·m |
-| 0.6 s | 117 GPa | 75.0 mm | -2139 N·m |
-| 0.8 s | 419 GPa | 139 mm | -555 N·m |
+| 0.05 s | 6.58 MPa | 14.9 µm | 0.176 N·m |
+| 0.20 s | 59.3 MPa | 129 µm | 1.48 N·m |
+| 0.30 s | 729 MPa | 1.12 mm | 27.4 N·m |
+| 0.50 s | 3907 MPa | 6.21 mm | 156 N·m |
 
-At about `0.8 s` the run aborted with
-`[calcHashD] index ... out of min boundary ...` and `SIGABRT`. This is numerical
-divergence, not a converged structural result. Do not extend the FEA duration
-beyond the short smoke case without first fixing the contact/kinematic model.
+Fill remains ~`0.0055` (2 particles inside) throughout these runs, far below the
+rigid CRM baseline (~`0.165–0.198` at 0.2 s). Do not treat results beyond the
+short-run feasibility window as converged or physically meaningful.
 
-## Why the stress is not yet valid
+## Remaining limitations
 
-Diagnostics in `--debug-stress` show the hot element is a small tet near the top
-of the drum while the largest displacement is a steadily growing shear relative
-to the small bore. This points to drive/contact modeling, not a PLA failure:
+Motor-driven spindle kinematics and SPH RHS hardening removed the dominant
+short-run stress artifacts, but the coupled long-run response is still not
+validated:
 
-- only the `~1.5 mm` bore nodes are tied to the spindle; the rest of the solid
-  must be spun up and loaded through that small radius;
-- increasing the rigid hub to `10 mm` made stress and torque much worse
-  (`~44 GPa`, `~-1.4e4 N·m`);
-- adding a `0.1 s` spin ramp with the larger hub still reached `~35.8 GPa`;
 - the flexible boundary has 8,721 surface nodes/BCE markers against only 576
-  SPH particles (`~15x` marker/particle ratio), so contact is over-constrained;
-- torque is about `60 N·m` in FEA versus about `0.25 N·m` in the rigid
-  production case;
-- fill stays near zero while rigid CRM excavates substantially more soil.
+  SPH particles (`~15x` marker/particle ratio), so contact sampling/support is
+  poorly matched at 12 mm spacing and 1 BCE layer;
+- fill remains near zero while rigid CRM excavates substantially more soil at
+  the same spacing, indicating the FEA/SPH contact and excavation interaction is
+  still not representative;
+- stress/displacement grow over time after an initially plausible short-run
+  phase, so constraint coupling, mass/stiffness distribution, contact forces,
+  and/or SPH boundary support likely still introduce accumulating errors;
+- earlier diagnostics showed hot spots and shear consistent with drive/contact
+  modeling sensitivity; the current setup is improved but not proven mesh- or
+  parameter-converged.
 
 An opt-in coarse contact skin (`--use-contact-skin`, 998 shell nodes tied by
 `fea.ChLinkNodeNode`) reduced flexible BCE markers to 4,262 but produced NaNs or

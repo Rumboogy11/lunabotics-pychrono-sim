@@ -37,18 +37,20 @@ Recommended hierarchy going forward:
 
 The excavator is made of PLA plastic. A separate spindle-driven FEA path couples
 a solid tetrahedral mesh of the STEP drum to CRM through
-`./crm/run_fea.sh --smoke-test --no-output`. It is numerically stable for short
-runs on the promoted 8k mesh, but its stress and fill results are **not**
-engineering-validated: a default 1.0 s run diverges and aborts near 0.8 s.
-Keep the rigid kinematic CRM model as the production design driver. See
-[`crm/FEA_COUPLING.md`](crm/FEA_COUPLING.md) for the stable settings,
-mesh-generation route, and unresolved contact/rigid-rotation issues.
+`./crm/run_fea.sh --smoke-test --no-output`. Driver kinematics and local SPH
+flex-BCE handling have been improved (motor-driven spindle with spin ramp,
+nodal-mass flooring, hardened CRM RHS for flex BCE), giving physically plausible
+short-run stresses (e.g. ~6.6 MPa at 0.05 s, ~59 MPa at 0.2 s) but not a
+validated long-run response: stresses grow in longer runs (GPa-scale by 0.5 s)
+and fill remains far below rigid CRM. Keep the rigid kinematic CRM model as the
+production design driver. See [`crm/FEA_COUPLING.md`](crm/FEA_COUPLING.md) for
+current settings, evidence, and remaining limitations.
 
 A combined production runner is also available:
 `./run_full_model.sh` executes the rigid CRM design run and the FEA structural
 run with shared settings and writes `combined_report.json` plus
 `combined_summary.csv`. See [`FULL_MODEL.md`](FULL_MODEL.md); the FEA stage is
-included intentionally despite the validation caveats above.
+included intentionally as a non-validated feasibility/diagnostic check.
 
 Actual lunar regolith is mostly tens to hundreds of micrometres in size. The
 current 1.8 mm DEM grains are roughly 10–40× too large relative to the 61 mm

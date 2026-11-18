@@ -8,16 +8,17 @@ driver.
 
 The drum is not added as a rigid FSI obstacle.  Instead:
 
-* a rigid spindle body follows the analytic drum pose;
+* a ground-fixed guide, a translating slider, and a rotating spindle are
+  connected by Chrono motor constraints that prescribe descent and spin;
 * every bore/hub FEA node is tied to that spindle with ``ChLinkNodeFrame``;
 * the rest of the tetrahedral PLA mesh is free to deform;
 * ``terrain.AddFeaMesh(mesh, False)`` provides two-way CRM contact on the
   boundary faces of the solid mesh.
 
-The spindle is fixed in the multibody sense: its pose and velocities are
-prescribed each step, so it does not drift under the link reactions.  Drive
-torque is reconstructed from the sum of the hub-link reaction moments about the
-prescribed global spin axis.
+Spindle motion is prescribed through motor motion functions (not by per-step
+state overrides), so constraint reactions remain consistent with the imposed
+trajectory.  Drive torque is reconstructed from the sum of the hub-link
+reaction moments about the prescribed global spin axis.
 
 Requirements
 ------------
@@ -64,7 +65,7 @@ class PlaParams:
     density: float = MOTION_DEFAULT.drum_density  # kg/m^3
     rayleigh_beta: float = 0.01         # s, numerical damping
     hub_radius: float = 0.0015          # m, bore radius from the STEP model
-    min_nodal_mass: float = 0.0         # kg, optional floor for sliver nodes
+    min_nodal_mass: float = 1.0e-6      # kg, floor for sliver nodes to stabilize FEA dynamics
 
     def __post_init__(self) -> None:
         if self.youngs_modulus <= 0.0:
@@ -132,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--hub-radius", type=float, default=None,
                    help="rigid spindle hub radius in m (default: 0.0015)")
     p.add_argument("--min-nodal-mass", type=float, default=None,
-                   help="floor FEA nodal masses at this value in kg (default: 0, off)")
+                   help="floor FEA nodal masses at this value in kg (default: 1e-6)")
     p.add_argument("--stress-stride", type=int, default=1,
                    help="evaluate von Mises stress on every Nth element at output (default: 1)")
     p.add_argument("--solver", choices=("gmres", "sparse-lu", "sparse-qr"), default="gmres",
@@ -151,10 +152,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="prune SPH particles embedded in the FEA solid at initialization")
     p.add_argument("--initial-gap", type=float, default=0.0,
                    help="raise the initial drum by this distance in m to avoid STEP/SPH overlap")
-    p.add_argument("--spin-ramp-time", type=float, default=0.0,
-                   help="linearly ramp spin speed over this duration in s (default: 0, immediate)")
+    p.add_argument("--spin-ramp-time", type=float, default=0.5,
+                   help="linearly ramp spin speed over this duration in s (default: 0.5)")
     p.add_argument("--no-initial-solid-velocity", action="store_true",
-                   help="start solid nodes at rest instead of with the rigid spindle velocity")
+                   help="start solid nodes at rest instead of with the prescribed spindle velocity")
     p.add_argument("--timestepper", choices=("euler", "hht"), default="euler",
                    help="MBD timestepper for the FEA system (default: euler)")
     p.set_defaults(output_dir=Path("Output_CRM_LunarExcavator_FEA"))
@@ -205,18 +206,166 @@ def resolve_fea_mesh(args: argparse.Namespace) -> tuple[Path, Path]:
 
 
 def create_spindle(chrono, system, motion):
-    """Create the fixed body that carries the imposed drum pose."""
+    """Create a spindle body driven by Chrono motor motion functions.
+
+    The spindle is not fixed and is not prescribed by per-step state overrides.
+    A ground guide, translating slider, and rotating spindle are connected by
+    motor constraints so that descent (global Z) and spin (about the configured
+    drum spin axis) follow motion functions consistently.
+    """
+    z0 = motion.drum_center_z0
+    q0 = rigid.initial_chrono_quat(chrono, motion)
+
+    ground = chrono.ChBody()
+    ground.SetName("spindle_ground")
+    ground.SetFixed(True)
+    ground.SetPos(chrono.ChVector3d(0.0, 0.0, z0))
+    ground.SetRot(chrono.ChQuaterniond(1.0, 0.0, 0.0, 0.0))
+    system.Add(ground)
+
+    slider = chrono.ChBody()
+    slider.SetName("spindle_slider")
+    slider.SetMass(max(1.0e-3, 1.0e-3 * motion.drum_mass))
+    slider.SetInertiaXX(chrono.ChVector3d(1.0e-6, 1.0e-6, 1.0e-6))
+    slider.SetFixed(False)
+    if hasattr(slider, "SetUseSleeping"):
+        slider.SetUseSleeping(False)
+    slider.SetPos(chrono.ChVector3d(0.0, 0.0, z0))
+    slider.SetRot(chrono.ChQuaterniond(1.0, 0.0, 0.0, 0.0))
+    system.Add(slider)
+
     spindle = chrono.ChBody()
     spindle.SetName("drum_spindle")
     spindle.SetMass(motion.drum_mass)
     spindle.SetInertiaXX(chrono.ChVector3d(*motion.drum_moi))
-    spindle.SetFixed(True)
+    spindle.SetFixed(False)
     if hasattr(spindle, "SetUseSleeping"):
         spindle.SetUseSleeping(False)
-    spindle.SetPos(chrono.ChVector3d(0.0, 0.0, motion.drum_center_z0))
-    spindle.SetRot(rigid.initial_chrono_quat(chrono, motion))
+    spindle.SetPos(chrono.ChVector3d(0.0, 0.0, z0))
+    spindle.SetRot(q0)
     system.Add(spindle)
-    return spindle
+
+    return {"ground": ground, "slider": slider, "spindle": spindle}
+
+
+def _axis_quat_align_z(chrono, axis: tuple[float, float, float]):
+    """Quaternion rotating local +Z to the given axis."""
+    ax, ay, az = axis
+    n = math.sqrt(ax * ax + ay * ay + az * az)
+    if n == 0.0:
+        raise SystemExit("spin axis must be non-zero")
+    ax, ay, az = ax / n, ay / n, az / n
+    # cross(z, axis)
+    cx, cy, cz = -ay, ax, 0.0
+    dot_za = az
+    if math.sqrt(cx * cx + cy * cy + cz * cz) < 1e-12:
+        if dot_za > 0.0:
+            return chrono.ChQuaterniond(1.0, 0.0, 0.0, 0.0)
+        # 180 deg around X
+        return chrono.QuatFromAngleAxis(math.pi, chrono.ChVector3d(1.0, 0.0, 0.0))
+    angle = math.atan2(math.sqrt(cx * cx + cy * cy + cz * cz), dot_za)
+    return chrono.QuatFromAngleAxis(angle, chrono.ChVector3d(cx, cy, cz))
+
+
+def _append_const_duration(seq, chrono, value: float, duration: float) -> None:
+    if duration <= 0.0:
+        return
+    seq.InsertFunct(chrono.ChFunctionConst(value), duration, 1.0, True)
+
+
+def build_descent_position_function(chrono, motion, t_end: float):
+    """Relative Z displacement function: 0 at z0, negative when descending."""
+    seq = chrono.ChFunctionSequence()
+    z0 = motion.drum_center_z0
+    zt = motion.z_target
+    settle = max(0.0, motion.settle_time)
+    lower_end = settle
+    if motion.lower_speed > 1e-12 and z0 > zt:
+        lower_end = settle + (z0 - zt) / motion.lower_speed
+    lower_end = min(lower_end, t_end)
+
+    if settle > 0.0:
+        _append_const_duration(seq, chrono, 0.0, min(settle, t_end))
+    if t_end > settle:
+        descend_dur = max(0.0, min(lower_end, t_end) - settle)
+        if descend_dur > 0.0:
+            # displacement = -lower_speed * local_t
+            seq.InsertFunct(chrono.ChFunctionRamp(0.0, -motion.lower_speed), descend_dur, 1.0, True)
+        remain = t_end - min(lower_end, t_end)
+        if remain > 0.0:
+            final_disp = min(0.0, zt - z0)
+            _append_const_duration(seq, chrono, final_disp, remain)
+    # ensure function is defined at least at 0
+    if t_end <= 0.0:
+        _append_const_duration(seq, chrono, 0.0, 1.0)
+    return seq
+
+
+def build_spin_speed_function(chrono, motion, ramp_time: float, t_end: float):
+    """Angular speed function about the spindle axis (rad/s)."""
+    seq = chrono.ChFunctionSequence()
+    settle = max(0.0, motion.settle_time)
+    omega = motion.drum_omega
+    ramp_time = max(0.0, ramp_time)
+    ramp_end = settle + ramp_time
+
+    if settle > 0.0:
+        _append_const_duration(seq, chrono, 0.0, min(settle, t_end))
+    if t_end > settle:
+        if ramp_time > 0.0:
+            ramp_dur = max(0.0, min(ramp_end, t_end) - settle)
+            if ramp_dur > 0.0:
+                seq.InsertFunct(chrono.ChFunctionRamp(0.0, omega / ramp_time), ramp_dur, 1.0, True)
+            if t_end > ramp_end:
+                _append_const_duration(seq, chrono, omega, t_end - ramp_end)
+        else:
+            _append_const_duration(seq, chrono, omega, t_end - settle)
+    if t_end <= 0.0:
+        _append_const_duration(seq, chrono, 0.0, 1.0)
+    return seq
+
+
+def configure_spindle_drive(chrono, system, motion, drive, ramp_time: float, t_end: float):
+    """Attach motor constraints that prescribe spindle descent and spin."""
+    ground = drive["ground"]
+    slider = drive["slider"]
+    spindle = drive["spindle"]
+    z0 = motion.drum_center_z0
+    q0 = rigid.initial_chrono_quat(chrono, motion)
+
+    # Linear motor: slider translates along global Z relative to ground.
+    z_frame = chrono.ChFramed(chrono.ChVector3d(0.0, 0.0, z0), chrono.ChQuaterniond(1.0, 0.0, 0.0, 0.0))
+    lin = chrono.ChLinkMotorLinearPosition()
+    lin.Initialize(ground, slider, z_frame)
+    lin.SetGuideConstraint(chrono.ChLinkMotorLinearPosition.GuideConstraint_PRISMATIC)
+    lin.SetMotionFunction(build_descent_position_function(chrono, motion, max(t_end, motion.t_max, 1.0)))
+    system.Add(lin)
+
+    # Rotation motor: spindle rotates about configured axis relative to slider.
+    axis = spin_axis_tuple(motion)
+    q_axis = _axis_quat_align_z(chrono, axis)
+    spin_frame = chrono.ChFramed(chrono.ChVector3d(0.0, 0.0, z0), q_axis)
+    rot = chrono.ChLinkMotorRotationSpeed()
+    rot.Initialize(slider, spindle, spin_frame)
+    rot.SetSpindleConstraint(chrono.ChLinkMotorRotationSpeed.SpindleConstraint_REVOLUTE)
+    rot.SetSpeedFunction(build_spin_speed_function(chrono, motion, ramp_time, max(t_end, motion.t_max, 1.0)))
+    system.Add(rot)
+
+    # Initial kinematics consistent with t=0 motion functions.
+    # At t=0, descent displacement is 0 and spin speed is 0 for settle_time >= 0.
+    slider.SetPos(chrono.ChVector3d(0.0, 0.0, z0))
+    slider.SetPosDt(chrono.ChVector3d(0.0, 0.0, 0.0))
+    slider.SetRot(chrono.ChQuaterniond(1.0, 0.0, 0.0, 0.0))
+    slider.SetAngVelParent(chrono.ChVector3d(0.0, 0.0, 0.0))
+
+    spindle.SetPos(chrono.ChVector3d(0.0, 0.0, z0))
+    spindle.SetPosDt(chrono.ChVector3d(0.0, 0.0, 0.0))
+    spindle.SetRot(q0)
+    spindle.SetAngVelParent(chrono.ChVector3d(0.0, 0.0, 0.0))
+
+    drive["linear_motor"] = lin
+    drive["rotation_motor"] = rot
+    return lin, rot
 
 
 def cast_xyz_nodes(fea, mesh) -> list:
@@ -415,22 +564,20 @@ def spin_ramp_angle(motion, t: float, ramp_time: float) -> float:
     return 0.5 * motion.drum_omega * elapsed * elapsed / ramp_time
 
 
-def set_solid_initial_velocity(chrono, nodes, motion, t0: float = 0.0) -> None:
-    """Start every solid node with the rigid-body spindle velocity.
+def set_solid_initial_velocity(chrono, nodes, motion, t0: float = 0.0, ramp_time: float = 0.0) -> None:
+    """Start every solid node consistent with the prescribed spindle motion.
 
-    Without this, the hub nodes jump to full spindle velocity at the first step
-    while the rest of the PLA starts at rest.  The shaft then has to spin the
-    whole drum through the tiny bore, producing a large initial torsional wave
-    and artificial stress growth.
+    Hub nodes are constrained to the spindle; initializing free nodes with the
+    same rigid-body velocity avoids an impulsive startup transient.
     """
-    omega = motion.drum_omega if t0 >= motion.settle_time else 0.0
+    omega = spin_ramp_omega(motion, t0, ramp_time)
     axis = motion.drum_spin_axis.upper()
     omega_vec = {
         "X": (omega, 0.0, 0.0),
         "Y": (0.0, omega, 0.0),
         "Z": (0.0, 0.0, omega),
     }[axis]
-    center = (0.0, 0.0, motion.drum_center_z0)
+    center = (0.0, 0.0, motion.drum_z(t0))
     moving = t0 >= motion.settle_time and center[2] > motion.z_target
     descent = (0.0, 0.0, -motion.lower_speed if moving else 0.0)
 
@@ -441,30 +588,9 @@ def set_solid_initial_velocity(chrono, nodes, motion, t0: float = 0.0) -> None:
         velocity = tuple(rotational[k] + descent[k] for k in range(3))
         node.SetPosDt(chrono.ChVector3d(*velocity))
         if hasattr(node, "SetPosDt2"):
+            # Centripetal term for constant/linear-ramp angular velocity phases.
             centripetal = cross(omega_vec, rotational)
             node.SetPosDt2(chrono.ChVector3d(*centripetal))
-
-
-def set_fea_drum_state(chrono, spindle, motion, t: float, ramp_time: float) -> None:
-    """Kinematic spindle state with the FEA-specific spin-up ramp."""
-    omega = spin_ramp_omega(motion, t, ramp_time)
-    angle = spin_ramp_angle(motion, t, ramp_time)
-    z = motion.drum_z(t)
-    axis = rigid.axis_vector(chrono, motion.drum_spin_axis)
-    q0 = rigid.initial_chrono_quat(chrono, motion)
-    q_spin = chrono.QuatFromAngleAxis(angle, axis)
-
-    spindle.SetPos(chrono.ChVector3d(0.0, 0.0, z))
-    spindle.SetRot(q_spin * q0)
-    moving = t >= motion.settle_time and z > motion.z_target
-    spindle.SetPosDt(chrono.ChVector3d(0.0, 0.0, -motion.lower_speed if moving else 0.0))
-    if motion.drum_spin_axis.upper() == "X":
-        omega_vec = (omega, 0.0, 0.0)
-    elif motion.drum_spin_axis.upper() == "Y":
-        omega_vec = (0.0, omega, 0.0)
-    else:
-        omega_vec = (0.0, 0.0, omega)
-    spindle.SetAngVelParent(chrono.ChVector3d(*omega_vec))
 
 
 def spin_axis_tuple(motion) -> tuple[float, float, float]:
@@ -715,12 +841,20 @@ def main() -> int:
     soil.apply(fsi, terrain)
     rigid.configure_sph(fsi, terrain, run)
 
-    spindle = create_spindle(chrono, system, motion)
+    drive = create_spindle(chrono, system, motion)
+    spindle = drive["spindle"]
+    configure_spindle_drive(chrono, system, motion, drive, args.spin_ramp_time, run.duration)
     mesh, nodes, hub_nodes, _material = load_fea_drum(
         chrono, fea, system, motion, node_path, ele_path, pla
     )
     if not args.no_initial_solid_velocity:
-        set_solid_initial_velocity(chrono, nodes, motion)
+        set_solid_initial_velocity(chrono, nodes, motion, 0.0, args.spin_ramp_time)
+    else:
+        # Hub nodes are constrained to the spindle; keep their state consistent.
+        for node in hub_nodes:
+            node.SetPosDt(chrono.ChVector3d(0.0, 0.0, 0.0))
+            if hasattr(node, "SetPosDt2"):
+                node.SetPosDt2(chrono.ChVector3d(0.0, 0.0, 0.0))
     contact_mesh = mesh
     contact_path = None
     if args.use_contact_skin:
@@ -849,7 +983,6 @@ def main() -> int:
                 flush=True,
             )
 
-    set_fea_drum_state(chrono, spindle, motion, 0.0, args.spin_ramp_time)
     axis_torque, reaction_force = spindle_reaction(links, spindle, motion)
     record(0.0, axis_torque, reaction_force)
     next_output = 1.0 / run.fps
@@ -858,11 +991,9 @@ def main() -> int:
     try:
         while t < run.duration - 1.0e-12:
             h = min(run.dt, run.duration - t)
-            set_fea_drum_state(chrono, spindle, motion, t, args.spin_ramp_time)
             terrain.Synchronize(t)
             terrain.Advance(h)
             t += h
-            set_fea_drum_state(chrono, spindle, motion, t, args.spin_ramp_time)
 
             if args.debug_fea:
                 disp = max_nodal_displacement(nodes)

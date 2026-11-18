@@ -23,8 +23,10 @@ writes a single combined report:
 ```
 
 The FEA stage is included intentionally even though it is **not
-engineering-validated**. Long FEA runs are expected to diverge; the default
-1.0 s FEA run already exceeds PLA strength and aborts near 0.8 s. The
+engineering-validated**. Recent fixes (motor-driven spindle kinematics, spin
+ramp/mass flooring, hardened local SPH flex-BCE RHS) improved short-run behavior
+(~6.6 MPa at 0.05 s, ~59 MPa at 0.2 s in current checks), but longer runs still
+diverge (GPa-scale by 0.5 s) and fill remains far below rigid CRM. The
 orchestrator records an FEA failure in the report instead of hiding it. By
 default the overall command still succeeds if the rigid CRM stage succeeded;
 use `--strict-fea` to make an FEA failure fail the whole command.
