@@ -150,7 +150,8 @@ results: it closes holes.
 | Option | Meaning |
 | --- | --- |
 | `--duration T` | simulated seconds (default 60) |
-| `--dt S` | CRM/FSI step (default 5e-4 s) |
+| `--dt S` | CRM/FSI step (spacing-dependent default: 8e-5 s at 4 mm, 2.4e-4 s at 12 mm) |
+| `--allow-unsafe-dt` | bypass the explicit `--dt` stability check (not recommended) |
 | `--spacing D` | SPH particle spacing (default 0.004 m) |
 | `--fps F` | metric/particle output cadence (default 20 Hz) |
 | `--settle-time T` | delay before spin/descent (default 0.001 s) |
@@ -169,6 +170,12 @@ results: it closes holes.
 | `--save-particles` | write per-frame SPH particle CSV (large) |
 | `--loads-file PATH` | write the per-step soil force/torque wrench for one-way FEA |
 | `--no-output` | benchmark without writing files |
+
+The default timestep now scales with SPH spacing. A 4 mm run uses `8e-5 s`;
+passing `--dt 5e-4` at 4 mm is rejected because it produced immediate SPH
+boundary blowups (`[calcHashD] ... out of max boundary`). The 12 mm validation
+cases remain stable at `2.5e-4 s`. If you intentionally want to test a larger
+step, add `--allow-unsafe-dt`.
 
 ## Outputs
 

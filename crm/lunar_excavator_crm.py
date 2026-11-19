@@ -78,7 +78,7 @@ class CrmRunParams:
     """Numerics, geometry hooks, and excavation metrics for a CRM run."""
 
     spacing: float = 0.004               # SPH particle spacing [m]
-    dt: float = 5.0e-4                   # CRM/FSI step [s]
+    dt: float = 8.0e-5                   # CRM/FSI step [s] at the default 4 mm spacing
     duration: float = MOTION_DEFAULT.t_max
     fps: float = 20.0                    # metric/particle output cadence
     settle_time: float = MOTION_DEFAULT.settle_time
@@ -161,7 +161,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--duration", type=float, default=None,
                    help="simulated seconds (default: 60)")
     p.add_argument("--dt", type=float, default=None,
-                   help="CRM/FSI step size in seconds (default: 5e-4)")
+                   help="CRM/FSI step size in seconds (default: spacing-dependent, "
+                        "8e-5 at 4 mm and 2.4e-4 at 12 mm)")
+    p.add_argument("--allow-unsafe-dt", action="store_true",
+                   help="allow an explicitly requested --dt above the stable SPH bound "
+                        "(normally rejected to prevent GPU boundary blowups)")
     p.add_argument("--fps", type=float, default=None,
                    help="metric output cadence in Hz (default: 20)")
     p.add_argument("--spacing", type=float, default=None,
@@ -248,6 +252,23 @@ def make_soil(args: argparse.Namespace) -> CrmSoilParams:
     return replace(DEFAULT_SOIL, **overrides)  # type: ignore[arg-type]
 
 
+def suggested_sph_dt(spacing: float, d0_multiplier: float = 1.0) -> float:
+    """Conservative default CRM timestep for this SPH setup.
+
+    The value is empirical, based on stability tests with this soil block and
+    the coarse production OBJ: 4 mm needed <= 1e-4 s (5e-4 s exploded), while
+    12 mm is stable at 2.5e-4 s and has also run at 5e-4 s.
+    """
+    return min(5.0e-4, 8.0e-5 * (spacing / 0.004) * d0_multiplier)
+
+
+def max_stable_sph_dt(spacing: float, d0_multiplier: float = 1.0) -> float:
+    """Largest explicitly requested timestep accepted without --allow-unsafe-dt."""
+    if spacing >= 0.008:
+        return min(5.0e-4, 5.0e-4 * d0_multiplier)
+    return 1.25e-4 * (spacing / 0.004) * d0_multiplier
+
+
 def make_run_params(args: argparse.Namespace) -> CrmRunParams:
     overrides: dict[str, object] = {}
     mapping = {
@@ -278,6 +299,21 @@ def make_run_params(args: argparse.Namespace) -> CrmRunParams:
         overrides.setdefault("duration", 0.05)
         overrides.setdefault("fps", 100.0)
         overrides.setdefault("settle_time", 0.0)
+
+    spacing = float(overrides.get("spacing", CrmRunParams.spacing))
+    d0_multiplier = float(overrides.get("d0_multiplier", CrmRunParams.d0_multiplier))
+    if "dt" in overrides:
+        dt = float(overrides["dt"])
+        limit = max_stable_sph_dt(spacing, d0_multiplier)
+        if dt > limit and not getattr(args, "allow_unsafe_dt", False):
+            raise SystemExit(
+                f"--dt {dt:g} s is too large for SPH spacing {spacing:g} m "
+                f"(stable bound ~{limit:g} s). Use --dt {suggested_sph_dt(spacing, d0_multiplier):g} "
+                "or omit --dt to get the spacing-dependent default. "
+                "Pass --allow-unsafe-dt only if you intentionally want to test instability."
+            )
+    else:
+        overrides["dt"] = suggested_sph_dt(spacing, d0_multiplier)
 
     return CrmRunParams(**overrides)  # type: ignore[arg-type]
 

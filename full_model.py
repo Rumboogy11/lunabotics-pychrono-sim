@@ -7,7 +7,8 @@ combined report.  The FEA stage is included intentionally even though its
 stress and fill results are not engineering-validated; see
 ``crm/FEA_COUPLING.md``.
 
-By default the rigid CRM stage uses the full coarse OBJ at 4 mm SPH spacing.
+By default the rigid CRM stage uses the full coarse OBJ at 4 mm SPH spacing and
+a spacing-dependent timestep (8e-5 s at 4 mm).
 The FEA stage uses the promoted 8k solid mesh at 12 mm spacing with diagnostic
 settings (2.5e-4 s timestep, 2 BCE layers, GMRES/diagonal). Coupling has not been
 validated and its mechanics diverge in longer runs. Use
@@ -28,6 +29,8 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "crm"))
+from lunar_excavator_crm import suggested_sph_dt  # noqa: E402
 
 COMBINED_FIELDS = [
     "model",
@@ -61,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--crm-spacing", type=float, default=None,
                    help="rigid CRM SPH spacing in m (default: 0.004)")
     p.add_argument("--crm-dt", type=float, default=None,
-                   help="rigid CRM timestep in s (default: 5e-4)")
+                   help="rigid CRM timestep in s (default: spacing-dependent, 8e-5 at 4 mm)")
     p.add_argument("--crm-fps", type=float, default=None,
                    help="rigid CRM output cadence in Hz (default: 20)")
 
@@ -95,7 +98,7 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
     if args.smoke_test:
         args.duration = 0.05 if args.duration is None else args.duration
         args.crm_spacing = 0.012 if args.crm_spacing is None else args.crm_spacing
-        args.crm_dt = 5.0e-4 if args.crm_dt is None else args.crm_dt
+        args.crm_dt = suggested_sph_dt(args.crm_spacing) if args.crm_dt is None else args.crm_dt
         args.crm_fps = 200.0 if args.crm_fps is None else args.crm_fps
         args.fea_spacing = 0.012 if args.fea_spacing is None else args.fea_spacing
         args.fea_dt = 2.5e-4 if args.fea_dt is None else args.fea_dt
@@ -104,7 +107,7 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
     else:
         args.duration = 20.0 if args.duration is None else args.duration
         args.crm_spacing = 0.004 if args.crm_spacing is None else args.crm_spacing
-        args.crm_dt = 5.0e-4 if args.crm_dt is None else args.crm_dt
+        args.crm_dt = suggested_sph_dt(args.crm_spacing) if args.crm_dt is None else args.crm_dt
         args.crm_fps = 20.0 if args.crm_fps is None else args.crm_fps
         args.fea_spacing = 0.012 if args.fea_spacing is None else args.fea_spacing
         args.fea_dt = 2.5e-4 if args.fea_dt is None else args.fea_dt

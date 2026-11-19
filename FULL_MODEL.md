@@ -4,7 +4,8 @@
 writes a single combined report:
 
 1. **Rigid CRM production stage** — full coarse OBJ, 4 mm SPH spacing,
-   `dt=5e-4 s`; use this for fill ratio, bulk torque, and specific energy.
+   spacing-dependent `dt=8e-5 s`; use this for fill ratio, bulk torque, and
+   specific energy.
 2. **Spindle-driven solid FEA diagnostic stage** — promoted tetrahedral mesh,
    12 mm SPH spacing, `dt=2.5e-4 s`, two flex-BCE layers; its outputs are not
    validated structural estimates.
@@ -70,7 +71,7 @@ reach an output frame.
 | `--duration T` | simulated duration for both stages (default 20 s) |
 | `--fea-duration T` | separate FEA duration (default: `--duration`) |
 | `--crm-spacing D` | rigid CRM SPH spacing (default 0.004 m) |
-| `--crm-dt S` | rigid CRM timestep (default 5e-4 s) |
+| `--crm-dt S` | rigid CRM timestep (spacing-dependent default: 8e-5 s at 4 mm) |
 | `--crm-fps F` | rigid CRM output cadence (default 20 Hz) |
 | `--fea-spacing D` | FEA SPH spacing (default 0.012 m) |
 | `--fea-dt S` | FEA timestep (default 2.5e-4 s) |

@@ -253,7 +253,7 @@ The FEA-specific defaults are:
 |---|---:|---|
 | mesh | `fea/LunarDrumScrew_m_fea_decim8k.node/.ele` | promoted tetrahedral mesh; mesh promotion does not validate coupling |
 | SPH spacing | `0.012 m` | same smoke resolution as rigid CRM |
-| timestep | `2.5e-4 s` | FEA/SPH is unstable at the rigid default `5e-4 s` |
+| timestep | `2.5e-4 s` | FEA/SPH coupling is unstable at the former rigid production step `5e-4 s` |
 | BCE layers | `2` | best tested interacting setup; warning remains and the run diverges by 0.5 s |
 | BCE pattern | `BcePatternMesh2D_INWARD` | required for a closed solid boundary |
 | GMRES | `20 / 1e-3` | practical direct/iterative choice for FEA stiffness coupling |

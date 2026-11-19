@@ -135,6 +135,8 @@ source environment/activate-chrono-source.sh
 PYTHON="$CHRONO_ENV/bin/python" ./crm/run.sh --smoke-test
 PYTHON="$CHRONO_ENV/bin/python" ./crm/run.sh \
   --duration 20 --fps 20 --output-dir Output_CRM_Baseline
+# --dt is spacing-dependent by default (8e-5 s at 4 mm). A 4 mm run with
+# --dt 5e-4 is rejected; it produced an immediate SPH boundary blowup.
 
 # Spiked/alternative geometry: pass any full-detail OBJ with the same pose/scale.
 PYTHON="$CHRONO_ENV/bin/python" ./crm/run.sh \
