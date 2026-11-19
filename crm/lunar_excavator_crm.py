@@ -86,6 +86,8 @@ class CrmRunParams:
     omega: float = MOTION_DEFAULT.drum_omega
     bed_height: float = MOTION_DEFAULT.bed_height
     spin_axis: str = MOTION_DEFAULT.drum_spin_axis
+    drum_radius: float = MOTION_DEFAULT.drum_radius        # outer/crest radius [m]
+    drum_half_length: float = MOTION_DEFAULT.drum_half_length
     inner_radius: float = 0.055          # nominal cavity radius [m]
     capacity_volume: float | None = None  # override for CAD free volume [m^3]
     active_box_x: float = 0.244
@@ -98,15 +100,15 @@ class CrmRunParams:
 
     def __post_init__(self) -> None:
         for name in ("spacing", "dt", "duration", "fps", "descent_speed", "omega",
-                     "bed_height", "inner_radius", "max_velocity", "d0_multiplier",
-                     "free_surface_threshold"):
+                     "bed_height", "drum_radius", "drum_half_length", "inner_radius",
+                     "max_velocity", "d0_multiplier", "free_surface_threshold"):
             if getattr(self, name) <= 0.0:
                 raise ValueError(f"{name} must be positive")
         if self.spin_axis.upper() not in {"X", "Y", "Z"}:
             raise ValueError("spin axis must be X, Y, or Z")
         if self.proximity_steps < 1:
             raise ValueError("proximity_steps must be at least 1")
-        if self.inner_radius >= MOTION_DEFAULT.drum_radius:
+        if self.inner_radius >= self.drum_radius:
             raise ValueError("inner radius must be smaller than the outer drum radius")
         if min(self.active_box_x, self.active_box_y, self.active_box_z) <= 0.0:
             raise ValueError("active domain dimensions must be positive")
@@ -180,6 +182,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="initial soil bed height in m (default: 0.06)")
     p.add_argument("--spin-axis", choices=("X", "Y", "Z"), default=None,
                    help="global spin axis (default: X)")
+    p.add_argument("--drum-radius", type=float, default=None,
+                   help="outer/crest radius in m (default: shared config, 0.061)")
+    p.add_argument("--drum-half-length", type=float, default=None,
+                   help="half of drum axial length in m (default: shared config, 0.033)")
 
     p.add_argument("--mesh", choices=("coarse", "medium"), default="coarse",
                    help="shipped OBJ: full coarse (default, holes preserved) or medium")
@@ -269,7 +275,7 @@ def max_stable_sph_dt(spacing: float, d0_multiplier: float = 1.0) -> float:
     return 1.25e-4 * (spacing / 0.004) * d0_multiplier
 
 
-def make_run_params(args: argparse.Namespace) -> CrmRunParams:
+def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -> CrmRunParams:
     overrides: dict[str, object] = {}
     mapping = {
         "duration": args.duration,
@@ -281,6 +287,8 @@ def make_run_params(args: argparse.Namespace) -> CrmRunParams:
         "omega": args.omega,
         "bed_height": args.bed_height,
         "spin_axis": args.spin_axis,
+        "drum_radius": getattr(args, "drum_radius", None),
+        "drum_half_length": getattr(args, "drum_half_length", None),
         "inner_radius": args.inner_radius,
         "capacity_volume": args.capacity_volume,
         "max_velocity": args.max_velocity,
@@ -305,7 +313,7 @@ def make_run_params(args: argparse.Namespace) -> CrmRunParams:
     if "dt" in overrides:
         dt = float(overrides["dt"])
         limit = max_stable_sph_dt(spacing, d0_multiplier)
-        if dt > limit and not getattr(args, "allow_unsafe_dt", False):
+        if validate_sph_dt and dt > limit and not getattr(args, "allow_unsafe_dt", False):
             raise SystemExit(
                 f"--dt {dt:g} s is too large for SPH spacing {spacing:g} m "
                 f"(stable bound ~{limit:g} s). Use --dt {suggested_sph_dt(spacing, d0_multiplier):g} "
@@ -641,6 +649,8 @@ def main() -> int:
         drum_omega=run.omega,
         bed_height=run.bed_height,
         drum_spin_axis=run.spin_axis,
+        drum_radius=run.drum_radius,
+        drum_half_length=run.drum_half_length,
     )
     capacity_volume = (
         run.capacity_volume

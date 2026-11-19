@@ -50,6 +50,31 @@ and FEA with shared settings and writes `combined_report.json` plus
 `combined_summary.csv`. Its long FEA stage is not a design result and may fail;
 for production studies run `./crm/run.sh` directly. See [`FULL_MODEL.md`](FULL_MODEL.md).
 
+For routine studies, use the interactive one-way wizard instead:
+
+```bash
+./run_study.sh
+```
+
+With no flags, it prompts individually for a new STEP CAD file (or existing
+CRM/FEA meshes), drum dimensions, study duration, SPH spacing/bed box, soil
+properties, and FEA solver settings. Bed height, active box, initial drum
+height, descent speed, cavity radius, and SPH spacing are scaled automatically
+from the measured geometry; every derived value is shown as the prompt default
+and can be replaced. It writes a reproducible `study_config.json` and
+`commands.sh`, then runs rigid CRM followed by one-way FEA. Use
+`./run_study.sh --dry-run ...` to inspect generated commands without simulating,
+or pass any prompt value as a CLI flag for scripted use.
+
+After a successful run, the wizard prints a `results_overview.png` plot, the
+CRM/FEA summary CSV paths, and the exact commands to open the plots or folder;
+in an interactive terminal it also offers to open them directly. The same plot
+can be regenerated with:
+
+```bash
+./chrono-env/bin/python view_results.py --output-dir Output_<study_name> --show
+```
+
 Actual lunar regolith is mostly tens to hundreds of micrometres in size. The
 current 1.8 mm DEM grains are roughly 10–40× too large relative to the 61 mm
 drum radius, so their absolute grain size is not physically representative.

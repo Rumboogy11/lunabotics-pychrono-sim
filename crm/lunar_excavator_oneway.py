@@ -314,7 +314,9 @@ def main() -> int:
         raise SystemExit("--min-stress-volume cannot be negative")
 
     soil = rigid.make_soil(args)
-    run = rigid.make_run_params(args)
+    # The one-way replay has no SPH fluid, so the rigid-CRM CFL limit does not
+    # apply to its structural timestep.
+    run = rigid.make_run_params(args, validate_sph_dt=False)
     pla = fea_driver.make_pla(args)
     if args.print_soil:
         print(soil.summary())
@@ -339,6 +341,8 @@ def main() -> int:
         drum_omega=run.omega,
         bed_height=run.bed_height,
         drum_spin_axis=run.spin_axis,
+        drum_radius=run.drum_radius,
+        drum_half_length=run.drum_half_length,
     )
     loads.validate_motion(motion)
 

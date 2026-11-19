@@ -210,7 +210,10 @@ wrapped. `FromTetGenFile` plus manual hub-node selection is the workable route.
 
 ## Mesh generation route
 
-The supported converter is `step_to_chrono_fea.py`:
+The supported converter is `step_to_chrono_fea.py`. New STEP models use `--axis
+Y` as the standard original-space drum axis; the converter rotates the exported
+mesh and CRM surface so that axis becomes local +Z for the FEA drivers. Pass
+`--axis Z` only when regenerating the legacy `LunarDrumScrew_m` model:
 
 ```bash
 ./chrono-env/bin/python step_to_chrono_fea.py geometry/LunarDrumScrew_m.step \
@@ -221,12 +224,32 @@ The supported converter is `step_to_chrono_fea.py`:
     --hub-radius 0.0015 \
     --axis Z \
     --tetgen-switches pYQ
+
+# New-model standard: original STEP drum axis Y.
+./chrono-env/bin/python step_to_chrono_fea.py geometry/NewDrum.step \
+    --out-prefix fea/NewDrum_fea --unit-scale 0.001 \
+    --axis Y --mesh-size 0.012 --hub-radius 0.035
 ```
 
 Route: OpenCASCADE STL triangulation -> MeshFix repair -> face decimation with
 `trimesh.remesh.subdivide_to_size` -> TetGen with `pYQ`. Direct Gmsh 3D meshing
 was abandoned because the screw/thread surfaces produce segment/facet
-intersection failures.
+intersection failures. OpenCASCADE's parallel tessellation mode is enabled by
+default; `--no-occ-parallel` disables it, and `--time-stages` reports the time
+spent in fusion, tessellation, surface processing, TetGen, and output writing.
+
+For multi-solid STEP assemblies, add:
+
+```bash
+    --min-solid-volume 1e-5 \
+    --surface-target-faces 80000 \
+    --repair-after-decimation
+```
+
+This boolean-fuses the retained solids, drops sub-millimetre fasteners, and
+runs MeshFix *after* quadric decimation. Repairing the full fused assembly
+before decimation inflated the SPIKEY volume by about 391%; the
+decimate-then-repair route keeps it near 0.8%.
 
 The promoted 8k mesh has:
 

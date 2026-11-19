@@ -119,6 +119,33 @@ PYTHON="$CHRONO_ENV/bin/python" ./crm/run.sh \
   --solver-iterations 20 --solver-tolerance 1e-3 --bce-layers 2
 ```
 
+The interactive wizard automates the complete one-way sequence:
+
+```bash
+./run_study.sh                         # prompts for all settings, then runs both stages
+./run_study.sh --dry-run --duration 0.5 --spacing 0.012
+./run_study.sh --geometry step --step-file geometry/MyDrum.step --duration 20
+```
+
+It can use the supplied meshes, convert a new STEP solid into a TetGen mesh plus
+CRM surface OBJ, or accept existing `.obj`/`.node`/`.ele` files. When it can
+measure the geometry, it scales the bed box, bed height, initial drum centre
+height (`bed_height + radius`), descent speed, cavity radius, and SPH spacing
+from the CAD radius; a multi-solid assembly also gets assembly-specific mesh
+filtering and hub defaults. Every derived value is offered as an editable prompt
+default, and `--no-auto-geometry` restores the fixed legacy defaults. Each study
+stores `study_config.json`, `commands.sh`, per-stage logs, `crm/soil_loads.csv`,
+and the CRM/FEA summaries under `Output_<study_name>/`.
+
+At completion the wizard writes `results_overview.png` and prints the paths to
+the CRM/FEA summaries plus copyable commands to open the plots or result folder.
+In an interactive terminal it asks whether to open them directly. To reopen the
+plots later:
+
+```bash
+./chrono-env/bin/python view_results.py --output-dir Output_<study_name> --show
+```
+
 Use identical motion options in the two one-way stages; the replay validates the
 recorded drum trajectory against the FEA motion. The replay defaults to
 `pychrono.pardisomkl` (8 threads); the wrapper uses the conda-forge PyChrono for
@@ -158,6 +185,8 @@ results: it closes holes.
 | `--descent-speed V` | drum descent speed (default 0.0015 m/s) |
 | `--omega W` | spin rate in rad/s (default shared config, ~3.14) |
 | `--spin-axis {X,Y,Z}` | global spin axis (default X) |
+| `--drum-radius R` | outer/crest radius used for initial height and bed sizing (default 0.061 m) |
+| `--drum-half-length L` | half of the drum axial length (default 0.033 m) |
 | `--bed-height H` | initial bed height (default 0.06 m) |
 | `--inner-radius R` | nominal cavity radius for fill ratio (default 0.055 m) |
 | `--capacity-volume V` | CAD-derived free volume override for fill ratio |

@@ -26,16 +26,24 @@ Units and frame
 ---------------
 STEP files carry no reliable SI unit metadata.  ``--unit-scale`` converts STEP
 coordinates to metres (use ``0.001`` for the supplied mm-valued file).  All size
-options are specified in metres and converted internally.  Optional ``--rotate``
-and ``--translate`` are applied in metres after scaling so the exported mesh
-matches the local frame used by ``lunar_excavator_config.py`` (long axis = Z).
+options are specified in metres and converted internally.  ``--axis`` names the
+drum axis in the **original STEP space** and defaults to Y for new models; the
+exported mesh and CRM surface are rotated so that axis becomes local +Z, which
+is the convention used by the FEA drivers.  Optional ``--rotate`` and
+``--translate`` are applied after that conversion.
 
 Example
 -------
+    # Legacy model: source drum axis is Z.
     ./chrono-env/bin/python step_to_chrono_fea.py geometry/LunarDrumScrew_m.step \\
         --out-prefix fea/LunarDrumScrew_m_fea_decim8k --unit-scale 0.001 \\
         --mesh-size 0.012 --surface-target-faces 8000 \\
         --hub-radius 0.0015 --axis Z --tetgen-switches pYQ
+
+    # New model: source drum axis is Y and is rotated to local Z on export.
+    ./chrono-env/bin/python step_to_chrono_fea.py geometry/NewDrum.step \\
+        --out-prefix fea/NewDrum_fea --unit-scale 0.001 \\
+        --mesh-size 0.012 --axis Y --hub-radius 0.035 --tetgen-switches pYQ
 """
 
 from __future__ import annotations
@@ -44,6 +52,7 @@ import argparse
 import json
 import math
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -51,6 +60,7 @@ import pymeshfix
 import pyvista as pv
 import tetgen
 import trimesh
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
 from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
@@ -81,6 +91,15 @@ def parse_axis(text: str) -> int:
     if key not in AXES:
         raise argparse.ArgumentTypeError("axis must be X, Y, or Z")
     return AXES[key]
+
+
+def source_axis_to_z(axis: int) -> np.ndarray:
+    """Rotation taking a CAD drum axis onto the exported local +Z axis."""
+    if axis == AXES["X"]:
+        return rotation_matrix(np.array([0.0, 1.0, 0.0]), -90.0)
+    if axis == AXES["Y"]:
+        return rotation_matrix(np.array([1.0, 0.0, 0.0]), 90.0)
+    return np.eye(3)
 
 
 def rotation_matrix(axis: np.ndarray, angle_deg: float) -> np.ndarray:
@@ -150,7 +169,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="advanced: complete TetGen switch string (overrides the size/quality options)",
     )
 
-    p.add_argument("--axis", type=parse_axis, default=2, help="drum rotation axis in the exported frame")
+    p.add_argument("--axis", type=parse_axis, default=AXES["Y"],
+                   help="drum rotation axis in the original STEP space; output is rotated to local +Z "
+                        "(default: Y)")
     p.add_argument("--rotate", default=None, help="optional rotation as 'ax,ay,az,angle_deg' applied after scaling")
     p.add_argument(
         "--translate",
@@ -163,12 +184,50 @@ def build_parser() -> argparse.ArgumentParser:
         "--hub-radius",
         type=float,
         default=0.0015,
-        help="rigid-hub selection: max radial distance from --axis in metres",
+        help="rigid-hub selection: max radial distance from the exported local Z axis in metres",
     )
     p.add_argument("--hub-axial-min", type=float, default=None, help="hub axial lower bound in metres")
     p.add_argument("--hub-axial-max", type=float, default=None, help="hub axial upper bound in metres")
     p.add_argument("--hub-node-set", default="HUB", help="Abaqus node set name for the rigid connection")
     p.add_argument("--surface-node-set", default="SURFACE", help="Abaqus node set name for boundary nodes")
+    p.add_argument(
+        "--no-fuse-assembly",
+        action="store_true",
+        help="do not boolean-fuse multi-solid STEP assemblies before meshing",
+    )
+    p.add_argument(
+        "--repair-after-decimation",
+        action="store_true",
+        help="decimate the raw OCC surface before MeshFix repair; preserves volume better "
+             "on multi-solid assemblies",
+    )
+    p.add_argument(
+        "--skip-meshfix",
+        action="store_true",
+        help="skip MeshFix repair when the raw OCC surface is already watertight",
+    )
+    p.add_argument(
+        "--skip-decimation",
+        action="store_true",
+        help="keep the full OCC surface instead of quadric-decimating it",
+    )
+    p.add_argument(
+        "--min-solid-volume",
+        type=float,
+        default=0.0,
+        help="drop assembly solids smaller than this volume in m^3 before fusion; "
+             "useful for removing tiny fasteners (default: 0)",
+    )
+    p.add_argument(
+        "--no-occ-parallel",
+        action="store_true",
+        help="disable OpenCASCADE's parallel tessellation mode",
+    )
+    p.add_argument(
+        "--time-stages",
+        action="store_true",
+        help="print per-stage timings to help find meshing bottlenecks",
+    )
 
     p.add_argument(
         "--max-volume-error",
@@ -191,7 +250,54 @@ def count_topology(shape) -> tuple[int, int]:
     return counts[0], counts[1]
 
 
-def read_cad(step_path: Path):
+def fuse_solids(shape, *, min_volume_m3: float = 0.0, unit_scale: float = 1.0):
+    """Fuse a multi-solid assembly into one valid solid for meshing.
+
+    A STEP assembly usually contains many overlapping components. Meshing the
+    compound directly makes MeshFix merge coincident shells without resolving
+    overlaps, which corrupts the volume and bounding box. Boolean fusion gives
+    one watertight outer/inner surface and a meaningful CAD volume.
+    """
+    explorer = TopExp_Explorer(shape, TopAbs_SOLID)
+    solids = []
+    while explorer.More():
+        solid = explorer.Current()
+        if min_volume_m3 > 0.0:
+            props = GProp_GProps()
+            BRepGProp.VolumeProperties_s(solid, props)
+            volume = float(props.Mass()) * unit_scale**3
+            if volume < min_volume_m3:
+                explorer.Next()
+                continue
+        solids.append(solid)
+        explorer.Next()
+    if not solids:
+        raise RuntimeError("--min-solid-volume removed every STEP solid")
+    kept = len(solids)
+    if kept <= 1:
+        return solids[0], kept
+
+    fused = solids[0]
+    for solid in solids[1:]:
+        operation = BRepAlgoAPI_Fuse(fused, solid)
+        operation.Build()
+        fused = operation.Shape()
+    if not BRepCheck_Analyzer(fused).IsValid():
+        fixer = ShapeFix_Shape(fused)
+        fixer.Perform()
+        fused = fixer.Shape()
+    if not BRepCheck_Analyzer(fused).IsValid():
+        raise RuntimeError("could not fuse the STEP assembly into a valid solid")
+    return fused, kept
+
+
+def read_cad(
+    step_path: Path,
+    *,
+    fuse_assembly: bool = True,
+    min_volume_m3: float = 0.0,
+    unit_scale: float = 1.0,
+):
     reader = STEPControl_Reader()
     if reader.ReadFile(str(step_path)) != IFSelect_RetDone:
         raise RuntimeError(f"could not read STEP file: {step_path}")
@@ -209,9 +315,15 @@ def read_cad(step_path: Path):
     if solids < 1:
         raise RuntimeError("STEP file contains no 3D solids")
 
+    kept = solids
+    if fuse_assembly:
+        shape, kept = fuse_solids(
+            shape, min_volume_m3=min_volume_m3, unit_scale=unit_scale
+        )
+
     props = GProp_GProps()
     BRepGProp.VolumeProperties_s(shape, props)
-    return shape, solids, faces, float(props.Mass())
+    return shape, solids, faces, float(props.Mass()), kept
 
 
 def write_surface_stl(shape, stl_path: Path, deflection_cad: float, angular_deflection: float) -> None:
@@ -236,25 +348,45 @@ def repair_surface(pts: np.ndarray, faces: np.ndarray) -> pv.PolyData:
     return clean
 
 
-def decimate_surface(clean: pv.PolyData, target_faces: int) -> tuple[np.ndarray, np.ndarray, int]:
-    """Reduce a repaired surface to roughly ``target_faces`` triangles.
+def decimate_surface(
+    points: np.ndarray,
+    faces: np.ndarray,
+    target_faces: int,
+    *,
+    repair_result: bool = True,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Reduce a surface to roughly ``target_faces`` triangles.
 
     The CAD triangulation is far finer than the 12 mm CRM SPH spacing.  Using
     it directly as an FEA contact surface creates tens of thousands of flexible
     BCE markers, which overestimates SPH boundary density and produces huge
     artificial contact pressures.  Quadric decimation preserves the overall
     volume while bringing marker spacing close to the SPH spacing.
+
+    ``repair_result`` controls whether MeshFix is invoked after decimation.
+    Leave it enabled for the legacy repair-then-decimate route.  Disable it
+    when MeshFix will be run explicitly afterward on the smaller surface:
+    repairing a fused multi-solid assembly before decimation can inflate the
+    volume dramatically.
     """
-    points = np.asarray(clean.points, dtype=float)
-    faces = clean.faces.reshape(-1, 4)[:, 1:].astype(np.int32)
+    points = np.asarray(points, dtype=float)
+    faces = np.asarray(faces, dtype=np.int32)
     before = len(faces)
     if target_faces <= 0 or before <= target_faces:
         return points, faces, before
 
     reduction = 1.0 - target_faces / before
-    reduced = clean.decimate(target_reduction=reduction, volume_preservation=True)
+    pv_faces = np.column_stack(
+        [np.full(len(faces), 3, dtype=np.int64), faces.astype(np.int64)]
+    ).ravel()
+    reduced = pv.PolyData(points, pv_faces).decimate(
+        target_reduction=reduction, volume_preservation=True
+    )
     points = np.asarray(reduced.points, dtype=float)
     faces = reduced.faces.reshape(-1, 4)[:, 1:].astype(np.int32)
+
+    if not repair_result:
+        return points, faces, before
 
     surface = trimesh.Trimesh(points, faces, process=False)
     if not surface.is_watertight:
@@ -367,6 +499,19 @@ def main() -> int:
     prefix = (args.out_prefix or (Path("fea") / f"{step_path.stem}_fea")).resolve()
     prefix.parent.mkdir(parents=True, exist_ok=True)
 
+    if not args.no_occ_parallel:
+        BRepMesh_IncrementalMesh.SetParallelDefault_s(True)
+
+    last_mark = time.perf_counter()
+
+    def mark(label: str) -> None:
+        nonlocal last_mark
+        now = time.perf_counter()
+        if args.time_stages:
+            print(f"[mesh timing] {label}: {now - last_mark:.2f} s", file=sys.stderr)
+        last_mark = now
+
+    source_to_local = source_axis_to_z(args.axis)
     rotation = np.eye(3)
     if args.rotate:
         parts = [p.strip() for p in args.rotate.split(",")]
@@ -387,8 +532,14 @@ def main() -> int:
     if max_tet_volume <= 0.0:
         raise SystemExit("--max-tet-volume must be positive")
 
-    shape, n_solids, n_faces, cad_volume_cad = read_cad(step_path)
+    shape, n_solids, n_faces, cad_volume_cad, kept_solids = read_cad(
+        step_path,
+        fuse_assembly=not args.no_fuse_assembly,
+        min_volume_m3=args.min_solid_volume,
+        unit_scale=args.unit_scale,
+    )
     cad_volume = cad_volume_cad * args.unit_scale**3
+    mark("read/fuse CAD")
 
     stl_path = prefix.parent / f"{prefix.name}_surface.stl"
     write_surface_stl(
@@ -397,12 +548,62 @@ def main() -> int:
         deflection_cad=surface_deflection / args.unit_scale,
         angular_deflection=args.angular_deflection,
     )
+    mark("OCC surface tessellation")
     raw = pv.read(str(stl_path))
+    raw_points = np.asarray(raw.points, dtype=float)
     raw_faces = raw.faces.reshape(-1, 4)[:, 1:].astype(np.int32)
-    clean = repair_surface(np.asarray(raw.points, dtype=float), raw_faces)
-    repaired_points, repaired_faces, faces_before_decimation = decimate_surface(
-        clean, args.surface_target_faces
-    )
+    raw_surface = trimesh.Trimesh(vertices=raw_points, faces=raw_faces, process=True)
+    raw_watertight = bool(raw_surface.is_watertight)
+    meshfix_used = False
+
+    if args.repair_after_decimation and args.skip_decimation:
+        raise SystemExit("--repair-after-decimation and --skip-decimation are mutually exclusive")
+
+    if args.repair_after_decimation:
+        clean_points, clean_faces, faces_before_decimation = decimate_surface(
+            raw_points, raw_faces, args.surface_target_faces, repair_result=False
+        )
+        if args.skip_meshfix:
+            decimated = trimesh.Trimesh(clean_points, clean_faces, process=False)
+            if not decimated.is_watertight:
+                raise SystemExit(
+                    "--skip-meshfix requires a watertight surface; the decimated OCC "
+                    "surface is not watertight"
+                )
+            print("Skipping MeshFix: decimated OCC surface is watertight", file=sys.stderr)
+        else:
+            clean = repair_surface(clean_points, clean_faces)
+            clean_points = np.asarray(clean.points, dtype=float)
+            clean_faces = clean.faces.reshape(-1, 4)[:, 1:].astype(np.int32)
+            meshfix_used = True
+        repaired_points, repaired_faces = clean_points, clean_faces
+        surface_pipeline = "OpenCASCADE STL -> quadric decimation -> MeshFix -> TetGen"
+    elif args.skip_meshfix and raw_watertight:
+        clean_points = np.asarray(raw_surface.vertices, dtype=float)
+        clean_faces = np.asarray(raw_surface.faces, dtype=np.int32)
+        print("Skipping MeshFix: raw OCC surface is already watertight", file=sys.stderr)
+        if args.skip_decimation:
+            repaired_points, repaired_faces = clean_points, clean_faces
+            faces_before_decimation = len(clean_faces)
+        else:
+            repaired_points, repaired_faces, faces_before_decimation = decimate_surface(
+                clean_points, clean_faces, args.surface_target_faces
+            )
+        surface_pipeline = "OpenCASCADE STL -> subdivision -> TetGen (MeshFix skipped)"
+    else:
+        clean = repair_surface(raw_points, raw_faces)
+        clean_points = np.asarray(clean.points, dtype=float)
+        clean_faces = clean.faces.reshape(-1, 4)[:, 1:].astype(np.int32)
+        meshfix_used = True
+        if args.skip_decimation:
+            repaired_points, repaired_faces = clean_points, clean_faces
+            faces_before_decimation = len(clean_faces)
+        else:
+            repaired_points, repaired_faces, faces_before_decimation = decimate_surface(
+                clean_points, clean_faces, args.surface_target_faces
+            )
+        surface_pipeline = "OpenCASCADE STL -> MeshFix -> quadric decimation -> TetGen"
+    mark("surface repair/decimation")
 
     # OCC leaves a few very long triangles on planar end faces.  Adaptive
     # longest-edge bisection fixes those without inflating already fine curved
@@ -413,6 +614,11 @@ def main() -> int:
     )
     if not trimesh.Trimesh(surface_points, surface_faces, process=False).is_watertight:
         raise RuntimeError("surface subdivision broke watertightness")
+
+    # Export both the TetGen input and CRM contact surface in the FEA local
+    # frame, where the drum axis is +Z regardless of the STEP source axis.
+    surface_points = np.asarray(surface_points, dtype=float) @ source_to_local.T
+    mark("surface subdivision/axis rotation")
 
     # Replace the raw OCC STL with the actual repaired/decimated surface used
     # for tetrahedralization and CRM contact.
@@ -430,6 +636,7 @@ def main() -> int:
     nodes_cad, tets, _attributes, _markers = tet.tetrahedralize(switches=switches)
     if nodes_cad.shape[0] == 0 or tets.shape[0] == 0:
         raise RuntimeError("TetGen produced an empty volume mesh")
+    mark("TetGen volume meshing")
 
     points = np.asarray(nodes_cad, dtype=float) * args.unit_scale
     points = points @ rotation.T + translation
@@ -440,8 +647,8 @@ def main() -> int:
     surface_nodes_0 = np.unique(np.asarray(tet.trifaces, dtype=np.int32))
     surface_ids = (surface_nodes_0 + 1).tolist()
 
-    radial_axes = [i for i in range(3) if i != args.axis]
-    axial = points[:, args.axis]
+    radial_axes = [0, 1]
+    axial = points[:, 2]
     radial = np.linalg.norm(points[:, radial_axes], axis=1)
     hub_mask = radial <= args.hub_radius
     if args.hub_axial_min is not None:
@@ -461,10 +668,13 @@ def main() -> int:
     quality = edge_quality(points, tets)
 
     write_outputs(prefix, points, tets, hub_ids, surface_ids, args.hub_node_set, args.surface_node_set)
+    mark("write mesh outputs")
 
     metadata = {
         "source_step": str(step_path),
-        "pipeline": "OpenCASCADE STL -> MeshFix -> TetGen",
+        "pipeline": surface_pipeline,
+        "meshfix_used": meshfix_used,
+        "raw_surface_watertight": raw_watertight,
         "outputs": {
             "abaqus": str(prefix.with_suffix(".inp")),
             "tetgen_node": str(prefix.with_suffix(".node")),
@@ -474,6 +684,9 @@ def main() -> int:
         "units": "metres",
         "unit_scale": args.unit_scale,
         "cad_solids": n_solids,
+        "cad_solids_kept": kept_solids,
+        "cad_solids_dropped": n_solids - kept_solids,
+        "min_solid_volume_m3": args.min_solid_volume,
         "cad_faces": n_faces,
         "surface_deflection_m": surface_deflection,
         "angular_deflection_rad": args.angular_deflection,
@@ -483,13 +696,16 @@ def main() -> int:
         "surface_points": int(len(surface_points)),
         "surface_faces": int(len(surface_faces)),
         "tetgen_switches": switches,
-        "rotation_axis": AXES_TO_NAME[args.axis],
+        "source_drum_axis": AXES_TO_NAME[args.axis],
+        "export_drum_axis": "Z",
         "nodes": int(len(points)),
         "tetrahedra": int(len(tets)),
         "hub_node_set": args.hub_node_set,
         "hub_nodes": len(hub_ids),
+        "hub_radius_m": args.hub_radius,
         "hub_selection": (
-            f"radial distance <= {args.hub_radius:g} m about {AXES_TO_NAME[args.axis]} axis"
+            f"radial distance <= {args.hub_radius:g} m about exported local Z axis "
+            f"(source axis {AXES_TO_NAME[args.axis]})"
         ),
         "surface_node_set": args.surface_node_set,
         "surface_nodes": len(surface_ids),
