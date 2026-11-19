@@ -66,7 +66,7 @@ LEGACY_DRUM_HALF_LENGTH = 0.033
 LEGACY_BED_HEIGHT = 0.06
 LEGACY_DESCENT_SPEED = 0.0015
 LEGACY_ACTIVE_BOX = 0.244
-LEGACY_SPACING = 0.004
+LEGACY_SPACING = 0.008  # default SPH spacing (smaller/faster particle count; use 0.004 for higher fidelity)
 
 SOIL_DEFAULTS = {
     "density": 1650.0,
@@ -242,7 +242,7 @@ def geometry_defaults(measured: dict[str, float | int] | None,
     active_box = (
         max(LEGACY_ACTIVE_BOX, 2.0 * (half_length + 0.01 * scale) + 0.04 * scale),
         max(LEGACY_ACTIVE_BOX, 2.0 * (radius + 0.005 * scale) + 0.04 * scale),
-        max(LEGACY_ACTIVE_BOX, bed_height + 2.0 * radius + 0.02 * scale),
+        max(0.5 * scale, bed_height + 2.0 * radius + 0.20 * scale),
     )
     # Keep the particle count in the validated range; a large drum needs a
     # proportionally coarser SPH spacing, capped at the validated 12 mm case.
@@ -320,7 +320,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--duration", type=float, default=None, help="simulated CRM duration in s (default: 20)")
     p.add_argument("--fea-duration", type=float, default=None,
                    help="FEA duration in s (default: same as CRM)")
-    p.add_argument("--spacing", type=float, default=None, help="SPH spacing in m (default: 0.004)")
+    p.add_argument("--spacing", type=float, default=None, help="SPH spacing in m (default: geometry-scaled, ~0.008 for legacy size)")
     p.add_argument("--crm-dt", default=None,
                    help="CRM timestep in s, or 'auto' for spacing-dependent default")
     p.add_argument("--d0-multiplier", type=float, default=None, help="SPH kernel length multiplier")
@@ -329,7 +329,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--active-box", default=None, help="SPH domain size X,Y,Z in metres")
     p.add_argument("--settle-time", type=float, default=None, help="settle time before spin/descent")
     p.add_argument("--descent-speed", type=float, default=None, help="drum descent speed in m/s")
-    p.add_argument("--omega", type=float, default=None, help="drum spin rate in rad/s")
+    p.add_argument("--omega", type=float, default=None, help="drum spin rate magnitude in rad/s")
+    p.add_argument("--reverse-spin", action=argparse.BooleanOptionalAction, default=None,
+                   help="reverse drum spin direction (use --no-reverse-spin to force forward)")
     p.add_argument("--spin-axis", choices=("X", "Y", "Z"), default=None, help="global spin axis")
     p.add_argument("--drum-radius", type=float, default=None, help="outer drum radius in m")
     p.add_argument("--drum-half-length", type=float, default=None, help="half drum axial length in m")
@@ -791,10 +793,18 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "Descent speed (m/s)", float(geo["descent_speed"]), minimum=0.0,
         detail="Vertical lowering speed of the drum into the bed (0 keeps it at constant height).",
     )
-    omega = args.omega if args.omega is not None else prompt_float(
-        "Spin rate (rad/s)", 3.14, minimum=0.0,
-        detail="Drum angular velocity about the spin axis (~3.14 rad/s = 30 rpm).",
+    omega_mag = args.omega if args.omega is not None else prompt_float(
+        "Spin rate magnitude (rad/s)", 3.14, minimum=0.0,
+        detail="Drum angular speed about the spin axis (~3.14 rad/s = 30 rpm).",
     )
+    if args.reverse_spin is not None:
+        reverse_spin = bool(args.reverse_spin)
+    else:
+        reverse_spin = prompt_bool(
+            "Reverse spin direction?", False,
+            detail="Flip rotation direction (useful if the CAD excavator spins the wrong way).",
+        )
+    omega = -abs(float(omega_mag)) if reverse_spin else abs(float(omega_mag))
     spin_axis = (args.spin_axis or prompt_choice(
         "Spin axis", ("X", "Y", "Z"), "X",
         detail="Global axis the drum spins about during excavation (usually X).",
@@ -940,6 +950,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "settle_time": settle_time,
         "descent_speed": descent_speed,
         "omega": omega,
+        "reverse_spin": bool(reverse_spin),
         "spin_axis": spin_axis,
         "inner_radius": inner_radius,
         "capacity_volume": capacity_volume,
@@ -974,7 +985,8 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         "--active-box", ",".join(f"{v:g}" for v in cfg["active_box"]),
         "--settle-time", f"{cfg['settle_time']:g}",
         "--descent-speed", f"{cfg['descent_speed']:g}",
-        "--omega", f"{cfg['omega']:g}",
+        "--omega", f"{abs(cfg['omega']):g}",
+        *(['--reverse-spin'] if cfg.get('reverse_spin') else []),
         "--spin-axis", cfg["spin_axis"],
         "--drum-radius", f"{cfg['drum_radius']:g}",
         "--drum-half-length", f"{cfg['drum_half_length']:g}",
@@ -1013,7 +1025,8 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         "--bed-height", f"{cfg['bed_height']:g}",
         "--settle-time", f"{cfg['settle_time']:g}",
         "--descent-speed", f"{cfg['descent_speed']:g}",
-        "--omega", f"{cfg['omega']:g}",
+        "--omega", f"{abs(cfg['omega']):g}",
+        *(['--reverse-spin'] if cfg.get('reverse_spin') else []),
         "--spin-axis", cfg["spin_axis"],
         "--drum-radius", f"{cfg['drum_radius']:g}",
         "--drum-half-length", f"{cfg['drum_half_length']:g}",

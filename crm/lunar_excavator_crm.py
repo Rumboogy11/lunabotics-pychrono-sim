@@ -77,13 +77,14 @@ from lunar_excavator_config import (  # noqa: E402
 class CrmRunParams:
     """Numerics, geometry hooks, and excavation metrics for a CRM run."""
 
-    spacing: float = 0.004               # SPH particle spacing [m]
-    dt: float = 8.0e-5                   # CRM/FSI step [s] at the default 4 mm spacing
+    spacing: float = 0.008               # SPH particle spacing [m] (coarser/fewer particles by default)
+    dt: float = 1.6e-4                   # CRM/FSI step [s] at the default 8 mm spacing
     duration: float = MOTION_DEFAULT.t_max
     fps: float = 20.0                    # metric/particle output cadence
     settle_time: float = MOTION_DEFAULT.settle_time
     descent_speed: float = MOTION_DEFAULT.lower_speed
     omega: float = MOTION_DEFAULT.drum_omega
+    reverse_spin: bool = False
     bed_height: float = MOTION_DEFAULT.bed_height
     spin_axis: str = MOTION_DEFAULT.drum_spin_axis
     drum_radius: float = MOTION_DEFAULT.drum_radius        # outer/crest radius [m]
@@ -92,7 +93,7 @@ class CrmRunParams:
     capacity_volume: float | None = None  # override for CAD free volume [m^3]
     active_box_x: float = 0.244
     active_box_y: float = 0.244
-    active_box_z: float = 0.244
+    active_box_z: float = 0.5
     max_velocity: float = 1.0            # SPH max velocity for EOS stabilization
     d0_multiplier: float = 1.0           # h = d0_multiplier * spacing
     free_surface_threshold: float = 2.4  # divergence threshold for free surface
@@ -171,13 +172,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fps", type=float, default=None,
                    help="metric output cadence in Hz (default: 20)")
     p.add_argument("--spacing", type=float, default=None,
-                   help="SPH particle spacing in metres (default: 0.004)")
+                   help="SPH particle spacing in metres (default: 0.008; smaller value = more particles)")
     p.add_argument("--settle-time", type=float, default=None,
                    help="seconds before spin/descent begins")
     p.add_argument("--descent-speed", type=float, default=None,
                    help="drum descent speed in m/s (default: 0.0015)")
     p.add_argument("--omega", type=float, default=None,
-                   help="drum spin rate in rad/s (default: shared config)")
+                   help="drum spin rate magnitude in rad/s (default: shared config)")
+    p.add_argument("--reverse-spin", action="store_true",
+                   help="reverse the drum spin direction (flip rotation sign)")
     p.add_argument("--bed-height", type=float, default=None,
                    help="initial soil bed height in m (default: 0.06)")
     p.add_argument("--spin-axis", choices=("X", "Y", "Z"), default=None,
@@ -196,7 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--capacity-volume", type=float, default=None,
                    help="override nominal cavity volume in m^3 (for CAD-calibrated designs)")
     p.add_argument("--active-box", type=str, default=None,
-                   help="active SPH domain size X,Y,Z in metres (default: 0.244,0.244,0.244)")
+                   help="active SPH domain size X,Y,Z in metres (default: 0.244,0.244,0.5)")
     p.add_argument("--max-velocity", type=float, default=None,
                    help="SPH stabilizing max velocity in m/s (default: 1.0)")
     p.add_argument("--d0-multiplier", type=float, default=None,
@@ -285,6 +288,7 @@ def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -
         "settle_time": args.settle_time,
         "descent_speed": args.descent_speed,
         "omega": args.omega,
+        "reverse_spin": getattr(args, "reverse_spin", None),
         "bed_height": args.bed_height,
         "spin_axis": args.spin_axis,
         "drum_radius": getattr(args, "drum_radius", None),
@@ -300,6 +304,9 @@ def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -
     if args.active_box is not None:
         box = parse_box(args.active_box)
         overrides.update(active_box_x=box[0], active_box_y=box[1], active_box_z=box[2])
+
+    if overrides.get("reverse_spin") and overrides.get("omega", CrmRunParams.omega) > 0.0:
+        overrides["omega"] = -abs(float(overrides["omega"]))
 
     if args.smoke_test:
         overrides.setdefault("spacing", 0.012)

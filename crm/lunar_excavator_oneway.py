@@ -189,6 +189,7 @@ class FeaVtkExporter:
             vm[i] = float(element.GetStress().GetEquivalentVonMises())
         _vtk_append_array(grid.GetCellData(), "von_mises_pa", vm, components=1)
         _vtk_append_array(grid.GetCellData(), "von_mises_MPa", vm * 1.0e-6, components=1)
+        grid.GetCellData().SetActiveScalars("von_mises_pa")
 
         out_path = self.frames_dir / f"frame_{frame_index:06d}.vtu"
         writer = vtk.vtkXMLUnstructuredGridWriter()
