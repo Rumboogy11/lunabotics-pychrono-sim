@@ -31,13 +31,31 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import pyvista as pv
-import trimesh
-
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# The shebang uses ``/usr/bin/env python3``, which can resolve to a system
+# Python without pyvista/trimesh.  Relaunch once under the project's conda env
+# so ``./view_geometry.py`` works directly, from any working directory.
+_VENV_DIR = ROOT / "chrono-env"
+_VENV_PYTHON = _VENV_DIR / "bin" / "python"
+_REEXEC_FLAG = "PYCHRONO_VIEW_GEOMETRY_ENV"
+if (
+    os.environ.get(_REEXEC_FLAG) != "1"
+    and _VENV_PYTHON.is_file()
+    and os.access(_VENV_PYTHON, os.X_OK)
+    and Path(sys.prefix).resolve() != _VENV_DIR.resolve()
+):
+    os.environ[_REEXEC_FLAG] = "1"
+    os.execv(
+        str(_VENV_PYTHON),
+        [str(_VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]],
+    )
+
+import numpy as np
+import pyvista as pv
+import trimesh
 
 import step_to_chrono_fea as conv  # noqa: E402  (reuse the converter's OCC route)
 

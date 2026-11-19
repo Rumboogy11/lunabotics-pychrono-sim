@@ -254,6 +254,9 @@ def geometry_defaults(measured: dict[str, float | int] | None,
     hub_radius = 0.2 * radius if n_solids > 1 else 0.0015 * scale
     if measured and measured.get("hub_radius") is not None:
         hub_radius = float(measured["hub_radius"])
+    # FEA tet edge target: keep elements reasonably sized for the drum scale
+    # while staying near the validated 12 mm baseline for the legacy model.
+    mesh_size = min(0.02, max(0.006, 0.012 * scale))
 
     def clean(value: float) -> float:
         return float(f"{value:.6g}")
@@ -263,6 +266,7 @@ def geometry_defaults(measured: dict[str, float | int] | None,
         "drum_half_length": clean(half_length),
         "surface_target_faces": 80000 if n_solids > 1 else 8000,
         "min_solid_volume": 1.0e-5 if n_solids > 1 else 0.0,
+        "mesh_size": clean(mesh_size),
         "bed_height": clean(bed_height),
         "descent_speed": clean(descent_speed),
         "active_box": tuple(clean(v) for v in active_box),
@@ -273,6 +277,29 @@ def geometry_defaults(measured: dict[str, float | int] | None,
         "lowering_duration": clean(bed_height / descent_speed),
         "scale": clean(scale),
     }
+
+
+def _ensure_chrono_python() -> None:
+    """Re-exec under the project chrono-env Python when run from another interpreter.
+
+    The wizard relies on CAD/mesh libraries (OCP, trimesh, etc.) that live in
+    chrono-env.  Running ``./study_wizard.py`` directly picks system Python via
+    the shebang and silently disables STEP measurement and other features.
+    """
+    env_python = (ROOT / "chrono-env" / "bin" / "python").resolve()
+    if not env_python.is_file():
+        return
+    try:
+        current = Path(sys.executable).resolve()
+    except OSError:
+        current = Path(sys.executable)
+    if current == env_python:
+        return
+    if os.environ.get("PYCHRONO_WIZARD_REEXEC") == "1":
+        return
+    env = os.environ.copy()
+    env["PYCHRONO_WIZARD_REEXEC"] = "1"
+    os.execv(str(env_python), [str(env_python), str(Path(__file__).resolve()), *sys.argv[1:]])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -351,12 +378,19 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def prompt_text(label: str, default: str | None = None, *, allow_empty: bool = False) -> str:
+def _show_detail(detail: str | None) -> None:
+    if detail and INTERACTIVE and not ACCEPT_DEFAULTS:
+        print(f"  {detail}")
+
+
+def prompt_text(label: str, default: str | None = None, *, allow_empty: bool = False,
+                detail: str | None = None) -> str:
     suffix = f" [{default}]" if default is not None else ""
     if not INTERACTIVE or ACCEPT_DEFAULTS:
         if default is None:
             raise SystemExit(f"missing required value: {label}")
         return str(default)
+    _show_detail(detail)
     while True:
         value = input(f"{label}{suffix}: ").strip()
         if not value and default is not None:
@@ -366,37 +400,42 @@ def prompt_text(label: str, default: str | None = None, *, allow_empty: bool = F
         print("Please enter a value.")
 
 
-def prompt_bool(label: str, default: bool = True) -> bool:
+def prompt_bool(label: str, default: bool = True, detail: str | None = None) -> bool:
     hint = "Y/n" if default else "y/N"
     if not INTERACTIVE or ACCEPT_DEFAULTS:
         return default
+    _show_detail(detail)
     value = input(f"{label} [{hint}]: ").strip().lower()
     if not value:
         return default
     return value in {"y", "yes", "true", "1"}
 
 
-def prompt_choice(label: str, choices: tuple[str, ...], default: str) -> str:
+def prompt_choice(label: str, choices: tuple[str, ...], default: str,
+                  detail: str | None = None) -> str:
     if not INTERACTIVE or ACCEPT_DEFAULTS:
         return default
+    _show_detail(detail)
     while True:
-        value = input(f"{label} [{default}]: ").strip().lower() or default
-        if value in choices:
-            return value
+        value = input(f"{label} [{default}]: ").strip() or default
+        for choice in choices:
+            if value.lower() == str(choice).lower():
+                return choice
         print(f"Choose one of: {', '.join(choices)}")
 
 
 def prompt_float(label: str, default: float, *, minimum: float | None = None,
-                 maximum: float | None = None) -> float:
+                 maximum: float | None = None, detail: str | None = None) -> float:
     if not INTERACTIVE or ACCEPT_DEFAULTS:
         value = float(default)
     else:
+        _show_detail(detail)
         raw = input(f"{label} [{default:g}]: ").strip()
         try:
             value = float(raw) if raw else float(default)
         except ValueError:
             print("Please enter a number.")
-            return prompt_float(label, default, minimum=minimum, maximum=maximum)
+            return prompt_float(label, default, minimum=minimum, maximum=maximum, detail=detail)
     if minimum is not None and value < minimum:
         raise SystemExit(f"{label} must be >= {minimum}")
     if maximum is not None and value > maximum:
@@ -405,11 +444,13 @@ def prompt_float(label: str, default: float, *, minimum: float | None = None,
 
 
 def prompt_optional_float(label: str, default: float | None = None, *,
-                          minimum: float | None = None) -> float | None:
+                          minimum: float | None = None,
+                          detail: str | None = None) -> float | None:
     suffix = f" [{default:g}]" if default is not None else ""
     if not INTERACTIVE or ACCEPT_DEFAULTS:
         value = default
     else:
+        _show_detail(detail)
         raw = input(f"{label}{suffix}: ").strip()
         if not raw:
             value = default
@@ -418,30 +459,33 @@ def prompt_optional_float(label: str, default: float | None = None, *,
                 value = float(raw)
             except ValueError:
                 print("Please enter a number or press Enter.")
-                return prompt_optional_float(label, default, minimum=minimum)
+                return prompt_optional_float(label, default, minimum=minimum, detail=detail)
     if value is not None and minimum is not None and value < minimum:
         raise SystemExit(f"{label} must be >= {minimum}")
     return value
 
 
-def prompt_int(label: str, default: int, *, minimum: int = 1) -> int:
+def prompt_int(label: str, default: int, *, minimum: int = 1,
+               detail: str | None = None) -> int:
     if not INTERACTIVE or ACCEPT_DEFAULTS:
         value = int(default)
     else:
+        _show_detail(detail)
         raw = input(f"{label} [{default}]: ").strip()
         try:
             value = int(raw) if raw else int(default)
         except ValueError:
             print("Please enter an integer.")
-            return prompt_int(label, default, minimum=minimum)
+            return prompt_int(label, default, minimum=minimum, detail=detail)
     if value < minimum:
         raise SystemExit(f"{label} must be >= {minimum}")
     return value
 
 
-def prompt_path(label: str, default: Path | None = None, *, must_exist: bool = True) -> Path:
+def prompt_path(label: str, default: Path | None = None, *, must_exist: bool = True,
+                detail: str | None = None) -> Path:
     while True:
-        raw = prompt_text(label, str(default) if default else None)
+        raw = prompt_text(label, str(default) if default else None, detail=detail)
         path = Path(raw).expanduser().resolve()
         if not must_exist or path.exists():
             return path
@@ -450,8 +494,8 @@ def prompt_path(label: str, default: Path | None = None, *, must_exist: bool = T
             raise SystemExit(f"missing input file: {path}")
 
 
-def prompt_box(label: str, default: str) -> tuple[float, float, float]:
-    raw = prompt_text(label, default)
+def prompt_box(label: str, default: str, detail: str | None = None) -> tuple[float, float, float]:
+    raw = prompt_text(label, default, detail=detail)
     try:
         parts = tuple(float(x) for x in raw.replace(";", ",").split(","))
     except ValueError as exc:
@@ -469,20 +513,31 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
     print("Press Enter to accept values in brackets.\n")
 
     default_name = datetime.now().strftime("study_%Y%m%d_%H%M%S")
-    name = args.study_name or prompt_text("Study name", default_name)
+    name = args.study_name or prompt_text(
+        "Study name", default_name,
+        detail="Short label for this run; used in the default output folder name.",
+    )
     if args.output_dir:
         out_dir = args.output_dir.expanduser().resolve()
     else:
         default_out = ROOT / f"Output_{name}"
-        out_dir = Path(prompt_text("Output directory", str(default_out))).expanduser().resolve()
+        out_dir = Path(prompt_text(
+            "Output directory", str(default_out),
+            detail="Folder for meshes, logs, configs and results (created if needed).",
+        )).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if (out_dir / "study_config.json").exists() and not args.dry_run and not args.yes:
-        if not prompt_bool("Output directory already has a study config; overwrite/continue?", False):
+        if not prompt_bool(
+            "Output directory already has a study config; overwrite/continue?", False,
+            detail="Continuing may overwrite previous study files in this directory.",
+        ):
             raise SystemExit("aborted; choose a new output directory")
 
     geometry = args.geometry or prompt_choice(
-        "Geometry source: supplied | step | files", ("supplied", "step", "files"), "supplied"
+        "Geometry source", ("supplied", "step", "files"), "supplied",
+        detail="supplied = built-in meshes; step = convert a STEP CAD file; "
+               "files = provide existing CRM .obj and FEA .node/.ele meshes.",
     )
 
     crm_obj: Path
@@ -504,25 +559,121 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         fea_ele = DEFAULT_FEA_ELE
     elif geometry == "step":
         step_file = args.step_file or prompt_path(
-            "CAD STEP file", DEFAULT_STEP_FILE if DEFAULT_STEP_FILE.is_file() else None
+            "CAD STEP file", DEFAULT_STEP_FILE if DEFAULT_STEP_FILE.is_file() else None,
+            detail="Path to the .step/.stp excavator drum model to convert for CRM and FEA.",
         )
         requested_axis = args.cad_axis or prompt_choice(
-            "CAD drum axis in original STEP space (new models default Y)",
+            "CAD drum axis in original STEP space",
             ("auto", "X", "Y", "Z"), "Y",
+            detail="Drum rotation axis in the STEP file (new models are usually Y). "
+                   "Exported mesh/CRM surface are rotated so this axis becomes local +Z.",
         )
         if requested_axis == "auto":
+            print("Detecting CAD drum axis from STEP...")
             cad_axis = detect_cad_axis(step_file)
             print(f"Detected CAD drum axis: {cad_axis}")
         else:
             cad_axis = requested_axis.upper()
         if args.unit_scale is None:
-            unit_scale = prompt_float("STEP coordinate scale to metres", unit_scale, minimum=1e-9)
+            unit_scale = prompt_float(
+                "STEP coordinate scale to metres", unit_scale, minimum=1e-9,
+                detail="Multiply STEP coordinates by this factor (0.001 for mm-valued CAD).",
+            )
+    else:
+        crm_obj = args.crm_obj or prompt_path(
+            "CRM surface OBJ", DEFAULT_CRM_OBJ,
+            detail="Triangulated drum surface for rigid CRM contact (metres, local +Z axis).",
+        )
+        fea_node = args.fea_node or prompt_path(
+            "FEA .node file", DEFAULT_FEA_NODE,
+            detail="TetGen node file for the solid drum mesh used in one-way FEA.",
+        )
+        default_ele = args.fea_ele or Path(f"{fea_node.with_suffix('')}.ele")
+        fea_ele = prompt_path(
+            "FEA .ele file", default_ele,
+            detail="TetGen element file paired with the .node mesh.",
+        )
+
+    # Read geometry and offer auto-detected dimensions/mesh defaults.
+    measured: dict[str, float | int] | None = None
+    auto_geo = not args.no_auto_geometry
+    if geometry == "step":
+        if auto_geo and INTERACTIVE and not ACCEPT_DEFAULTS:
+            auto_geo = prompt_bool(
+                "Analyze STEP file to auto-detect drum dimensions and mesh defaults?", True,
+                detail="Reads the CAD to size drum radius/length, bed, SPH box, spacing and mesh settings.",
+            )
+        if auto_geo:
+            print("Reading STEP geometry...")
+            measured = measure_geometry(step_file, is_step=True, axis=cad_axis, unit_scale=unit_scale)
+            if measured is None:
+                print("Could not measure STEP geometry; using legacy defaults.")
+        else:
+            measured = None
+    else:
+        if auto_geo:
+            if geometry == "files":
+                measured = measure_geometry(crm_obj, is_step=False, axis="Z", unit_scale=1.0,
+                                            metadata=read_mesh_metadata(fea_node))
+            else:
+                measured = measure_geometry(crm_obj, is_step=False, axis="Z", unit_scale=1.0,
+                                            metadata=read_mesh_metadata(fea_node))
+
+    if geometry != "step":
+        for label, path in (("CRM surface OBJ", crm_obj), ("FEA .node file", fea_node),
+                            ("FEA .ele file", fea_ele)):
+            if not path.is_file():
+                raise SystemExit(f"missing {label}: {path}")
+
+    geo = geometry_defaults(measured, auto=auto_geo)
+    if geometry == "step":
         if args.mesh_size is None:
-            mesh_size = prompt_float("FEA target tet size (m)", mesh_size, minimum=1e-4)
+            mesh_size = float(geo.get("mesh_size", mesh_size))
+        if args.surface_target_faces is None:
+            surface_faces = int(geo["surface_target_faces"])
+        if args.min_solid_volume is None:
+            min_solid_volume = float(geo["min_solid_volume"])
+        if args.hub_radius is None and auto_geo and measured is not None:
+            hub_radius = float(geo["hub_radius"])
+    if measured and auto_geo:
+        print("\nCAD-derived starting values (press Enter to accept or type a replacement):")
+        print(
+            f"  drum R={geo['drum_radius']:g} m, half-length={geo['drum_half_length']:g} m, "
+            f"initial centre z≈{geo['initial_height']:g} m"
+        )
+        print(
+            f"  bed={geo['bed_height']:g} m, box="
+            f"{','.join(f'{v:g}' for v in geo['active_box'])} m, "
+            f"descent={geo['descent_speed']:g} m/s, spacing={geo['spacing']:g} m"
+        )
+        if geometry == "step":
+            print(
+                f"  mesh: tet size={geo.get('mesh_size', mesh_size):g} m, "
+                f"faces={geo['surface_target_faces']}, min solid={geo['min_solid_volume']:g} m^3, "
+                f"hub R={geo['hub_radius']:g} m"
+            )
+
+    if geometry == "step":
+        if args.mesh_size is None:
+            mesh_size = prompt_float(
+                "FEA target tet size (m)", mesh_size, minimum=1e-4,
+                detail="Approximate tetrahedral edge length; smaller gives a finer, slower FEA mesh.",
+            )
+        if args.surface_target_faces is None:
+            surface_faces = prompt_int(
+                "STEP surface target faces", surface_faces, minimum=100,
+                detail="Target triangle count for the CRM/FEA contact surface (80k for complex assemblies).",
+            )
+        if args.min_solid_volume is None:
+            min_solid_volume = prompt_float(
+                "Drop assembly solids smaller than (m^3)", min_solid_volume, minimum=0.0,
+                detail="Ignore tiny STEP solids (fasteners/debris) below this volume before meshing.",
+            )
         if args.surface_repair_order is None:
             surface_repair_order = prompt_choice(
                 "STEP MeshFix order (before | after decimation)",
                 ("before", "after"), surface_repair_order,
+                detail="'after' preserves volume better for fused multi-solid assemblies.",
             )
 
         mesh_dir = out_dir / "mesh"
@@ -534,60 +685,27 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         crm_obj = Path(f"{prefix}_surface.obj")
         print("Note: the STEP-derived surface OBJ is suitable for a first study. If you have a")
         print("      full-detail manufacturing OBJ, use --geometry files for the CRM contact mesh.")
-    else:
-        crm_obj = args.crm_obj or prompt_path("CRM surface OBJ", DEFAULT_CRM_OBJ)
-        fea_node = args.fea_node or prompt_path("FEA .node file", DEFAULT_FEA_NODE)
-        default_ele = args.fea_ele or Path(f"{fea_node.with_suffix('')}.ele")
-        fea_ele = prompt_path("FEA .ele file", default_ele)
-
-    if geometry != "step":
-        for label, path in (("CRM surface OBJ", crm_obj), ("FEA .node file", fea_node),
-                            ("FEA .ele file", fea_ele)):
-            if not path.is_file():
-                raise SystemExit(f"missing {label}: {path}")
-
-    if geometry == "step":
-        measured = measure_geometry(step_file, is_step=True, axis=cad_axis, unit_scale=unit_scale)
-    else:
-        measured = measure_geometry(crm_obj, is_step=False, axis="Z", unit_scale=1.0,
-                                    metadata=read_mesh_metadata(fea_node))
-    geo = geometry_defaults(measured, auto=not args.no_auto_geometry)
-    if measured and not args.no_auto_geometry:
-        print("\nCAD-derived starting values (press Enter to accept or type a replacement):")
-        print(
-            f"  drum R={geo['drum_radius']:g} m, half-length={geo['drum_half_length']:g} m, "
-            f"initial centre z≈{geo['initial_height']:g} m"
-        )
-        print(
-            f"  bed={geo['bed_height']:g} m, box="
-            f"{','.join(f'{v:g}' for v in geo['active_box'])} m, "
-            f"descent={geo['descent_speed']:g} m/s, spacing={geo['spacing']:g} m"
-        )
-
-    if args.surface_target_faces is None:
-        surface_faces = int(geo["surface_target_faces"])
-    if args.min_solid_volume is None:
-        min_solid_volume = float(geo["min_solid_volume"])
-    if geometry == "step":
-        if args.surface_target_faces is None:
-            surface_faces = prompt_int("STEP surface target faces", surface_faces)
-        if args.min_solid_volume is None:
-            min_solid_volume = prompt_float(
-                "Drop assembly solids smaller than (m^3)", min_solid_volume, minimum=0.0
-            )
 
     drum_radius = args.drum_radius if args.drum_radius is not None else prompt_float(
-        "Outer drum radius (m)", float(geo["drum_radius"]), minimum=1e-3
+        "Outer drum radius (m)", float(geo["drum_radius"]), minimum=1e-3,
+        detail="Crest/outer radius; sets initial drum height (bed + radius) and bed sizing.",
     )
     drum_half_length = args.drum_half_length if args.drum_half_length is not None else prompt_float(
-        "Drum half-length (m)", float(geo["drum_half_length"]), minimum=1e-3
+        "Drum half-length (m)", float(geo["drum_half_length"]), minimum=1e-3,
+        detail="Half the drum length along its axis; used for bed box and CRM placement.",
     )
     if args.hub_radius is not None:
         hub_radius = args.hub_radius
-    elif not args.no_auto_geometry:
-        hub_radius = prompt_float("Rigid hub radius (m)", float(geo["hub_radius"]), minimum=0.0)
+    elif geometry == "step" or (auto_geo and measured is not None):
+        hub_radius = prompt_float(
+            "Rigid hub radius (m)", float(geo["hub_radius"]), minimum=0.0,
+            detail="Nodes within this radius of the axis are tied rigidly to the spindle in FEA.",
+        )
     else:
-        hub_radius = prompt_float("Rigid hub radius (m)", hub_radius, minimum=0.0)
+        hub_radius = prompt_float(
+            "Rigid hub radius (m)", hub_radius, minimum=0.0,
+            detail="Nodes within this radius of the axis are tied rigidly to the spindle in FEA.",
+        )
 
     if geometry == "step":
         mesh_steps.append({
@@ -617,25 +735,33 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
 
     default_duration = max(20.0, float(geo["lowering_duration"]))
     duration = args.duration if args.duration is not None else prompt_float(
-        "CRM duration (s)", default_duration, minimum=1e-4
+        "CRM duration (s)", default_duration, minimum=1e-4,
+        detail="Total rigid-CRM simulation time. For a full excavation use ~bed_height/descent_speed.",
     )
     fea_duration = args.fea_duration if args.fea_duration is not None else prompt_float(
-        "FEA duration (s; Enter = same as CRM)", duration, minimum=1e-4
+        "FEA duration (s; Enter = same as CRM)", duration, minimum=1e-4,
+        detail="One-way FEA replay length; cannot exceed the CRM load-history duration.",
     )
     if fea_duration > duration + 1e-12:
         raise SystemExit("FEA duration cannot exceed the CRM load history duration")
 
     spacing = args.spacing if args.spacing is not None else prompt_float(
-        "SPH spacing (m)", float(geo["spacing"]), minimum=1e-4
+        "SPH spacing (m)", float(geo["spacing"]), minimum=1e-4,
+        detail="Initial particle spacing (smaller = more particles/slower, higher fidelity).",
     )
     d0_multiplier = args.d0_multiplier if args.d0_multiplier is not None else prompt_float(
-        "SPH kernel multiplier h/spacing", 1.0, minimum=0.5
+        "SPH kernel multiplier h/spacing", 1.0, minimum=0.5,
+        detail="Smoothing-length factor h = multiplier * spacing (1.0 is the standard choice).",
     )
     auto_dt = suggested_sph_dt(spacing, d0_multiplier)
     if args.crm_dt is None:
-        use_auto = prompt_bool(f"Use automatic CRM dt ({auto_dt:g} s)?", True)
+        use_auto = prompt_bool(
+            f"Use automatic CRM dt ({auto_dt:g} s)?", True,
+            detail="Chooses a spacing-dependent stable SPH timestep; say no to enter a custom dt.",
+        )
         crm_dt: float | None = auto_dt if use_auto else prompt_float(
-            "Custom CRM dt (s)", auto_dt, minimum=1e-6
+            "Custom CRM dt (s)", auto_dt, minimum=1e-6,
+            detail="Explicit CRM timestep (must satisfy the spacing stability limit).",
         )
     elif str(args.crm_dt).strip().lower() == "auto":
         crm_dt = auto_dt
@@ -644,46 +770,80 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
     if crm_dt is not None:
         crm_dt = float(crm_dt)
 
-    fps = args.fps if args.fps is not None else prompt_float("Output cadence (Hz)", 20.0, minimum=1e-3)
+    fps = args.fps if args.fps is not None else prompt_float(
+        "Output cadence (Hz)", 20.0, minimum=1e-3,
+        detail="How often summary/particle/load frames are written (higher = larger outputs).",
+    )
     bed_height = args.bed_height if args.bed_height is not None else prompt_float(
-        "Initial bed height (m)", float(geo["bed_height"]), minimum=1e-3
+        "Initial bed height (m)", float(geo["bed_height"]), minimum=1e-3,
+        detail="Depth of the soil bed; drum starts at bed_height + radius above the ground.",
     )
     geo_box = ",".join(f"{v:g}" for v in geo["active_box"])
-    active_box = prompt_box("Active SPH box X,Y,Z (m)", args.active_box or geo_box)
+    active_box = prompt_box(
+        "Active SPH box X,Y,Z (m)", args.active_box or geo_box,
+        detail="Particle domain size (X along drum axis, Y lateral, Z vertical); must contain the bed+drum.",
+    )
     settle_time = args.settle_time if args.settle_time is not None else prompt_float(
-        "Settle time (s)", 0.001, minimum=0.0
+        "Settle time (s)", 0.001, minimum=0.0,
+        detail="Time to let the bed settle before excavation motion begins.",
     )
     descent_speed = args.descent_speed if args.descent_speed is not None else prompt_float(
-        "Descent speed (m/s)", float(geo["descent_speed"]), minimum=0.0
+        "Descent speed (m/s)", float(geo["descent_speed"]), minimum=0.0,
+        detail="Vertical lowering speed of the drum into the bed (0 keeps it at constant height).",
     )
     omega = args.omega if args.omega is not None else prompt_float(
-        "Spin rate (rad/s)", 3.14, minimum=0.0
+        "Spin rate (rad/s)", 3.14, minimum=0.0,
+        detail="Drum angular velocity about the spin axis (~3.14 rad/s = 30 rpm).",
     )
-    spin_axis = args.spin_axis or prompt_choice("Spin axis", ("X", "Y", "Z"), "X").upper()
+    spin_axis = (args.spin_axis or prompt_choice(
+        "Spin axis", ("X", "Y", "Z"), "X",
+        detail="Global axis the drum spins about during excavation (usually X).",
+    )).upper()
     inner_radius = args.inner_radius if args.inner_radius is not None else prompt_float(
-        "Nominal cavity radius (m)", float(geo["inner_radius"]), minimum=1e-3
+        "Nominal cavity radius (m)", float(geo["inner_radius"]), minimum=1e-3,
+        detail="Inner/cavity radius used to estimate fill ratio and capacity volume.",
     )
     capacity_volume = args.capacity_volume if args.capacity_volume is not None else prompt_optional_float(
-        "CAD cavity volume override (m^3; Enter = derive from radius)", None, minimum=1e-9
+        "CAD cavity volume override (m^3; Enter = derive from radius)", None, minimum=1e-9,
+        detail="Known internal cavity volume; leave blank to derive capacity from radii/length.",
     )
 
     soil_flags = ("density", "youngs_modulus", "poisson_ratio", "friction",
                   "cohesion", "grain_diameter")
     soil = {name: value for name in soil_flags
             if (value := getattr(args, name)) is not None}
+    soil_detail = {
+        "density": "Regolith bulk density (kg/m^3).",
+        "youngs_modulus": "Soil elastic stiffness (Pa) for contact response.",
+        "poisson_ratio": "Soil lateral/axial strain ratio.",
+        "friction": "Static friction coefficient (mu_s) at particle contacts.",
+        "cohesion": "Cohesive shear strength (Pa).",
+        "grain_diameter": "Physical grain diameter (m) used by the rheology model.",
+    }
     if INTERACTIVE and not any(getattr(args, name) is not None for name in soil_flags):
-        if no_flags or prompt_bool("Change soil parameters?", False):
+        if no_flags or prompt_bool(
+            "Change soil parameters?", False,
+            detail="Defaults are lunar-regolith estimates; answer yes to review each soil property.",
+        ):
             print("Soil properties (press Enter to accept each default):")
             soil = {
-                name: prompt_float(label, soil.get(name, SOIL_DEFAULTS[name]), **limits)
+                name: prompt_float(label, soil.get(name, SOIL_DEFAULTS[name]),
+                                   detail=soil_detail.get(name), **limits)
                 for name, (label, limits) in SOIL_FIELDS.items()
             }
 
-    fea_dt = args.fea_dt if args.fea_dt is not None else prompt_float("FEA structural dt (s)", 0.002, minimum=1e-5)
-    solver = args.solver or prompt_choice(
-        "FEA solver", ("pardiso-mkl", "sparse-lu", "sparse-qr", "gmres"), "pardiso-mkl"
+    fea_dt = args.fea_dt if args.fea_dt is not None else prompt_float(
+        "FEA structural dt (s)", 0.002, minimum=1e-5,
+        detail="Structural integrator timestep for one-way FEA (independent of CRM dt).",
     )
-    num_threads = args.num_threads if args.num_threads is not None else prompt_int("FEA threads", 8)
+    solver = args.solver or prompt_choice(
+        "FEA solver", ("pardiso-mkl", "sparse-lu", "sparse-qr", "gmres"), "pardiso-mkl",
+        detail="Linear solver: pardiso-mkl is default; sparse-lu/qr are fallbacks; gmres is diagnostic.",
+    )
+    num_threads = args.num_threads if args.num_threads is not None else prompt_int(
+        "FEA threads", 8, minimum=1,
+        detail="Thread count for the FEA solver (effective with pardiso-mkl).",
+    )
 
     pla_flags = {
         "youngs_modulus": "pla_youngs_modulus",
@@ -691,13 +851,23 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "density": "pla_density",
         "rayleigh_beta": "rayleigh_beta",
     }
+    pla_detail = {
+        "youngs_modulus": "Drum material stiffness (Pa), e.g. PLA ~3 GPa.",
+        "poisson_ratio": "Drum material lateral/axial strain ratio.",
+        "density": "Drum material density (kg/m^3).",
+        "rayleigh_beta": "Rayleigh stiffness-proportional damping (s) to stabilize vibration.",
+    }
     pla = {name: value for name, flag in pla_flags.items()
            if (value := getattr(args, flag)) is not None}
     if INTERACTIVE and not any(getattr(args, flag) is not None for flag in pla_flags.values()):
-        if no_flags or prompt_bool("Change FEA drum material parameters?", False):
+        if no_flags or prompt_bool(
+            "Change FEA drum material parameters?", False,
+            detail="Defaults assume a PLA drum; answer yes to review density, stiffness and damping.",
+        ):
             print("FEA drum material (press Enter to accept each default):")
             pla = {
-                name: prompt_float(label, pla.get(name, PLA_DEFAULTS[name]), **limits)
+                name: prompt_float(label, pla.get(name, PLA_DEFAULTS[name]),
+                                   detail=pla_detail.get(name), **limits)
                 for name, (label, limits) in PLA_FIELDS.items()
             }
 
@@ -706,7 +876,10 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
     elif args.no_particles:
         save_particles = False
     else:
-        save_particles = prompt_bool("Save CRM particle CSV frames?", True)
+        save_particles = prompt_bool(
+            "Save CRM particle CSV frames?", True,
+            detail="Write per-frame particle positions from CRM (useful for visualization, uses disk space).",
+        )
 
     dry_run = args.dry_run
     if INTERACTIVE and not args.dry_run and not args.yes:
@@ -725,8 +898,14 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             f"FEA:          dt={fea_dt:g} s, solver={solver}, threads={num_threads}",
         ]
         print("\n" + "\n".join(summary) + "\n")
-        dry_run = prompt_bool("Dry run (write commands only)?", False)
-        if not prompt_bool("Run these simulations now?", True):
+        dry_run = prompt_bool(
+            "Dry run (write commands only)?", False,
+            detail="If yes, generate study_config.json and commands.sh without running simulations.",
+        )
+        if not dry_run and not prompt_bool(
+            "Run these simulations now?", True,
+            detail="Starts mesh conversion (if needed), then rigid CRM and one-way FEA in sequence.",
+        ):
             raise SystemExit("aborted before running")
 
     return {
@@ -1014,6 +1193,7 @@ def print_results(cfg: dict[str, Any], *, offer_open: bool = True) -> None:
 
 def main() -> int:
     global ACCEPT_DEFAULTS
+    _ensure_chrono_python()
     args = build_parser().parse_args()
     ACCEPT_DEFAULTS = bool(args.yes)
     started = time.perf_counter()

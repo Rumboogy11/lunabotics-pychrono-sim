@@ -85,6 +85,139 @@ ONEWAY_FIELDS = [
 ]
 
 
+def read_tetgen_ele(path: Path) -> np.ndarray:
+    """Read TetGen .ele connectivity as a (n_tet, 4) int64 array (0-based)."""
+    with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        header = handle.readline().split()
+        if not header:
+            return np.empty((0, 4), dtype=np.int64)
+        n_elem = int(header[0])
+        conn = np.empty((n_elem, 4), dtype=np.int64)
+        i = 0
+        for line in handle:
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            conn[i, 0] = int(parts[1]) - 1
+            conn[i, 1] = int(parts[2]) - 1
+            conn[i, 2] = int(parts[3]) - 1
+            conn[i, 3] = int(parts[4]) - 1
+            i += 1
+            if i >= n_elem:
+                break
+        return conn[:i]
+
+
+def _vtk_append_array(data, name: str, values: np.ndarray, components: int = 1) -> None:
+    import vtk  # type: ignore
+
+    arr = vtk.vtkDoubleArray()
+    arr.SetName(name)
+    arr.SetNumberOfComponents(components)
+    n = len(values)
+    arr.SetNumberOfTuples(n)
+    flat = np.asarray(values, dtype=float)
+    if components == 1:
+        flat = flat.reshape(-1)
+        for i in range(n):
+            arr.SetValue(i, float(flat[i]))
+    else:
+        flat = flat.reshape(n, components)
+        for i in range(n):
+            arr.SetTuple(i, [float(x) for x in flat[i]])
+    data.AddArray(arr)
+
+
+class FeaVtkExporter:
+    """Write per-frame FEA unstructured-grid VTU files and a PVD collection."""
+
+    def __init__(self, out_dir: Path, connectivity: np.ndarray, ref_positions: np.ndarray):
+        self.out_dir = Path(out_dir)
+        self.frames_dir = self.out_dir / "frames"
+        self.frames_dir.mkdir(parents=True, exist_ok=True)
+        self.connectivity = np.asarray(connectivity, dtype=np.int64)
+        self.ref_positions = np.asarray(ref_positions, dtype=float)
+        self.entries: list[tuple[float, str]] = []
+
+    def write_frame(self, fea, mesh, nodes, local_positions: np.ndarray,
+                    spindle, frame_index: int, time_s: float) -> Path | None:
+        try:
+            import vtk  # type: ignore
+        except Exception as exc:  # pragma: no cover
+            print(f"  VTK export unavailable: {exc}", flush=True)
+            return None
+
+        n_nodes = len(nodes)
+        points = np.empty((n_nodes, 3), dtype=float)
+        for i, node in enumerate(nodes):
+            points[i] = rigid.vec_parts(node.GetPos())
+
+        # Deformation relative to the current rigid spindle pose.
+        q_tuple = rigid.quat_parts(spindle.GetRot())
+        center = np.asarray(rigid.vec_parts(spindle.GetPos()), dtype=float)
+        expected = fea_driver.rotate_vectors(q_tuple, local_positions) + center
+        disp = points - expected
+        disp_mag = np.linalg.norm(disp, axis=1)
+
+        grid = vtk.vtkUnstructuredGrid()
+        vtk_points = vtk.vtkPoints()
+        vtk_points.SetDataTypeToDouble()
+        for p in points:
+            vtk_points.InsertNextPoint(float(p[0]), float(p[1]), float(p[2]))
+        grid.SetPoints(vtk_points)
+
+        tet_type = vtk.VTK_TETRA
+        conn = self.connectivity
+        for j in range(conn.shape[0]):
+            grid.InsertNextCell(tet_type, 4)
+            grid.InsertCellPoint(int(conn[j, 0]))
+            grid.InsertCellPoint(int(conn[j, 1]))
+            grid.InsertCellPoint(int(conn[j, 2]))
+            grid.InsertCellPoint(int(conn[j, 3]))
+
+        _vtk_append_array(grid.GetPointData(), "Displacement", disp, components=3)
+        _vtk_append_array(grid.GetPointData(), "DisplacementMagnitude", disp_mag, components=1)
+        _vtk_append_array(grid.GetPointData(), "Deformation_mm", disp_mag * 1.0e3, components=1)
+
+        # Per-element von Mises stress (Pa). Export cadence/stride controls cost.
+        n_elem = mesh.GetNumElements()
+        vm = np.zeros(n_elem, dtype=float)
+        for i in range(n_elem):
+            element = fea.CastToChElementTetraCorot_4(mesh.GetElement(i))
+            if element is None:
+                continue
+            vm[i] = float(element.GetStress().GetEquivalentVonMises())
+        _vtk_append_array(grid.GetCellData(), "von_mises_pa", vm, components=1)
+        _vtk_append_array(grid.GetCellData(), "von_mises_MPa", vm * 1.0e-6, components=1)
+
+        out_path = self.frames_dir / f"frame_{frame_index:06d}.vtu"
+        writer = vtk.vtkXMLUnstructuredGridWriter()
+        writer.SetFileName(str(out_path))
+        writer.SetInputData(grid)
+        if hasattr(writer, "SetDataModeToBinary"):
+            writer.SetDataModeToBinary()
+        elif hasattr(writer, "SetDataModeToAppended"):
+            writer.SetDataModeToAppended()
+        writer.Write()
+
+        self.entries.append((float(time_s), str(out_path)))
+        self._write_pvd()
+        return out_path
+
+    def _write_pvd(self) -> None:
+        pvd = self.out_dir / "fea.pvd"
+        lines = [
+            '<?xml version="1.0"?>',
+            '<VTKFile type="Collection" version="0.1" byte_order="LittleEndian">',
+            '  <Collection>',
+        ]
+        for t, file in self.entries:
+            rel = f"frames/{Path(file).name}"
+            lines.append(f'    <DataSet timestep="{t:.9g}" group="" part="0" file="{rel}"/>')
+        lines += ['  </Collection>', '</VTKFile>', '']
+        pvd.write_text("\n".join(lines), encoding="utf-8")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = fea_driver.build_parser()
     p.description = __doc__
@@ -118,6 +251,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-lock-sparsity-pattern", action="store_true",
                    help="disable direct-solver sparsity-pattern locking; the one-way system structure is "
                         "constant, so locking is enabled by default")
+    p.add_argument("--export-vtk", action="store_true",
+                   help="export per-frame FEA VTU files (displacement and von Mises) for ParaView/3D viewing")
+    p.add_argument("--vtk-dir", type=Path, default=None,
+                   help="directory for VTK export (default: <output-dir>/vtk)")
+    p.add_argument("--vtk-stride", type=int, default=1,
+                   help="export every Nth recorded frame to VTK (default: 1). "
+                        "Increase to reduce disk/time for large meshes.")
     # GMRES does not enforce the spindle/hub constraints accurately with this
     # stiffness matrix. PardisoMKL and SparseLU give the commanded kinematics;
     # PardisoMKL is much faster and is available through pychrono.pardisomkl.
@@ -455,12 +595,27 @@ def main() -> int:
 
     writer = None
     state_file = None
+    vtk_exporter = None
     if not args.no_output:
         write_config(out_dir / "config.json", args, run, pla, motion, node_path, ele_path,
                      mesh, hub_nodes, loads, load_indices, args.load_scale)
         state_file = (out_dir / "summary.csv").open("w", newline="", encoding="utf-8")
         writer = csv.DictWriter(state_file, fieldnames=ONEWAY_FIELDS)
         writer.writeheader()
+        if args.export_vtk:
+            vtk_dir = (args.vtk_dir.resolve() if args.vtk_dir else (out_dir / "vtk"))
+            try:
+                connectivity = read_tetgen_ele(ele_path)
+                ref0 = np.array([rigid.vec_parts(n.GetX0()) for n in nodes], dtype=float)
+                vtk_exporter = FeaVtkExporter(vtk_dir, connectivity, ref0)
+                print(
+                    f"VTK export: {vtk_dir} (every {max(1, args.vtk_stride)} recorded frame(s), "
+                    f"{len(connectivity)} tets)",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(f"VTK export disabled (init failed): {exc}", flush=True)
+                vtk_exporter = None
 
     work_j = 0.0
     last_row = {}
@@ -519,6 +674,12 @@ def main() -> int:
             writer.writerow(row)
             state_file.flush()
         last_row = row
+        # Optional 3D FEA export (stress + deformation) for ParaView.
+        if vtk_exporter is not None and (frame % max(1, args.vtk_stride) == 0):
+            try:
+                vtk_exporter.write_frame(fea, mesh, nodes, local_positions, spindle, frame, t)
+            except Exception as exc:
+                print(f"  VTK export frame {frame} failed: {exc}", flush=True)
         frame += 1
         print(
             f"frame {frame - 1:05d}  t={t:7.3f}s  F={np.linalg.norm(applied_force) * args.load_scale:.4g}N  "
