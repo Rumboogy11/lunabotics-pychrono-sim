@@ -35,22 +35,58 @@ Recommended hierarchy going forward:
 3. **PyChrono core as an illustrative CPU demo**, not a predictive model.
 4. **MercuryDPM outputs as historical reference only.**
 
-The excavator is made of PLA plastic. A separate spindle-driven FEA path couples
-a solid tetrahedral mesh of the STEP drum to CRM through
-`./crm/run_fea.sh --smoke-test --no-output`. Driver kinematics and local SPH
-flex-BCE handling have been improved (motor-driven spindle with spin ramp,
-nodal-mass flooring, hardened CRM RHS for flex BCE), giving physically plausible
-short-run stresses (e.g. ~6.6 MPa at 0.05 s, ~59 MPa at 0.2 s) but not a
-validated long-run response: stresses grow in longer runs (GPa-scale by 0.5 s)
-and fill remains far below rigid CRM. Keep the rigid kinematic CRM model as the
-production design driver. See [`crm/FEA_COUPLING.md`](crm/FEA_COUPLING.md) for
-current settings, evidence, and remaining limitations.
+The excavator is made of PLA plastic. For structural estimates, use the new
+one-way path: rigid CRM records the soil wrench with `--loads-file`, and
+`./crm/run_oneway_fea.sh` replays it on the solid tetrahedral drum mesh without
+SPH/flex-BCE coupling. The older two-way spindle-driven FEA path is still only a
+diagnostic: one BCE layer crashes, two layers diverge mechanically by 0.5 s,
+and three layers have interaction/retention instability. Keep rigid Chrono::CRM
+as the production design driver. Soil metrics now count SPH fluid markers only;
+older fill comparisons that included BCE markers are invalid. See
+[`crm/FEA_COUPLING.md`](crm/FEA_COUPLING.md) for evidence and commands.
 
-A combined production runner is also available:
-`./run_full_model.sh` executes the rigid CRM design run and the FEA structural
-run with shared settings and writes `combined_report.json` plus
-`combined_summary.csv`. See [`FULL_MODEL.md`](FULL_MODEL.md); the FEA stage is
-included intentionally as a non-validated feasibility/diagnostic check.
+A combined report runner is available: `./run_full_model.sh` executes rigid CRM
+and FEA with shared settings and writes `combined_report.json` plus
+`combined_summary.csv`. Its long FEA stage is not a design result and may fail;
+for production studies run `./crm/run.sh` directly. See [`FULL_MODEL.md`](FULL_MODEL.md).
+
+For routine studies, use the interactive one-way wizard instead:
+
+```bash
+./run_study.sh
+```
+
+With no flags, it prompts individually for a new STEP CAD file (or existing
+CRM/FEA meshes), drum dimensions, study duration, SPH spacing/bed box, soil
+properties, and FEA solver settings. Bed height, active box, initial drum
+height, descent speed, cavity radius, and SPH spacing are scaled automatically
+from the measured geometry; every derived value is shown as the prompt default
+and can be replaced. It writes a reproducible `study_config.json` and
+`commands.sh`, then runs rigid CRM followed by one-way FEA. Use
+`./run_study.sh --dry-run ...` to inspect generated commands without simulating,
+or pass any prompt value as a CLI flag for scripted use.
+
+After a successful run, the wizard prints a `results_overview.png` plot, the
+CRM/FEA summary CSV paths, and the exact commands to open the plots or folder;
+in an interactive terminal it also offers to open them directly. The same plot
+can be regenerated with:
+
+```bash
+./chrono-env/bin/python view_results.py --output-dir Output_<study_name> --show
+```
+
+To verify a STEP conversion visually, render the original CAD, the converted
+surface, and an overlay side by side:
+
+```bash
+./chrono-env/bin/python view_geometry.py --study-dir Output_<study_name>
+./chrono-env/bin/python view_geometry.py --step MyDrum.step --fea-node mesh/MyDrum_fea.node
+```
+
+It prints the CAD/mesh bounding boxes, volumes, and volume-error verdict.
+By default it opens an interactive 3D window (drag to rotate, linked panels);
+pass `--output PATH` to save a PNG instead (defaults to
+`geometry_checks/<mesh>_geometry_check.png` in the project directory).
 
 Actual lunar regolith is mostly tens to hundreds of micrometres in size. The
 current 1.8 mm DEM grains are roughly 10–40× too large relative to the 61 mm
@@ -83,7 +119,11 @@ validation cases, not the primary fill-ratio design model described above.
 .
 ├── lunar_excavator_config.py          # all parameters + contact-model mapping
 ├── stl_to_obj.py                      # binary/ASCII STL -> Wavefront OBJ
+├── step_to_chrono_fea.py              # STEP -> FEA tet mesh + CRM contact surface
 ├── simplify_for_deme.py               # regenerate optional legacy 1200-face mesh (not default)
+├── run_study.sh / study_wizard.py     # interactive one-way CRM -> FEA study wizard
+├── view_results.py                    # plot CRM/FEA summaries + results_overview.png
+├── view_geometry.py                   # render STEP vs converted mesh side by side
 ├── crm/
 │   ├── lunar_excavator_crm.py         # primary CRM design driver
 │   ├── crm_soil.py                    # independent soil estimates (no MercuryDPM mapping)
@@ -137,6 +177,8 @@ source environment/activate-chrono-source.sh
 PYTHON="$CHRONO_ENV/bin/python" ./crm/run.sh --smoke-test
 PYTHON="$CHRONO_ENV/bin/python" ./crm/run.sh \
   --duration 20 --fps 20 --output-dir Output_CRM_Baseline
+# --dt is spacing-dependent by default (8e-5 s at 4 mm). A 4 mm run with
+# --dt 5e-4 is rejected; it produced an immediate SPH boundary blowup.
 
 # Spiked/alternative geometry: pass any full-detail OBJ with the same pose/scale.
 PYTHON="$CHRONO_ENV/bin/python" ./crm/run.sh \
@@ -348,14 +390,15 @@ postprocess on 1 s coarse frames      last t=1.000 s         min_z ~= 0.00089 m
 drum VTK pose at t=0 -> 1.0 s          spin axis (1,0,0)      z=0.1210 -> 0.1205 m
 ```
 
-The CRM driver passed static validation (`py_compile`, `bash -n`, `--help`,
-`--print-soil`) and real runs on the earlier conda PyChrono 10.0.0 build: a
+The CRM driver passed setup checks and real runs on the earlier conda PyChrono
+10.0.0 build: a
 0.05 s smoke test and a 1.0 s run at 12 mm SPH spacing. Both used the coarse
 mesh, 576 SPH particles, 2,160 boundary BCE markers, and 5e-4 s steps;
 `config.json` and `summary.csv` were written successfully. The 1.0 s run took
-2.4 s wall time. These checks validate setup and metrics plumbing, not physical
-soil calibration. The local source build now runs the same driver; its smoke
-test result is recorded in `crm/README.md`.
+2.4 s wall time. These historical runs validate basic setup only; their fill
+metrics predate the fluid-only correction and must not be used. The local source
+build now runs the corrected driver; see `crm/FEA_COUPLING.md` for the updated
+12 mm CRM comparison.
 
 All completed DEME runs finished without contact-count or non-finite-force
 errors. The full 60 s DEME run has **not** been rerun at the selected settings. Based on

@@ -14,17 +14,22 @@ MercuryDPM particle contact parameters.
 | PyChrono core (`../pychrono_core/`) | illustrative CPU demo only |
 | MercuryDPM outputs | historical sanity check only |
 
-The excavator is PLA plastic. A separate spindle-driven FEA structural check is
-available through `./crm/run_fea.sh --smoke-test --no-output`. It couples the
-promoted solid tetrahedral mesh `fea/LunarDrumScrew_m_fea_decim8k.node/.ele` to
-CRM with `terrain.AddFeaMesh(mesh, False)` at `dt=2.5e-4 s` and one BCE layer.
-Short runs are numerically stable, but the FEA fill is near zero and the reported
-von Mises stress is far above PLA strength. A default 1.0 s run diverges and
-aborts near 0.8 s, so these magnitudes are feasibility artifacts rather than
-engineering results. Keep the rigid kinematic driver in
-this directory as the production design model. See
-[FEA_COUPLING.md](FEA_COUPLING.md) for the full findings, mesh route, and
-unresolved contact/rigid-rotation issues.
+The excavator is PLA plastic. Two FEA paths exist for the promoted solid mesh
+`fea/LunarDrumScrew_m_fea_decim8k.node/.ele`:
+
+* **One-way CRM -> FEA (current structural estimate).** Run rigid CRM with
+  `--loads-file`, then replay the recorded soil wrench on the FEA drum with
+  `./crm/run_oneway_fea.sh`. No SPH terrain is created in the replay, so flex-BCE
+  instability is avoided. The result is a structural response to measured rigid
+  soil loads, not two-way FSI.
+* **Two-way coupled diagnostic.** `./crm/run_fea.sh` couples the solid mesh to
+  CRM with `terrain.AddFeaMesh(mesh, False)`. No tested BCE setup is validated:
+  one layer crashes, two layers diverge mechanically by 0.5 s, and three layers
+  show interaction/retention instability.
+
+Keep the rigid kinematic driver in this directory as the production design
+model. See [FEA_COUPLING.md](FEA_COUPLING.md) for the full findings, mesh route,
+and unresolved two-way contact/rigid-rotation issues.
 
 Real lunar regolith is typically tens to hundreds of micrometres across, while
 the DEME model uses 1.8 mm diameter grains. Refining DEME toward actual grain
@@ -99,14 +104,58 @@ PYTHON="$CHRONO_ENV/bin/python" ./crm/run.sh \
   --mesh-file geometry/LunarDrumScrew_spiked.obj \
   --output-dir Output_CRM_Spiked
 
-# Separate solid-FEA feasibility check (not a production design run).
-./crm/run_fea.sh --smoke-test --no-output --fps 200 --stress-stride 50
+# One-way structural estimate: first record the rigid soil wrench.
+./crm/run.sh --duration 0.2 --spacing 0.012 --dt 0.00025 \
+  --loads-file Output_OneWay/crm/soil_loads.csv --output-dir Output_OneWay/crm
+
+# Then replay it on the FEA drum (PardisoMKL and dt=2e-3 s are the defaults).
+./crm/run_oneway_fea.sh --duration 0.2 \
+  --loads Output_OneWay/crm/soil_loads.csv \
+  --output-dir Output_OneWay/fea
+
+# Separate two-way FEA diagnostic only (not a production design run).
+./crm/run_fea.sh --duration 0.05 --spacing 0.012 --dt 0.00025 \
+  --fps 200 --no-output --stress-stride 50 \
+  --solver-iterations 20 --solver-tolerance 1e-3 --bce-layers 2
 ```
 
-The FEA driver uses the promoted solid mesh and its own defaults (`dt=2.5e-4 s`,
-one BCE layer, inward 2-D BCE pattern, GMRES/diagonal preconditioning). Only the
-short smoke case is stable; longer runs diverge and the stress/fill values are
-not engineering results. See [FEA_COUPLING.md](FEA_COUPLING.md).
+The interactive wizard automates the complete one-way sequence:
+
+```bash
+./run_study.sh                         # prompts for all settings, then runs both stages
+./run_study.sh --dry-run --duration 0.5 --spacing 0.012
+./run_study.sh --geometry step --step-file geometry/MyDrum.step --duration 20
+```
+
+It can use the supplied meshes, convert a new STEP solid into a TetGen mesh plus
+CRM surface OBJ, or accept existing `.obj`/`.node`/`.ele` files. When it can
+measure the geometry, it scales the bed box, bed height, initial drum centre
+height (`bed_height + radius`), descent speed, cavity radius, and SPH spacing
+from the CAD radius; a multi-solid assembly also gets assembly-specific mesh
+filtering and hub defaults. Every derived value is offered as an editable prompt
+default, and `--no-auto-geometry` restores the fixed legacy defaults. Each study
+stores `study_config.json`, `commands.sh`, per-stage logs, `crm/soil_loads.csv`,
+and the CRM/FEA summaries under `Output_<study_name>/`.
+
+At completion the wizard writes `results_overview.png` and prints the paths to
+the CRM/FEA summaries plus copyable commands to open the plots or result folder.
+In an interactive terminal it asks whether to open them directly. To reopen the
+plots later:
+
+```bash
+./chrono-env/bin/python view_results.py --output-dir Output_<study_name> --show
+```
+
+Use identical motion options in the two one-way stages; the replay validates the
+recorded drum trajectory against the FEA motion. The replay defaults to
+`pychrono.pardisomkl` (8 threads); the wrapper uses the conda-forge PyChrono for
+that solver and falls back to local Eigen SparseLU if the module is unavailable.
+The two-way FEA driver uses
+the promoted solid mesh and its own defaults (`dt=2.5e-4 s`, two BCE layers,
+inward 2-D BCE pattern, GMRES/diagonal preconditioning). Two layers are the best
+tested interacting setup and complete 0.5 s, but show severe mechanical
+divergence by the end. One layer crashes in tested interacting runs. See
+[FEA_COUPLING.md](FEA_COUPLING.md).
 
 ### Validation performed here
 
@@ -128,13 +177,16 @@ results: it closes holes.
 | Option | Meaning |
 | --- | --- |
 | `--duration T` | simulated seconds (default 60) |
-| `--dt S` | CRM/FSI step (default 5e-4 s) |
+| `--dt S` | CRM/FSI step (spacing-dependent default: 8e-5 s at 4 mm, 2.4e-4 s at 12 mm) |
+| `--allow-unsafe-dt` | bypass the explicit `--dt` stability check (not recommended) |
 | `--spacing D` | SPH particle spacing (default 0.004 m) |
 | `--fps F` | metric/particle output cadence (default 20 Hz) |
 | `--settle-time T` | delay before spin/descent (default 0.001 s) |
 | `--descent-speed V` | drum descent speed (default 0.0015 m/s) |
 | `--omega W` | spin rate in rad/s (default shared config, ~3.14) |
 | `--spin-axis {X,Y,Z}` | global spin axis (default X) |
+| `--drum-radius R` | outer/crest radius used for initial height and bed sizing (default 0.061 m) |
+| `--drum-half-length L` | half of the drum axial length (default 0.033 m) |
 | `--bed-height H` | initial bed height (default 0.06 m) |
 | `--inner-radius R` | nominal cavity radius for fill ratio (default 0.055 m) |
 | `--capacity-volume V` | CAD-derived free volume override for fill ratio |
@@ -145,7 +197,14 @@ results: it closes holes.
 | `--mesh {coarse,medium}` | shipped full-detail OBJ (default coarse) |
 | `--mesh-file PATH` | custom OBJ, e.g. a spiked design |
 | `--save-particles` | write per-frame SPH particle CSV (large) |
+| `--loads-file PATH` | write the per-step soil force/torque wrench for one-way FEA |
 | `--no-output` | benchmark without writing files |
+
+The default timestep now scales with SPH spacing. A 4 mm run uses `8e-5 s`;
+passing `--dt 5e-4` at 4 mm is rejected because it produced immediate SPH
+boundary blowups (`[calcHashD] ... out of max boundary`). The 12 mm validation
+cases remain stable at `2.5e-4 s`. If you intentionally want to test a larger
+step, add `--allow-unsafe-dt`.
 
 ## Outputs
 
@@ -157,6 +216,8 @@ With the default output enabled, the run directory contains:
 * `particles_*.csv` — optional SPH positions with `inside_drum` and `excavated`
   flags when `--save-particles` is used. These can be opened in ParaView or a
   lightweight Python viewer.
+* `soil_loads.csv` — optional per-step force/torque wrench on the rigid drum
+  when `--loads-file` is used; consumed by `run_oneway_fea.sh`.
 
 ### Fill-ratio definition
 
@@ -192,9 +253,9 @@ full descent and a fixed number of revolutions).
 
 ## Current limitations
 
-* Only the short smoke test has been run here on the conda CRM build. Long
-  production sweeps and simulant calibration have not been performed, so treat
-  the default soil parameters as estimates.
+* Long production sweeps and simulant calibration have not been performed, so
+  treat the default soil parameters as estimates. The corrected 12 mm fluid-only
+  CRM checks are coarse-resolution comparisons, not soil-model validation.
 * The drum is kinematic; its pose is prescribed analytically and the FSI
   reaction torque is recorded, but drivetrain dynamics are not modeled.
 * Fill ratio uses a nominal cylindrical cavity unless `--capacity-volume` is

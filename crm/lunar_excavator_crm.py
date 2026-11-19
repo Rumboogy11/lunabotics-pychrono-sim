@@ -77,20 +77,23 @@ from lunar_excavator_config import (  # noqa: E402
 class CrmRunParams:
     """Numerics, geometry hooks, and excavation metrics for a CRM run."""
 
-    spacing: float = 0.004               # SPH particle spacing [m]
-    dt: float = 5.0e-4                   # CRM/FSI step [s]
+    spacing: float = 0.004               # SPH particle spacing [m] (smaller = finer resolution/more particles)
+    dt: float = 8.0e-5                   # CRM/FSI step [s] at the default 4 mm spacing
     duration: float = MOTION_DEFAULT.t_max
     fps: float = 20.0                    # metric/particle output cadence
     settle_time: float = MOTION_DEFAULT.settle_time
     descent_speed: float = MOTION_DEFAULT.lower_speed
     omega: float = MOTION_DEFAULT.drum_omega
+    reverse_spin: bool = False
     bed_height: float = MOTION_DEFAULT.bed_height
     spin_axis: str = MOTION_DEFAULT.drum_spin_axis
+    drum_radius: float = MOTION_DEFAULT.drum_radius        # outer/crest radius [m]
+    drum_half_length: float = MOTION_DEFAULT.drum_half_length
     inner_radius: float = 0.055          # nominal cavity radius [m]
     capacity_volume: float | None = None  # override for CAD free volume [m^3]
     active_box_x: float = 0.244
     active_box_y: float = 0.244
-    active_box_z: float = 0.244
+    active_box_z: float = 0.5
     max_velocity: float = 1.0            # SPH max velocity for EOS stabilization
     d0_multiplier: float = 1.0           # h = d0_multiplier * spacing
     free_surface_threshold: float = 2.4  # divergence threshold for free surface
@@ -98,15 +101,15 @@ class CrmRunParams:
 
     def __post_init__(self) -> None:
         for name in ("spacing", "dt", "duration", "fps", "descent_speed", "omega",
-                     "bed_height", "inner_radius", "max_velocity", "d0_multiplier",
-                     "free_surface_threshold"):
+                     "bed_height", "drum_radius", "drum_half_length", "inner_radius",
+                     "max_velocity", "d0_multiplier", "free_surface_threshold"):
             if getattr(self, name) <= 0.0:
                 raise ValueError(f"{name} must be positive")
         if self.spin_axis.upper() not in {"X", "Y", "Z"}:
             raise ValueError("spin axis must be X, Y, or Z")
         if self.proximity_steps < 1:
             raise ValueError("proximity_steps must be at least 1")
-        if self.inner_radius >= MOTION_DEFAULT.drum_radius:
+        if self.inner_radius >= self.drum_radius:
             raise ValueError("inner radius must be smaller than the outer drum radius")
         if min(self.active_box_x, self.active_box_y, self.active_box_z) <= 0.0:
             raise ValueError("active domain dimensions must be positive")
@@ -138,6 +141,20 @@ METRIC_FIELDS = [
     "specific_energy_j_kg",
 ]
 
+# Per-step soil wrench on the rigid drum.  This is the interface consumed by
+# the one-way CRM -> FEA driver (the FEA run replays these loads on the solid
+# mesh instead of coupling SPH directly to flexible BCE markers).
+LOAD_FIELDS = [
+    "time_s",
+    "drum_z_m",
+    "force_x_n",
+    "force_y_n",
+    "force_z_n",
+    "torque_x_nm",
+    "torque_y_nm",
+    "torque_z_nm",
+]
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -147,21 +164,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--duration", type=float, default=None,
                    help="simulated seconds (default: 60)")
     p.add_argument("--dt", type=float, default=None,
-                   help="CRM/FSI step size in seconds (default: 5e-4)")
+                   help="CRM/FSI step size in seconds (default: spacing-dependent, "
+                        "8e-5 at 4 mm and 2.4e-4 at 12 mm)")
+    p.add_argument("--allow-unsafe-dt", action="store_true",
+                   help="allow an explicitly requested --dt above the stable SPH bound "
+                        "(normally rejected to prevent GPU boundary blowups)")
     p.add_argument("--fps", type=float, default=None,
                    help="metric output cadence in Hz (default: 20)")
     p.add_argument("--spacing", type=float, default=None,
-                   help="SPH particle spacing in metres (default: 0.004)")
+                   help="SPH particle spacing in metres (default: 0.004; smaller = finer particles/more resolution)")
     p.add_argument("--settle-time", type=float, default=None,
                    help="seconds before spin/descent begins")
     p.add_argument("--descent-speed", type=float, default=None,
                    help="drum descent speed in m/s (default: 0.0015)")
     p.add_argument("--omega", type=float, default=None,
-                   help="drum spin rate in rad/s (default: shared config)")
+                   help="drum spin rate magnitude in rad/s (default: shared config)")
+    p.add_argument("--reverse-spin", action="store_true",
+                   help="reverse the drum spin direction (flip rotation sign)")
     p.add_argument("--bed-height", type=float, default=None,
                    help="initial soil bed height in m (default: 0.06)")
     p.add_argument("--spin-axis", choices=("X", "Y", "Z"), default=None,
                    help="global spin axis (default: X)")
+    p.add_argument("--drum-radius", type=float, default=None,
+                   help="outer/crest radius in m (default: shared config, 0.061)")
+    p.add_argument("--drum-half-length", type=float, default=None,
+                   help="half of drum axial length in m (default: shared config, 0.033)")
 
     p.add_argument("--mesh", choices=("coarse", "medium"), default="coarse",
                    help="shipped OBJ: full coarse (default, holes preserved) or medium")
@@ -172,7 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--capacity-volume", type=float, default=None,
                    help="override nominal cavity volume in m^3 (for CAD-calibrated designs)")
     p.add_argument("--active-box", type=str, default=None,
-                   help="active SPH domain size X,Y,Z in metres (default: 0.244,0.244,0.244)")
+                   help="active SPH domain size X,Y,Z in metres (default: 0.244,0.244,0.5)")
     p.add_argument("--max-velocity", type=float, default=None,
                    help="SPH stabilizing max velocity in m/s (default: 1.0)")
     p.add_argument("--d0-multiplier", type=float, default=None,
@@ -197,6 +224,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-output", action="store_true", help="run without writing files")
     p.add_argument("--save-particles", action="store_true",
                    help="write per-frame SPH particle CSV (large)")
+    p.add_argument("--loads-file", type=Path, default=None,
+                   help="write the per-step soil force/torque wrench on the drum to this CSV "
+                        "(used by the one-way CRM -> FEA driver)")
     p.add_argument("--print-soil", action="store_true",
                    help="print the independent soil parameter block and exit")
     p.add_argument("--smoke-test", action="store_true",
@@ -231,7 +261,24 @@ def make_soil(args: argparse.Namespace) -> CrmSoilParams:
     return replace(DEFAULT_SOIL, **overrides)  # type: ignore[arg-type]
 
 
-def make_run_params(args: argparse.Namespace) -> CrmRunParams:
+def suggested_sph_dt(spacing: float, d0_multiplier: float = 1.0) -> float:
+    """Conservative default CRM timestep for this SPH setup.
+
+    The value is empirical, based on stability tests with this soil block and
+    the coarse production OBJ: 4 mm needed <= 1e-4 s (5e-4 s exploded), while
+    12 mm is stable at 2.5e-4 s and has also run at 5e-4 s.
+    """
+    return min(5.0e-4, 8.0e-5 * (spacing / 0.004) * d0_multiplier)
+
+
+def max_stable_sph_dt(spacing: float, d0_multiplier: float = 1.0) -> float:
+    """Largest explicitly requested timestep accepted without --allow-unsafe-dt."""
+    if spacing >= 0.008:
+        return min(5.0e-4, 5.0e-4 * d0_multiplier)
+    return 1.25e-4 * (spacing / 0.004) * d0_multiplier
+
+
+def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -> CrmRunParams:
     overrides: dict[str, object] = {}
     mapping = {
         "duration": args.duration,
@@ -241,8 +288,11 @@ def make_run_params(args: argparse.Namespace) -> CrmRunParams:
         "settle_time": args.settle_time,
         "descent_speed": args.descent_speed,
         "omega": args.omega,
+        "reverse_spin": getattr(args, "reverse_spin", None),
         "bed_height": args.bed_height,
         "spin_axis": args.spin_axis,
+        "drum_radius": getattr(args, "drum_radius", None),
+        "drum_half_length": getattr(args, "drum_half_length", None),
         "inner_radius": args.inner_radius,
         "capacity_volume": args.capacity_volume,
         "max_velocity": args.max_velocity,
@@ -255,12 +305,30 @@ def make_run_params(args: argparse.Namespace) -> CrmRunParams:
         box = parse_box(args.active_box)
         overrides.update(active_box_x=box[0], active_box_y=box[1], active_box_z=box[2])
 
+    if overrides.get("reverse_spin") and overrides.get("omega", CrmRunParams.omega) > 0.0:
+        overrides["omega"] = -abs(float(overrides["omega"]))
+
     if args.smoke_test:
         overrides.setdefault("spacing", 0.012)
         overrides.setdefault("dt", 5.0e-4)
         overrides.setdefault("duration", 0.05)
         overrides.setdefault("fps", 100.0)
         overrides.setdefault("settle_time", 0.0)
+
+    spacing = float(overrides.get("spacing", CrmRunParams.spacing))
+    d0_multiplier = float(overrides.get("d0_multiplier", CrmRunParams.d0_multiplier))
+    if "dt" in overrides:
+        dt = float(overrides["dt"])
+        limit = max_stable_sph_dt(spacing, d0_multiplier)
+        if validate_sph_dt and dt > limit and not getattr(args, "allow_unsafe_dt", False):
+            raise SystemExit(
+                f"--dt {dt:g} s is too large for SPH spacing {spacing:g} m "
+                f"(stable bound ~{limit:g} s). Use --dt {suggested_sph_dt(spacing, d0_multiplier):g} "
+                "or omit --dt to get the spacing-dependent default. "
+                "Pass --allow-unsafe-dt only if you intentionally want to test instability."
+            )
+    else:
+        overrides["dt"] = suggested_sph_dt(spacing, d0_multiplier)
 
     return CrmRunParams(**overrides)  # type: ignore[arg-type]
 
@@ -398,14 +466,32 @@ def get_fluid_system(terrain, fsi):
     return fluid
 
 
-def particle_positions(fluid, fsi):
+def particle_positions(fluid, fsi, terrain=None):
+    """Return positions of SPH fluid (soil) markers only.
+
+    ``fluid.GetParticlePositions()`` returns all markers (fluid SPH, boundary
+    BCE, rigid-body BCE, and flexible BCE).  Excavation/fill metrics must be
+    computed on soil particles only, so we prefer an explicit fluid-group query
+    and otherwise slice to the fluid-marker prefix/count.
+    """
     group = fsi_enum(fsi, "MarkerGroup", "FLUID")
     if group is not None:
         try:
             return fluid.GetParticlePositions(group)
         except TypeError:
             pass
-    return fluid.GetParticlePositions()
+    positions = fluid.GetParticlePositions()
+    count = None
+    if hasattr(fluid, "GetNumFluidMarkers"):
+        count = fluid.GetNumFluidMarkers()
+    elif terrain is not None and hasattr(terrain, "GetNumSPHParticles"):
+        count = terrain.GetNumSPHParticles()
+    if count is not None:
+        return positions[:count]
+    raise RuntimeError(
+        "cannot identify the SPH fluid-marker prefix; this Chrono binding "
+        "exposes neither MarkerGroup.FLUID positions nor a fluid-marker count"
+    )
 
 
 def get_particle_mass(fluid, soil: CrmSoilParams, spacing: float) -> tuple[float, str]:
@@ -570,6 +656,8 @@ def main() -> int:
         drum_omega=run.omega,
         bed_height=run.bed_height,
         drum_spin_axis=run.spin_axis,
+        drum_radius=run.drum_radius,
+        drum_half_length=run.drum_half_length,
     )
     capacity_volume = (
         run.capacity_volume
@@ -657,6 +745,32 @@ def main() -> int:
         writer = csv.DictWriter(state_file, fieldnames=METRIC_FIELDS)
         writer.writeheader()
 
+    loads_file = None
+    loads_writer = None
+    if args.loads_file is not None:
+        loads_path = args.loads_file.resolve()
+        loads_path.parent.mkdir(parents=True, exist_ok=True)
+        loads_file = loads_path.open("w", newline="", encoding="utf-8")
+        loads_writer = csv.DictWriter(loads_file, fieldnames=LOAD_FIELDS)
+        loads_writer.writeheader()
+        print(f"Soil wrench: {loads_path}", flush=True)
+
+    def write_loads(t: float) -> None:
+        if loads_writer is None:
+            return
+        force = vec_parts(terrain.GetFsiBodyForce(drum)) if hasattr(terrain, "GetFsiBodyForce") else (0.0, 0.0, 0.0)
+        torque = vec_parts(terrain.GetFsiBodyTorque(drum)) if hasattr(terrain, "GetFsiBodyTorque") else (0.0, 0.0, 0.0)
+        loads_writer.writerow({
+            "time_s": f"{t:.9g}",
+            "drum_z_m": f"{vec_parts(drum.GetPos())[2]:.9g}",
+            "force_x_n": f"{force[0]:.9g}",
+            "force_y_n": f"{force[1]:.9g}",
+            "force_z_n": f"{force[2]:.9g}",
+            "torque_x_nm": f"{torque[0]:.9g}",
+            "torque_y_nm": f"{torque[1]:.9g}",
+            "torque_z_nm": f"{torque[2]:.9g}",
+        })
+
     peak_fill = 0.0
     work_j = 0.0
     last_row = {}
@@ -666,7 +780,7 @@ def main() -> int:
 
     def record(t: float, fluid_power: float, fluid_torque_x: float) -> None:
         nonlocal frame, peak_fill, last_row
-        positions = particle_positions(fluid, fsi)
+        positions = particle_positions(fluid, fsi, terrain)
         with_flags = bool(args.save_particles and not args.no_output)
         metrics, flags = compute_metrics(
             positions, drum, run, motion, soil, particle_mass,
@@ -713,6 +827,7 @@ def main() -> int:
     last_torque_x = 0.0
     last_power = 0.0
     record(0.0, 0.0, 0.0)
+    write_loads(0.0)
     next_output = 1.0 / run.fps
 
     t = 0.0
@@ -741,6 +856,7 @@ def main() -> int:
             work_j += fluid_power * h
             last_torque_x = tx
             last_power = fluid_power
+            write_loads(t)
 
             if t >= next_output - 1.0e-12 or t >= run.duration - 1.0e-12:
                 record(t, fluid_power, last_torque_x)
@@ -752,6 +868,8 @@ def main() -> int:
     finally:
         if state_file is not None:
             state_file.close()
+        if loads_file is not None:
+            loads_file.close()
 
     print(
         "\nCRM run complete: "

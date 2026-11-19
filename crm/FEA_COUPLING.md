@@ -2,19 +2,91 @@
 
 ## Current status
 
-A separate spindle-driven FEA path now exists:
-
-```bash
-./crm/run_fea.sh --smoke-test --no-output
-```
+Two spindle-driven FEA paths exist: a one-way rigid-CRM wrench replay for
+structural screening and a two-way coupled diagnostic. Commands for both are
+provided below. The earlier two-way-only state is preserved on the local branch
+`two-way-fea-wip` so the coupling diagnostics remain available.
 
 It uses the local Chrono 10 source build, a solid tetrahedral mesh of the STEP
-drum, and the same CRM SPH soil as the production driver. The supported default
-mesh is `fea/LunarDrumScrew_m_fea_decim8k.node` /
+drum, and the same CRM SPH soil as the production driver. The default mesh is
+`fea/LunarDrumScrew_m_fea_decim8k.node` /
 `fea/LunarDrumScrew_m_fea_decim8k.ele`.
 
-The path is **improved for short runs, but the stress and fill results are not
-engineering-validated**. Treat it as a feasibility check only.
+The two-way path is **not engineering-validated**. Treat it as a feasibility and
+diagnostic experiment only. The corrected fill/excavation metrics include SPH
+fluid markers only; older values that counted BCE markers are invalid.
+
+## One-way CRM -> FEA structural replay
+
+The supported structural-estimate path is now two-stage. Rigid CRM writes the
+per-step soil wrench with `--loads-file`; `crm/lunar_excavator_oneway.py`
+(`./crm/run_oneway_fea.sh`) replays it on the same solid mesh with no
+CRMTerrain/SPH system. The wrench is transformed into the spindle frame and
+distributed over exterior solid nodes as equivalent nodal forces that reproduce
+the recorded net force and torque to numerical precision. Spindle descent/spin
+remain motor-driven, hub nodes remain tied to the spindle, and the recorded
+drum trajectory is checked against the FEA motion. The replay also aborts if
+the motor angle or descent position stops tracking its command, which is what
+made the earlier GMRES results unusable.
+
+This avoids flex-BCE instability and gives stable short-run PLA stress
+estimates. It is a structural response to rigid-CRM loads, not two-way FSI:
+deformation cannot feed back into the soil, and the rigid drum wrench is only
+valid while the real drum can still be approximated as rigid. Peak stress
+excludes tetrahedra below `--min-stress-volume` (default `1e-12 m^3`); the raw
+peak is retained for transparency because the promoted mesh has a few sliver
+elements. Use rigid CRM for soil/design metrics and this replay only for
+structural screening until coupled contact is validated. It is also a
+single-mesh estimate; no PLA mesh-convergence or coupon-strength calibration has
+been performed.
+
+One-way replay defaults: `dt=2e-3 s`, `pychrono.pardisomkl.ChSolverPardisoMKL`
+with 8 threads, zero spin ramp, load-node radius `>= 0.8 R`, min reported stress
+element volume `1e-12 m^3`, and locked direct-solver sparsity pattern. If
+`pychrono.pardisomkl` is unavailable, the driver warns and falls back to
+`ChSolverSparseLU`. GMRES was tested but did not enforce the spindle/hub
+constraints accurately and is not usable for results.
+
+Full 0.2 s validation gave the same deformation (`9.48433e-5 m`), filtered peak
+stress (`36.15 MPa`), raw peak stress (`57.03 MPa`), and work (`0.3225 J`) for
+PardisoMKL and SparseLU at `dt=2e-3 s`. Timings over that history were:
+
+| Solver / setting | Wall time |
+| --- | --- |
+| SparseLU, `dt=1e-3 s` | 682 s |
+| SparseLU, `dt=2e-3 s`, locked pattern | 309 s |
+| PardisoMKL, `dt=2e-3 s`, 1 MKL thread | 42 s |
+| PardisoMKL, `dt=2e-3 s`, 8 MKL threads | 28 s |
+| PardisoMKL, `dt=5e-3 s`, 8 MKL threads | 12 s |
+
+`dt=5e-3 s` completed with Pardiso but changed peak stress by about 3% and is
+not the default; SparseLU at that step size segfaulted. `dt=2e-3 s` was chosen
+to balance speed and timestep convergence. Individual peak elements remain
+mesh-sensitive.
+
+`ChSolverSparseLU` wraps Eigen's SparseLU, whose factorization is single
+threaded: `system.SetNumThreads(...)` does not make its LU factorization use
+more CPU cores. Pattern locking still helps it by avoiding repeated analysis
+overhead, but it is not multithreading. PardisoMKL is genuinely multithreaded:
+the `ChSolverPardisoMKL(num_threads)` constructor controls its MKL thread pool;
+8 threads were faster than 1 or 16 on this 16-core machine.
+
+MUMPS is not viable in the current Python workflow. Chrono's source contains a
+`ChSolverMumps` module, but this version has no SWIG/Python binding for it, and
+the environment has no MUMPS library or CMake config. It would require building
+MUMPS (Fortran is available) and adding a custom Python binding. PardisoMKL is
+already provided by the installed conda-forge PyChrono 10.0.0 package, so no
+local Chrono rebuild was needed.
+
+```bash
+./crm/run.sh --duration 0.2 --spacing 0.012 --dt 0.00025 \
+    --loads-file /tmp/opencode/oneway_loads_d02.csv \
+    --output-dir /tmp/opencode/oneway_crm_d02
+
+./crm/run_oneway_fea.sh --duration 0.2 \
+    --loads /tmp/opencode/oneway_loads_d02.csv \
+    --output-dir /tmp/opencode/oneway_fea_d02_default
+```
 
 Driver and SPH-coupling fixes applied in the local source/runtime:
 
@@ -23,8 +95,11 @@ Driver and SPH-coupling fixes applied in the local source/runtime:
   rotation-speed motor -> spindle), instead of per-step state overrides on a
   fixed/free body; FEA hub nodes remain tied to the spindle with
   `ChLinkNodeFrame`;
-- default FEA spin-up uses a `0.5 s` linear speed ramp and FEA nodal masses are
-  floored by default (`1e-6 kg`) to stabilize sliver nodes;
+- default two-way FEA spin-up uses a `0.5 s` linear speed ramp and FEA nodal
+  masses are floored by default (`1e-6 kg`) to stabilize sliver nodes; the
+  zero-ramp spin segment used by the one-way replay no longer inherits a
+  `ChFunctionSequence` continuity offset, which previously kept motor speed at
+  zero;
 - local `chrono-src` CRM/SPH RHS handling for flex BCE coupling was hardened
   (no constitutive stress-rate evolution written for non-fluid BCE markers,
   no FSI RHS force for BCE markers without fluid-neighbor support, degenerate
@@ -33,32 +108,40 @@ Driver and SPH-coupling fixes applied in the local source/runtime:
   `share/chrono/python/pychrono/_fsi.so`). `chrono-src`/build/install remain
   local to this workspace.
 
-Short-run validation with the defaults below (12 mm, 2.5e-4 s, 1 BCE layer,
-GMRES 20/1e-3, spin ramp 0.5 s):
+### Corrected fluid-only comparison (12 mm, dt=2.5e-4 s)
 
-- `0.05 s`: final/peak fill `0.00551`, inside `2`, excavated `3`, max
-  displacement `1.49e-5 m`, max von Mises `6.58 MPa`, spindle torque
-  `0.176 N·m`, work `0.105 J` (log: `/tmp/opencode/fea_fixed_005.log`);
-- `0.20 s`: final/peak fill `0.00551`, inside `2`, excavated `3`, max
-  displacement `1.29e-4 m`, max von Mises `59.3 MPa`, spindle torque
-  `1.48 N·m`, work `0.290 J` (log: `/tmp/opencode/fea_fixed_02.log`).
-  Stress/displacement trend upward over this interval (near PLA strength by
-  0.2 s) and should not be interpreted as converged.
+`fluid.GetParticlePositions()` returns marker groups in the order
+`[fluid, boundary, rigid, flex]`; metrics must use only the fluid prefix (576
+particles in these cases). The rigid CRM baseline with this corrected basis is:
 
-Longer-run behavior remains non-physical:
+| Duration | Final/peak fill | Inside | Excavated | Work |
+|---:|---:|---:|---:|---:|
+| 0.20 s | 0.002755 | 1 | 7 | 0.3256 J |
+| 0.50 s | 0.019286 | 7 | 17 | 0.675 J |
 
-- `0.50 s` (same settings, 20 fps sampling): stress/displacement grow after the
-  early stable phase to `3907 MPa` and `6.21 mm` by `0.50 s` with large torque
-  excursions (`156 N·m`, work `14.9 J`, log: `/tmp/opencode/fea_fixed_05.log`);
-- rigid CRM comparison at `0.20 s` / 12 mm: final fill `0.165`, peak `0.198`,
-  inside `60`, excavated `93`, work `0.326 J` (`./crm/run.sh ...`). The FEA case
-  therefore still severely under-predicts fill/excavation and is not suitable
-  for torque/energy comparison.
+Evidence logs: `/tmp/opencode/rigid_fluid_d02.log` and
+`/tmp/opencode/rigid_fluid_d05.log`. These are coarse-resolution alignment
+checks, not the 4 mm production configuration.
+
+FEA interaction outcomes at the same 12 mm spacing, dt, GMRES 20/1e-3, and
+0.5 s spin ramp depend strongly on flex-BCE layering:
+
+| BCE layers | Result |
+|---:|---|
+| 1 | Crashes near 0.005 s with `[calcHashD]` index outside the minimum boundary. |
+| 2 | 576 fluid / 1,152 boundary / 17,442 flex markers; kernel-support warning. At 0.2 s: inside=6, fill=0.016531, excavated=6. At 0.5 s: mechanical divergence (3.356 mm displacement, 5.209 GPa von Mises, 345.7 N·m torque, 3.408 J work). |
+| 3 | 576 fluid / 2,160 boundary / 26,163 flex markers. Interacting default-gap run segfaults between 0.05–0.10 s; a 0.01 m initial-gap run reaches 0.2 s but has no meaningful bed interaction or retained soil. |
+
+Logs: `/tmp/opencode/fea_bce2_d01.log`, `fea_bce2_d02.log`,
+`fea_bce2_d05.log`, `fea_bce3_d02b.log`, and `fea_bce3_gap001_d02.log` under
+`/tmp/opencode/`. These outcomes do not identify an engineering-valid FEA
+configuration. In particular, the 2-layer 0.2 s fill is not proof of a valid
+response because the case diverges by 0.5 s and retains little soil.
 
 Keep the rigid-body CRM model as the production design driver. Do not report FEA
-stress or torque as structural validation. The FEA path is currently a short-run
-feasibility/diagnostic tool pending further stabilization (kernel support/BCE
-layering, contact density and initial contact, and long-run coupled dynamics).
+stress or torque as structural validation. Use the FEA path only for deliberately
+short diagnostics while investigating kernel support/BCE layering, contact
+density and initial contact, and long-run coupled dynamics.
 
 ## What Chrono supports
 
@@ -127,7 +210,10 @@ wrapped. `FromTetGenFile` plus manual hub-node selection is the workable route.
 
 ## Mesh generation route
 
-The supported converter is `step_to_chrono_fea.py`:
+The supported converter is `step_to_chrono_fea.py`. New STEP models use `--axis
+Y` as the standard original-space drum axis; the converter rotates the exported
+mesh and CRM surface so that axis becomes local +Z for the FEA drivers. Pass
+`--axis Z` only when regenerating the legacy `LunarDrumScrew_m` model:
 
 ```bash
 ./chrono-env/bin/python step_to_chrono_fea.py geometry/LunarDrumScrew_m.step \
@@ -138,12 +224,32 @@ The supported converter is `step_to_chrono_fea.py`:
     --hub-radius 0.0015 \
     --axis Z \
     --tetgen-switches pYQ
+
+# New-model standard: original STEP drum axis Y.
+./chrono-env/bin/python step_to_chrono_fea.py geometry/NewDrum.step \
+    --out-prefix fea/NewDrum_fea --unit-scale 0.001 \
+    --axis Y --mesh-size 0.012 --hub-radius 0.035
 ```
 
 Route: OpenCASCADE STL triangulation -> MeshFix repair -> face decimation with
 `trimesh.remesh.subdivide_to_size` -> TetGen with `pYQ`. Direct Gmsh 3D meshing
 was abandoned because the screw/thread surfaces produce segment/facet
-intersection failures.
+intersection failures. OpenCASCADE's parallel tessellation mode is enabled by
+default; `--no-occ-parallel` disables it, and `--time-stages` reports the time
+spent in fusion, tessellation, surface processing, TetGen, and output writing.
+
+For multi-solid STEP assemblies, add:
+
+```bash
+    --min-solid-volume 1e-5 \
+    --surface-target-faces 80000 \
+    --repair-after-decimation
+```
+
+This boolean-fuses the retained solids, drops sub-millimetre fasteners, and
+runs MeshFix *after* quadric decimation. Repairing the full fused assembly
+before decimation inflated the SPIKEY volume by about 391%; the
+decimate-then-repair route keeps it near 0.8%.
 
 The promoted 8k mesh has:
 
@@ -162,50 +268,66 @@ Production CRM and DEME geometry remains
 `geometry/LunarDrumScrew_m_coarse.obj`. The 1,200-face simplification closes the
 physical holes and must not be used for production.
 
+### Verifying a conversion visually
+
+Render the original STEP tessellation, the converted contact surface, and an
+overlay of the two (all in metres, in the FEA local frame):
+
+```bash
+./chrono-env/bin/python view_geometry.py --study-dir Output_my_study
+# or point at explicit files:
+./chrono-env/bin/python view_geometry.py \
+    --step 'geometry/spikey/Assembly 1.step' \
+    --fea-node '/tmp/opencode/spikey_wizard_v2/mesh/Assembly 1_fea.node'
+```
+
+By default it opens an interactive 3D window (drag to rotate, linked panels);
+pass `--output PATH` to save a PNG (defaults to
+`geometry_checks/<mesh>_geometry_check.png` in the project directory).
+The tool also prints the CAD/mesh bounding boxes, volumes,
+and volume-error verdict from the `.json` sidecar. It normalises older meshes
+whose surface STL was written in raw CAD units (mm), and reads the drum axis
+from either the new `source_drum_axis` or legacy `rotation_axis` metadata key.
+The exported `_surface.stl` (and the OBJ derived from it) is now in metres,
+matching the `.node` mesh; older meshes are handled by the viewer's detection.
+
 ## Stable run settings
 
 The FEA-specific defaults are:
 
 | Setting | Default | Why |
 |---|---:|---|
-| mesh | `fea/LunarDrumScrew_m_fea_decim8k.node/.ele` | short-run stable promoted mesh |
+| mesh | `fea/LunarDrumScrew_m_fea_decim8k.node/.ele` | promoted tetrahedral mesh; mesh promotion does not validate coupling |
 | SPH spacing | `0.012 m` | same smoke resolution as rigid CRM |
-| timestep | `2.5e-4 s` | FEA/SPH is unstable at the rigid default `5e-4 s` |
-| BCE layers | `1` | more layers trigger domain/boundary instability here |
+| timestep | `2.5e-4 s` | FEA/SPH coupling is unstable at the former rigid production step `5e-4 s` |
+| BCE layers | `2` | best tested interacting setup; warning remains and the run diverges by 0.5 s |
 | BCE pattern | `BcePatternMesh2D_INWARD` | required for a closed solid boundary |
 | GMRES | `20 / 1e-3` | practical direct/iterative choice for FEA stiffness coupling |
+| CPU threads | `8` | Chrono/Eigen parallel work; SPH kernels remain GPU-driven |
 | spin ramp | `0.5 s` | avoids impulsive startup; motion prescribed by motor functions |
 | nodal mass floor | `1e-6 kg` | stabilizes sliver nodes from CAD-derived tetrahedral mesh |
 
-Reproduce the short-run check explicitly:
+For a short diagnostic sample of the two-layer case (not a validated run):
 
 ```bash
 ./crm/run_fea.sh --duration 0.05 --spacing 0.012 --dt 0.00025 \
     --fps 200 --no-output --stress-stride 50 \
-    --solver-iterations 20 --solver-tolerance 1e-3 --bce-layers 1
+    --solver-iterations 20 --solver-tolerance 1e-3 --bce-layers 2
 ```
 
-`--bce-layers 1` emits Chrono's warning that fewer than three layers may cause
-insufficient kernel support and particle leakage. It remains a likely contributor
-to long-run instability and under-predicted excavation, but tested multi-layer
-configurations were not stable in this setup.
+Chrono warns that fewer than three BCE layers may cause insufficient kernel
+support and particle leakage. Three layers did not solve the problem: they
+increased flex-marker count and produced interacting-run crashes or a stable but
+non-interacting gap case. BCE support, occlusion, and bed access remain open.
 
 ### Long-run behavior
 
-With the motor-driven spindle, nodal-mass flooring, and local SPH RHS fixes,
-short runs are stable and physically plausible in magnitude (`0.05 s`: ~6.6 MPa;
-`0.20 s`: ~59 MPa, trending upward). However, longer runs still diverge:
-
-| Time | Max von Mises | Max displacement | Spindle torque |
-|---:|---:|---:|---:|
-| 0.05 s | 6.58 MPa | 14.9 µm | 0.176 N·m |
-| 0.20 s | 59.3 MPa | 129 µm | 1.48 N·m |
-| 0.30 s | 729 MPa | 1.12 mm | 27.4 N·m |
-| 0.50 s | 3907 MPa | 6.21 mm | 156 N·m |
-
-Fill remains ~`0.0055` (2 particles inside) throughout these runs, far below the
-rigid CRM baseline (~`0.165–0.198` at 0.2 s). Do not treat results beyond the
-short-run feasibility window as converged or physically meaningful.
+There is no validated FEA duration window. The corrected 2-layer run already
+shows non-credible mechanical growth by 0.5 s; 1- and 3-layer cases have separate
+crash or interaction failures. Previous one-layer stress/displacement values and
+the prior rigid-vs-FEA fill comparison used BCE-contaminated metrics and are not
+validation evidence. Do not use any FEA stress, spindle torque, or fill value
+for design decisions.
 
 ## Remaining limitations
 
@@ -213,15 +335,15 @@ Motor-driven spindle kinematics and SPH RHS hardening removed the dominant
 short-run stress artifacts, but the coupled long-run response is still not
 validated:
 
-- the flexible boundary has 8,721 surface nodes/BCE markers against only 576
-  SPH particles (`~15x` marker/particle ratio), so contact sampling/support is
-  poorly matched at 12 mm spacing and 1 BCE layer;
-- fill remains near zero while rigid CRM excavates substantially more soil at
-  the same spacing, indicating the FEA/SPH contact and excavation interaction is
-  still not representative;
-- stress/displacement grow over time after an initially plausible short-run
-  phase, so constraint coupling, mass/stiffness distribution, contact forces,
-  and/or SPH boundary support likely still introduce accumulating errors;
+- the flexible boundary has 8,721 surface nodes against only 576 SPH particles;
+  BCE layers raise flex-marker counts to 17,442 or 26,163 and affect support,
+  occlusion, and soil access;
+- corrected rigid CRM shows progressive but low retention at this coarse
+  resolution; the FEA 2-layer case's modest 0.2 s retention does not persist as
+  a credible response through 0.5 s;
+- stress/displacement diverge in the 2-layer case, while 1- and 3-layer cases
+  show hash-domain or segmentation failures, indicating coupled stability and
+  boundary support remain unresolved;
 - earlier diagnostics showed hot spots and shear consistent with drive/contact
   modeling sensitivity; the current setup is improved but not proven mesh- or
   parameter-converged.
@@ -236,13 +358,15 @@ not make it robust.
 ## Recommended workflow
 
 1. Use rigid-body CRM for fill ratio, torque comparisons, and geometry sweeps.
-2. Use DEME/DEM-Engine only for targeted discrete-mechanism checks.
-3. Use this FEA driver only to demonstrate that solid CAD-derived drum meshes
-   can be coupled and integrated stably in short runs.
-4. Before using any stress magnitude for design, fix the rigid-rotation and
-   contact-marker problem: obtain full rigid spin of the PLA body without
-   bore-driven twist, and match flexible BCE density to SPH resolution.
-5. Calibrate PLA properties from coupon tests of the actual printer, infill, and
+2. Use the one-way wrench replay for structural screening of the promoted PLA
+   mesh; cite it as a response to rigid-CRM loads, not coupled FSI.
+3. Use DEME/DEM-Engine only for targeted discrete-mechanism checks.
+4. Use the two-way FEA driver only for short coupling diagnostics; even short
+   runs are not established as physically valid.
+5. Before treating two-way stress magnitudes as design validation, fix the
+   contact-marker problem: match flexible BCE density to SPH resolution and
+   verify full rigid spin of the PLA body without bore-driven twist.
+6. Calibrate PLA properties from coupon tests of the actual printer, infill, and
    build orientation. FDM PLA is anisotropic and layer-sensitive; the current
    isotropic `E=3 GPa`, `nu=0.38`, `rho=1240 kg/m^3` values are estimates.
 
