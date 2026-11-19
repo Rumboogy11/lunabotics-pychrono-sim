@@ -324,7 +324,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--crm-dt", default=None,
                    help="CRM timestep in s, or 'auto' for spacing-dependent default")
     p.add_argument("--d0-multiplier", type=float, default=None, help="SPH kernel length multiplier")
-    p.add_argument("--fps", type=float, default=None, help="CRM/FEA output cadence in Hz (default: 20)")
+    p.add_argument("--fps", type=float, default=None, help="CRM output cadence in Hz (default: 20)")
+    p.add_argument("--fea-fps", type=float, default=None, help="FEA output cadence in Hz (default: same as CRM)")
+    p.add_argument("--crm-fps", type=float, default=None, help="alias for --fps (CRM output cadence in Hz)")
     p.add_argument("--bed-height", type=float, default=None, help="initial soil bed height in m")
     p.add_argument("--active-box", default=None, help="SPH domain size X,Y,Z in metres")
     p.add_argument("--settle-time", type=float, default=None, help="settle time before spin/descent")
@@ -772,10 +774,32 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
     if crm_dt is not None:
         crm_dt = float(crm_dt)
 
-    fps = args.fps if args.fps is not None else prompt_float(
-        "Output cadence (Hz)", 20.0, minimum=1e-3,
-        detail="How often summary/particle/load frames are written (higher = larger outputs).",
-    )
+    crm_fps_default = 20.0
+    if args.fps is not None:
+        crm_fps = args.fps
+    elif args.crm_fps is not None:
+        crm_fps = args.crm_fps
+    elif INTERACTIVE:
+        crm_fps = prompt_float(
+            "CRM output cadence (Hz)", crm_fps_default, minimum=1e-3,
+            detail="How often CRM summary/particle/load frames are written (higher = larger outputs).",
+        )
+    else:
+        crm_fps = crm_fps_default
+
+    if args.fea_fps is not None:
+        fea_fps = args.fea_fps
+    elif args.fps is not None and args.crm_fps is None:
+        # explicit --fps without split flags: preserve legacy shared cadence
+        fea_fps = args.fps
+    elif INTERACTIVE:
+        fea_fps = prompt_float(
+            "FEA output cadence (Hz)", crm_fps, minimum=1e-3,
+            detail="How often FEA summary frames are recorded/exported. Independent of CRM cadence; "
+                   "lower values speed up replay (FEA dynamics/load fidelity still follow --fea-dt).",
+        )
+    else:
+        fea_fps = crm_fps
     bed_height = args.bed_height if args.bed_height is not None else prompt_float(
         "Initial bed height (m)", float(geo["bed_height"]), minimum=1e-3,
         detail="Depth of the soil bed; drum starts at bed_height + radius above the ground.",
@@ -900,6 +924,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             f"CRM mesh:     {crm_obj}",
             f"FEA mesh:     {fea_node} / {fea_ele}",
             f"Duration:     CRM {duration:g} s, FEA {fea_duration:g} s",
+            f"Cadence:      CRM {crm_fps:g} Hz, FEA {fea_fps:g} Hz",
             f"Drum:         R={drum_radius:g} m, half-length={drum_half_length:g} m, "
             f"z0≈{bed_height + drum_radius:g} m",
             f"SPH:          spacing={spacing:g} m, dt={dt_text}",
@@ -944,7 +969,8 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "d0_multiplier": d0_multiplier,
         "crm_dt": crm_dt,
         "auto_crm_dt": auto_dt,
-        "fps": fps,
+        "crm_fps": crm_fps,
+        "fea_fps": fea_fps,
         "bed_height": bed_height,
         "active_box": active_box,
         "settle_time": settle_time,
@@ -980,7 +1006,7 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         str(ROOT / "crm" / "run.sh"),
         "--duration", f"{cfg['duration']:g}",
         "--spacing", f"{cfg['spacing']:g}",
-        "--fps", f"{cfg['fps']:g}",
+        "--fps", f"{cfg['crm_fps']:g}",
         "--bed-height", f"{cfg['bed_height']:g}",
         "--active-box", ",".join(f"{v:g}" for v in cfg["active_box"]),
         "--settle-time", f"{cfg['settle_time']:g}",
@@ -1018,7 +1044,7 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         str(ROOT / "crm" / "run_oneway_fea.sh"),
         "--duration", f"{cfg['fea_duration']:g}",
         "--dt", f"{cfg['fea_dt']:g}",
-        "--fps", f"{cfg['fps']:g}",
+        "--fps", f"{cfg['fea_fps']:g}",
         "--loads", str(loads),
         "--fea-node", str(cfg["fea_node"]),
         "--fea-ele", str(cfg["fea_ele"]),
