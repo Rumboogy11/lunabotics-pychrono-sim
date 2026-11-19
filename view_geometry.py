@@ -14,14 +14,18 @@ Typical use::
         --step 'geometry/spikey/Assembly 1.step' \\
         --fea-node '/tmp/opencode/spikey_wizard_v2/mesh/Assembly 1_fea.node'
 
-By default a PNG is written next to the surface mesh (headless).  ``--show``
-opens an interactive window instead; drag to rotate (views are linked).
+By default it opens an interactive window when a display is available (drag to
+rotate; the three views are linked).  Pass ``--output PATH`` to save a PNG
+instead; the default PNG goes to ``geometry_checks/<mesh>_geometry_check.png``
+under the project directory.  ``--show`` forces the interactive window even when
+``--output`` is given.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -135,9 +139,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fea-node", type=Path, default=None,
                    help="converted FEA .node file; metadata read from sibling .json")
     p.add_argument("--output", type=Path, default=None,
-                   help="screenshot PNG path (default: next to the converted surface)")
+                   help="save a PNG screenshot here (project-local by default); "
+                        "skips the interactive window unless --show is given")
     p.add_argument("--show", action="store_true",
-                   help="open an interactive linked-view window instead of writing a PNG")
+                   help="open an interactive linked-view window (the default when a display is available)")
     p.add_argument("--source-axis", choices=("X", "Y", "Z"), default=None,
                    help="STEP drum axis (default: from metadata; legacy sidecars use Z)")
     p.add_argument("--deflection", type=float, default=None,
@@ -204,11 +209,12 @@ def main() -> int:
     cad_volume: float | None = None
     cad_info = ""
     if step_path is not None and step_path.is_file():
-        cad, cad_volume, _kept, cad_info = tessellate_step(
-            step_path, meta, unit_scale=unit_scale, deflection=deflection,
-            angular=angular, source_axis=args.source_axis,
-            tmp_dir=Path(tempfile.mkdtemp(prefix="view_geometry_")),
-        )
+        with tempfile.TemporaryDirectory(prefix="view_geometry_", dir=ROOT) as tmp:
+            cad, cad_volume, _kept, cad_info = tessellate_step(
+                step_path, meta, unit_scale=unit_scale, deflection=deflection,
+                angular=angular, source_axis=args.source_axis,
+                tmp_dir=Path(tmp),
+            )
     else:
         print("No original STEP found; showing the converted mesh only. "
               "Pass --step to enable the comparison.")
@@ -254,34 +260,50 @@ def main() -> int:
         except Exception:
             cad_display = cad
 
-    plotter = pv.Plotter(
-        shape=(1, len(panels)),
-        off_screen=not args.show,
-        window_size=(500 * len(panels), 540),
-    )
-    for index, (title, kind) in enumerate(panels):
-        plotter.subplot(0, index)
-        plotter.add_text(title, font_size=11, color="black")
-        plotter.add_axes(color="black")
-        if kind == "cad":
-            plotter.add_mesh(cad_display, color="#1f77b4", show_edges=False)
-        elif kind == "converted":
-            plotter.add_mesh(converted, color="#ff7f0e", show_edges=False)
-        else:
-            plotter.add_mesh(cad_display, color="#1f77b4", opacity=0.45)
-            plotter.add_mesh(converted, color="#ff7f0e", style="wireframe", opacity=0.9)
-        plotter.view_isometric()
-    plotter.link_views()
+    use_show = args.show or (args.output is None and bool(os.environ.get("DISPLAY")))
 
-    if args.show:
-        plotter.show(auto_close=True)
-    else:
-        output = args.output or surface_path.with_name(
-            surface_path.stem + "_geometry_check.png"
+    def build_plotter(off_screen: bool) -> pv.Plotter:
+        p = pv.Plotter(
+            shape=(1, len(panels)),
+            off_screen=off_screen,
+            window_size=(500 * len(panels), 540),
         )
+        for index, (title, kind) in enumerate(panels):
+            p.subplot(0, index)
+            p.add_text(title, font_size=11, color="black")
+            p.add_axes(color="black")
+            if kind == "cad":
+                p.add_mesh(cad_display, color="#1f77b4", show_edges=False)
+            elif kind == "converted":
+                p.add_mesh(converted, color="#ff7f0e", show_edges=False)
+            else:
+                p.add_mesh(cad_display, color="#1f77b4", opacity=0.45)
+                p.add_mesh(converted, color="#ff7f0e", style="wireframe", opacity=0.9)
+            p.view_isometric()
+        p.link_views()
+        return p
+
+    if args.output and not args.show:
+        output = args.output
         output.parent.mkdir(parents=True, exist_ok=True)
-        plotter.show(screenshot=str(output), auto_close=True)
+        build_plotter(off_screen=True).show(screenshot=str(output), auto_close=True)
         print(f"Wrote {output}")
+        print("Tip: rerun with --show (or omit --output) for an interactive 3D view.")
+    elif use_show:
+        print("Interactive view: drag to rotate; views are linked. Close the window to exit.")
+        try:
+            build_plotter(off_screen=False).show(auto_close=True)
+        except Exception as exc:
+            output = ROOT / "geometry_checks" / f"{surface_path.stem}_geometry_check.png"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            build_plotter(off_screen=True).show(screenshot=str(output), auto_close=True)
+            print(f"Interactive view unavailable ({exc}); wrote {output} instead.")
+    else:
+        output = ROOT / "geometry_checks" / f"{surface_path.stem}_geometry_check.png"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        build_plotter(off_screen=True).show(screenshot=str(output), auto_close=True)
+        print(f"Wrote {output}")
+        print("Tip: rerun with --show (or set DISPLAY) for an interactive 3D view.")
     return 0
 
 

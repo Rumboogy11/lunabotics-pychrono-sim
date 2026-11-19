@@ -83,8 +83,10 @@ surface, and an overlay side by side:
 ./chrono-env/bin/python view_geometry.py --step MyDrum.step --fea-node mesh/MyDrum_fea.node
 ```
 
-It prints the CAD/mesh bounding boxes, volumes, and volume-error verdict, and
-writes `<surface>_geometry_check.png` (add `--show` for an interactive window).
+It prints the CAD/mesh bounding boxes, volumes, and volume-error verdict.
+By default it opens an interactive 3D window (drag to rotate, linked panels);
+pass `--output PATH` to save a PNG instead (defaults to
+`geometry_checks/<mesh>_geometry_check.png` in the project directory).
 
 Actual lunar regolith is mostly tens to hundreds of micrometres in size. The
 current 1.8 mm DEM grains are roughly 10–40× too large relative to the 61 mm

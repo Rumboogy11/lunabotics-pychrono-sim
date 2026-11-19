@@ -281,8 +281,10 @@ overlay of the two (all in metres, in the FEA local frame):
     --fea-node '/tmp/opencode/spikey_wizard_v2/mesh/Assembly 1_fea.node'
 ```
 
-By default it writes `<surface>_geometry_check.png`; add `--show` for a linked
-interactive window. The tool also prints the CAD/mesh bounding boxes, volumes,
+By default it opens an interactive 3D window (drag to rotate, linked panels);
+pass `--output PATH` to save a PNG (defaults to
+`geometry_checks/<mesh>_geometry_check.png` in the project directory).
+The tool also prints the CAD/mesh bounding boxes, volumes,
 and volume-error verdict from the `.json` sidecar. It normalises older meshes
 whose surface STL was written in raw CAD units (mm), and reads the drum axis
 from either the new `source_drum_axis` or legacy `rotation_axis` metadata key.
