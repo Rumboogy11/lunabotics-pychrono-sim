@@ -615,14 +615,19 @@ def main() -> int:
     if not trimesh.Trimesh(surface_points, surface_faces, process=False).is_watertight:
         raise RuntimeError("surface subdivision broke watertightness")
 
-    # Export both the TetGen input and CRM contact surface in the FEA local
-    # frame, where the drum axis is +Z regardless of the STEP source axis.
+    # Rotate the surface into the FEA local frame, where the drum axis is +Z
+    # regardless of the STEP source axis.  Keep TetGen in raw CAD units (below)
+    # so its switches and the validated mesh are unchanged; only the exported
+    # CRM contact surface is scaled into metres, matching the .node mesh and
+    # the metadata bbox.
     surface_points = np.asarray(surface_points, dtype=float) @ source_to_local.T
     mark("surface subdivision/axis rotation")
 
     # Replace the raw OCC STL with the actual repaired/decimated surface used
-    # for tetrahedralization and CRM contact.
-    trimesh.Trimesh(surface_points, surface_faces, process=False).export(stl_path)
+    # for tetrahedralization and CRM contact.  This STL (and the OBJ made from
+    # it by stl_to_obj.py) is consumed directly by the CRM in metres.
+    surface_points_m = surface_points * args.unit_scale
+    trimesh.Trimesh(surface_points_m, surface_faces, process=False).export(stl_path)
 
     if args.tetgen_switches:
         switches = args.tetgen_switches

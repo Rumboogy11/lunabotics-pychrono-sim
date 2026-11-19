@@ -75,6 +75,17 @@ can be regenerated with:
 ./chrono-env/bin/python view_results.py --output-dir Output_<study_name> --show
 ```
 
+To verify a STEP conversion visually, render the original CAD, the converted
+surface, and an overlay side by side:
+
+```bash
+./chrono-env/bin/python view_geometry.py --study-dir Output_<study_name>
+./chrono-env/bin/python view_geometry.py --step MyDrum.step --fea-node mesh/MyDrum_fea.node
+```
+
+It prints the CAD/mesh bounding boxes, volumes, and volume-error verdict, and
+writes `<surface>_geometry_check.png` (add `--show` for an interactive window).
+
 Actual lunar regolith is mostly tens to hundreds of micrometres in size. The
 current 1.8 mm DEM grains are roughly 10–40× too large relative to the 61 mm
 drum radius, so their absolute grain size is not physically representative.
@@ -106,7 +117,11 @@ validation cases, not the primary fill-ratio design model described above.
 .
 ├── lunar_excavator_config.py          # all parameters + contact-model mapping
 ├── stl_to_obj.py                      # binary/ASCII STL -> Wavefront OBJ
+├── step_to_chrono_fea.py              # STEP -> FEA tet mesh + CRM contact surface
 ├── simplify_for_deme.py               # regenerate optional legacy 1200-face mesh (not default)
+├── run_study.sh / study_wizard.py     # interactive one-way CRM -> FEA study wizard
+├── view_results.py                    # plot CRM/FEA summaries + results_overview.png
+├── view_geometry.py                   # render STEP vs converted mesh side by side
 ├── crm/
 │   ├── lunar_excavator_crm.py         # primary CRM design driver
 │   ├── crm_soil.py                    # independent soil estimates (no MercuryDPM mapping)

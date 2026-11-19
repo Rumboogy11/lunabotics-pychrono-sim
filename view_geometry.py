@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""Render the original STEP CAD and its converted FEA surface side by side.
+
+The STEP converter (:mod:`step_to_chrono_fea`) rotates the drum axis onto the
+local +Z axis and scales STEP coordinates into metres.  This tool applies the
+same transforms to a fresh OCC tessellation of the CAD, so the two panels and
+the overlay share one frame and any difference is a conversion artefact, not a
+coordinate-system mismatch.
+
+Typical use::
+
+    ./chrono-env/bin/python view_geometry.py --study-dir Output_my_study
+    ./chrono-env/bin/python view_geometry.py \\
+        --step 'geometry/spikey/Assembly 1.step' \\
+        --fea-node '/tmp/opencode/spikey_wizard_v2/mesh/Assembly 1_fea.node'
+
+By default a PNG is written next to the surface mesh (headless).  ``--show``
+opens an interactive window instead; drag to rotate (views are linked).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pyvista as pv
+import trimesh
+
+ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import step_to_chrono_fea as conv  # noqa: E402  (reuse the converter's OCC route)
+
+
+def load_sidecar(fea_node: Path) -> dict[str, Any]:
+    path = fea_node.with_suffix(".json")
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {}
+
+
+def to_polydata(mesh: trimesh.Trimesh) -> pv.PolyData:
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    pv_faces = np.column_stack(
+        [np.full(len(faces), 3, dtype=np.int64), faces]
+    ).ravel()
+    return pv.PolyData(vertices, pv_faces)
+
+
+def load_surface(path: Path) -> pv.PolyData:
+    mesh = trimesh.load(str(path), process=False, force="mesh")
+    return to_polydata(mesh)
+
+
+def normalize_surface_units(surface: pv.PolyData, meta: dict[str, Any],
+                            unit_scale: float) -> tuple[pv.PolyData, float]:
+    """Bring the converted surface into metres using the sidecar bbox.
+
+    Older converter runs wrote the surface STL in raw CAD units (mm) while the
+    ``.node`` mesh was already in metres.  Detect that by comparing the surface
+    extents with the recorded metre-scale bounding box and scale if needed.
+    """
+    if "bbox_min_m" not in meta or "bbox_max_m" not in meta or unit_scale >= 1.0:
+        return surface, 1.0
+    lo = np.asarray(meta["bbox_min_m"], dtype=float)
+    hi = np.asarray(meta["bbox_max_m"], dtype=float)
+    expected = float(np.max(hi - lo))
+    actual = float(np.max(np.asarray(surface.bounds[1]) - np.asarray(surface.bounds[0])))
+    if expected <= 0.0 or actual <= 0.0:
+        return surface, 1.0
+    if actual / expected > 2.0:  # surface is in CAD units, not metres
+        points = np.asarray(surface.points, dtype=float) * unit_scale
+        surface = surface.copy()
+        surface.points = points
+        return surface, unit_scale
+    return surface, 1.0
+
+
+def tessellate_step(step_path: Path, meta: dict[str, Any], *, unit_scale: float,
+                    deflection: float, angular: float, source_axis: str | None,
+                    tmp_dir: Path) -> tuple[pv.PolyData, float, int, str]:
+    """Tessellate the CAD with the converter's exact fusion and deflection."""
+    if source_axis:
+        axis_name = source_axis.upper()
+    else:
+        # New sidecars use source_drum_axis; legacy ones used rotation_axis.
+        axis_name = str(meta.get("source_drum_axis", meta.get("rotation_axis", "Y"))).upper()
+    axis = conv.AXES.get(axis_name, conv.AXES["Y"])
+    min_volume = float(meta.get("min_solid_volume_m3", 0.0))
+
+    shape, n_solids, n_faces, cad_volume_cad, kept = conv.read_cad(
+        step_path,
+        fuse_assembly=True,
+        min_volume_m3=min_volume,
+        unit_scale=unit_scale,
+    )
+    stl_path = tmp_dir / "cad_surface.stl"
+    conv.write_surface_stl(shape, stl_path, deflection / unit_scale, angular)
+
+    cad = pv.read(str(stl_path))
+    points = np.asarray(cad.points, dtype=float) * unit_scale
+    points = points @ conv.source_axis_to_z(axis).T
+    cad.points = points
+    info = (f"{n_solids} solids -> {kept} kept, {n_faces} CAD faces, "
+            f"{axis_name} axis -> local Z")
+    return cad, cad_volume_cad * unit_scale**3, kept, info
+
+
+def fmt_bounds(mesh: pv.PolyData) -> str:
+    # PyVista bounds are (xmin, xmax, ymin, ymax, zmin, zmax).
+    xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
+    return (f"[x {xmin:.4g}..{xmax:.4g}, "
+            f"y {ymin:.4g}..{ymax:.4g}, z {zmin:.4g}..{zmax:.4g}]")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--study-dir", type=Path, default=None,
+                   help="wizard study output dir; auto-discovers STEP, surface and metadata")
+    p.add_argument("--step", type=Path, default=None, help="original STEP CAD file")
+    p.add_argument("--surface", type=Path, default=None,
+                   help="converted surface .stl or .obj (default: from mesh metadata)")
+    p.add_argument("--fea-node", type=Path, default=None,
+                   help="converted FEA .node file; metadata read from sibling .json")
+    p.add_argument("--output", type=Path, default=None,
+                   help="screenshot PNG path (default: next to the converted surface)")
+    p.add_argument("--show", action="store_true",
+                   help="open an interactive linked-view window instead of writing a PNG")
+    p.add_argument("--source-axis", choices=("X", "Y", "Z"), default=None,
+                   help="STEP drum axis (default: from metadata; legacy sidecars use Z)")
+    p.add_argument("--deflection", type=float, default=None,
+                   help="OCC STEP tessellation deflection in metres (default: metadata value)")
+    p.add_argument("--max-cad-faces", type=int, default=200000,
+                   help="decimate the CAD display mesh to this many faces (0 disables)")
+    p.add_argument("--mesh-volume-error", type=float, default=None,
+                   help="override the volume-error tolerance for the pass/fail line (percent)")
+    return p
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+
+    study_cfg: dict[str, Any] = {}
+    if args.study_dir:
+        cfg_path = args.study_dir / "study_config.json"
+        if not cfg_path.is_file():
+            raise SystemExit(f"no study_config.json in {args.study_dir}")
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            study_cfg = data
+
+    def from_config(key: str) -> Path | None:
+        value = study_cfg.get(key)
+        if not value:
+            return None
+        path = Path(value)
+        return path if path.is_absolute() else ROOT / path
+
+    step_path = args.step or from_config("step_file")
+    fea_node = args.fea_node or from_config("fea_node")
+
+    meta: dict[str, Any] = {}
+    if fea_node is not None:
+        meta = load_sidecar(fea_node)
+
+    surface_path = args.surface
+    if surface_path is None:
+        recorded = meta.get("outputs", {}).get("surface_stl")
+        if recorded:
+            surface_path = Path(recorded)
+    if surface_path is None:
+        surface_path = from_config("crm_obj")
+    if surface_path is None and fea_node is not None:
+        surface_path = fea_node.with_name(fea_node.stem + "_surface.stl")
+    if surface_path is None or not surface_path.is_file():
+        raise SystemExit("could not locate the converted surface; pass --surface or --fea-node")
+
+    unit_scale = float(meta.get("unit_scale", 0.001))
+    deflection = (args.deflection if args.deflection is not None
+                  else float(meta.get("surface_deflection_m", 0.001)))
+    angular = float(meta.get("angular_deflection_rad", 0.15))
+    if args.source_axis:
+        axis_name = args.source_axis.upper()
+    else:
+        axis_name = str(meta.get("source_drum_axis", meta.get("rotation_axis", "Y"))).upper()
+
+    converted = load_surface(surface_path)
+    converted, surface_scale = normalize_surface_units(converted, meta, unit_scale)
+    if surface_scale != 1.0:
+        print(f"Note: surface STL was in CAD units; rescaled by {surface_scale:g} to metres.")
+    cad: pv.PolyData | None = None
+    cad_volume: float | None = None
+    cad_info = ""
+    if step_path is not None and step_path.is_file():
+        cad, cad_volume, _kept, cad_info = tessellate_step(
+            step_path, meta, unit_scale=unit_scale, deflection=deflection,
+            angular=angular, source_axis=args.source_axis,
+            tmp_dir=Path(tempfile.mkdtemp(prefix="view_geometry_")),
+        )
+    else:
+        print("No original STEP found; showing the converted mesh only. "
+              "Pass --step to enable the comparison.")
+
+    print("Geometry verification")
+    print(f"  original STEP: {step_path if step_path else '(none)'}")
+    print(f"  converted:     {surface_path}")
+    print(f"  unit scale:    {unit_scale:g}; source axis {axis_name} -> exported Z")
+    if cad is not None:
+        print(f"  CAD detail:    {cad_info}")
+        print(f"  CAD bbox:      {fmt_bounds(cad)}  ({cad.n_cells} display faces)")
+    print(f"  conv bbox:     {fmt_bounds(converted)}  ({converted.n_cells} faces)")
+
+    cad_volume_m3 = cad_volume if cad_volume is not None else meta.get("cad_volume_m3")
+    mesh_volume_m3 = meta.get("mesh_volume_m3")
+    recorded_error = meta.get("volume_relative_error")
+    if cad_volume_m3 is not None and mesh_volume_m3 is not None:
+        error = abs(float(mesh_volume_m3) - float(cad_volume_m3)) / float(cad_volume_m3) * 100.0
+        print(f"  CAD volume:    {float(cad_volume_m3):.8g} m^3")
+        print(f"  mesh volume:   {float(mesh_volume_m3):.8g} m^3")
+        print(f"  volume error:  {error:.3f}%"
+              + (f" (recorded {float(recorded_error) * 100:.3f}%)" if recorded_error is not None else ""))
+        limit = (args.mesh_volume_error if args.mesh_volume_error is not None
+                 else float(meta.get("max_volume_error", 5.0)))
+        print(f"  verdict:       {'PASS' if error <= limit else 'FAIL'} (limit {limit:g}%)")
+    elif recorded_error is not None:
+        print(f"  recorded volume error: {float(recorded_error) * 100:.3f}%")
+
+    panels: list[tuple[str, str]] = []
+    if cad is not None:
+        panels.append(("Original STEP (OCC tessellation)", "cad"))
+    panels.append(("Converted FEA surface", "converted"))
+    if cad is not None:
+        panels.append(("Overlay: STEP + converted", "overlay"))
+
+    cad_display = cad
+    if (cad is not None and args.max_cad_faces > 0
+            and cad.n_cells > args.max_cad_faces):
+        try:
+            cad_display = cad.decimate(
+                target_reduction=1.0 - args.max_cad_faces / cad.n_cells
+            )
+        except Exception:
+            cad_display = cad
+
+    plotter = pv.Plotter(
+        shape=(1, len(panels)),
+        off_screen=not args.show,
+        window_size=(500 * len(panels), 540),
+    )
+    for index, (title, kind) in enumerate(panels):
+        plotter.subplot(0, index)
+        plotter.add_text(title, font_size=11, color="black")
+        plotter.add_axes(color="black")
+        if kind == "cad":
+            plotter.add_mesh(cad_display, color="#1f77b4", show_edges=False)
+        elif kind == "converted":
+            plotter.add_mesh(converted, color="#ff7f0e", show_edges=False)
+        else:
+            plotter.add_mesh(cad_display, color="#1f77b4", opacity=0.45)
+            plotter.add_mesh(converted, color="#ff7f0e", style="wireframe", opacity=0.9)
+        plotter.view_isometric()
+    plotter.link_views()
+
+    if args.show:
+        plotter.show(auto_close=True)
+    else:
+        output = args.output or surface_path.with_name(
+            surface_path.stem + "_geometry_check.png"
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        plotter.show(screenshot=str(output), auto_close=True)
+        print(f"Wrote {output}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

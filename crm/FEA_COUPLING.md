@@ -268,6 +268,27 @@ Production CRM and DEME geometry remains
 `geometry/LunarDrumScrew_m_coarse.obj`. The 1,200-face simplification closes the
 physical holes and must not be used for production.
 
+### Verifying a conversion visually
+
+Render the original STEP tessellation, the converted contact surface, and an
+overlay of the two (all in metres, in the FEA local frame):
+
+```bash
+./chrono-env/bin/python view_geometry.py --study-dir Output_my_study
+# or point at explicit files:
+./chrono-env/bin/python view_geometry.py \
+    --step 'geometry/spikey/Assembly 1.step' \
+    --fea-node '/tmp/opencode/spikey_wizard_v2/mesh/Assembly 1_fea.node'
+```
+
+By default it writes `<surface>_geometry_check.png`; add `--show` for a linked
+interactive window. The tool also prints the CAD/mesh bounding boxes, volumes,
+and volume-error verdict from the `.json` sidecar. It normalises older meshes
+whose surface STL was written in raw CAD units (mm), and reads the drum axis
+from either the new `source_drum_axis` or legacy `rotation_axis` metadata key.
+The exported `_surface.stl` (and the OBJ derived from it) is now in metres,
+matching the `.node` mesh; older meshes are handled by the viewer's detection.
+
 ## Stable run settings
 
 The FEA-specific defaults are:
