@@ -66,7 +66,7 @@ LEGACY_DRUM_HALF_LENGTH = 0.033
 LEGACY_BED_HEIGHT = 0.06
 LEGACY_DESCENT_SPEED = 0.0015
 LEGACY_ACTIVE_BOX = 0.244
-LEGACY_SPACING = 0.008  # default SPH spacing (smaller/faster particle count; use 0.004 for higher fidelity)
+LEGACY_SPACING = 0.004  # SPH spacing in m (smaller = finer particles/more simulation resolution)
 
 SOIL_DEFAULTS = {
     "density": 1650.0,
@@ -320,7 +320,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--duration", type=float, default=None, help="simulated CRM duration in s (default: 20)")
     p.add_argument("--fea-duration", type=float, default=None,
                    help="FEA duration in s (default: same as CRM)")
-    p.add_argument("--spacing", type=float, default=None, help="SPH spacing in m (default: geometry-scaled, ~0.008 for legacy size)")
+    p.add_argument("--spacing", type=float, default=None, help="SPH spacing in m (default: geometry-scaled, ~0.004 for legacy size; smaller = higher resolution)")
     p.add_argument("--crm-dt", default=None,
                    help="CRM timestep in s, or 'auto' for spacing-dependent default")
     p.add_argument("--d0-multiplier", type=float, default=None, help="SPH kernel length multiplier")

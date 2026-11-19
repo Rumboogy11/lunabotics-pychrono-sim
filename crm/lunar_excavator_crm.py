@@ -77,8 +77,8 @@ from lunar_excavator_config import (  # noqa: E402
 class CrmRunParams:
     """Numerics, geometry hooks, and excavation metrics for a CRM run."""
 
-    spacing: float = 0.008               # SPH particle spacing [m] (coarser/fewer particles by default)
-    dt: float = 1.6e-4                   # CRM/FSI step [s] at the default 8 mm spacing
+    spacing: float = 0.004               # SPH particle spacing [m] (smaller = finer resolution/more particles)
+    dt: float = 8.0e-5                   # CRM/FSI step [s] at the default 4 mm spacing
     duration: float = MOTION_DEFAULT.t_max
     fps: float = 20.0                    # metric/particle output cadence
     settle_time: float = MOTION_DEFAULT.settle_time
@@ -172,7 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fps", type=float, default=None,
                    help="metric output cadence in Hz (default: 20)")
     p.add_argument("--spacing", type=float, default=None,
-                   help="SPH particle spacing in metres (default: 0.008; smaller value = more particles)")
+                   help="SPH particle spacing in metres (default: 0.004; smaller = finer particles/more resolution)")
     p.add_argument("--settle-time", type=float, default=None,
                    help="seconds before spin/descent begins")
     p.add_argument("--descent-speed", type=float, default=None,
