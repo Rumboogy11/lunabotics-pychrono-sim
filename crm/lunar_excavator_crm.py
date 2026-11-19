@@ -100,11 +100,13 @@ class CrmRunParams:
     proximity_steps: int = 4             # steps between neighbor-list updates
 
     def __post_init__(self) -> None:
-        for name in ("spacing", "dt", "duration", "fps", "descent_speed", "omega",
+        for name in ("spacing", "dt", "duration", "fps", "descent_speed",
                      "bed_height", "drum_radius", "drum_half_length", "inner_radius",
                      "max_velocity", "d0_multiplier", "free_surface_threshold"):
             if getattr(self, name) <= 0.0:
                 raise ValueError(f"{name} must be positive")
+        if self.omega == 0.0:
+            raise ValueError("omega must be nonzero")
         if self.spin_axis.upper() not in {"X", "Y", "Z"}:
             raise ValueError("spin axis must be X, Y, or Z")
         if self.proximity_steps < 1:
@@ -305,8 +307,10 @@ def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -
         box = parse_box(args.active_box)
         overrides.update(active_box_x=box[0], active_box_y=box[1], active_box_z=box[2])
 
-    if overrides.get("reverse_spin") and overrides.get("omega", CrmRunParams.omega) > 0.0:
-        overrides["omega"] = -abs(float(overrides["omega"]))
+    if overrides.get("reverse_spin"):
+        omega_val = overrides.get("omega", CrmRunParams.omega)
+        if omega_val is not None:
+            overrides["omega"] = -abs(float(omega_val)) if float(omega_val) != 0.0 else float(omega_val)
 
     if args.smoke_test:
         overrides.setdefault("spacing", 0.012)
