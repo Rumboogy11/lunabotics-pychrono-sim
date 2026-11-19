@@ -34,6 +34,12 @@ orchestrator records FEA failure and succeeds if
 rigid CRM succeeded unless `--strict-fea` is set. Do not use FEA stress, torque,
 or fill as design validation.
 
+For a structural estimate that avoids the two-way flex-BCE instability, use the
+separate one-way workflow in [crm/README.md](crm/README.md): export the rigid
+CRM soil wrench with `--loads-file`, then replay it with
+`./crm/run_oneway_fea.sh`. It is not two-way FSI, but it produces stable PLA
+stress estimates from the validated rigid soil loads.
+
 ## Outputs
 
 With `--output-dir Output_FullModel`:

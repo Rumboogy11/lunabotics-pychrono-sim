@@ -138,6 +138,20 @@ METRIC_FIELDS = [
     "specific_energy_j_kg",
 ]
 
+# Per-step soil wrench on the rigid drum.  This is the interface consumed by
+# the one-way CRM -> FEA driver (the FEA run replays these loads on the solid
+# mesh instead of coupling SPH directly to flexible BCE markers).
+LOAD_FIELDS = [
+    "time_s",
+    "drum_z_m",
+    "force_x_n",
+    "force_y_n",
+    "force_z_n",
+    "torque_x_nm",
+    "torque_y_nm",
+    "torque_z_nm",
+]
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -197,6 +211,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-output", action="store_true", help="run without writing files")
     p.add_argument("--save-particles", action="store_true",
                    help="write per-frame SPH particle CSV (large)")
+    p.add_argument("--loads-file", type=Path, default=None,
+                   help="write the per-step soil force/torque wrench on the drum to this CSV "
+                        "(used by the one-way CRM -> FEA driver)")
     p.add_argument("--print-soil", action="store_true",
                    help="print the independent soil parameter block and exit")
     p.add_argument("--smoke-test", action="store_true",
@@ -675,6 +692,32 @@ def main() -> int:
         writer = csv.DictWriter(state_file, fieldnames=METRIC_FIELDS)
         writer.writeheader()
 
+    loads_file = None
+    loads_writer = None
+    if args.loads_file is not None:
+        loads_path = args.loads_file.resolve()
+        loads_path.parent.mkdir(parents=True, exist_ok=True)
+        loads_file = loads_path.open("w", newline="", encoding="utf-8")
+        loads_writer = csv.DictWriter(loads_file, fieldnames=LOAD_FIELDS)
+        loads_writer.writeheader()
+        print(f"Soil wrench: {loads_path}", flush=True)
+
+    def write_loads(t: float) -> None:
+        if loads_writer is None:
+            return
+        force = vec_parts(terrain.GetFsiBodyForce(drum)) if hasattr(terrain, "GetFsiBodyForce") else (0.0, 0.0, 0.0)
+        torque = vec_parts(terrain.GetFsiBodyTorque(drum)) if hasattr(terrain, "GetFsiBodyTorque") else (0.0, 0.0, 0.0)
+        loads_writer.writerow({
+            "time_s": f"{t:.9g}",
+            "drum_z_m": f"{vec_parts(drum.GetPos())[2]:.9g}",
+            "force_x_n": f"{force[0]:.9g}",
+            "force_y_n": f"{force[1]:.9g}",
+            "force_z_n": f"{force[2]:.9g}",
+            "torque_x_nm": f"{torque[0]:.9g}",
+            "torque_y_nm": f"{torque[1]:.9g}",
+            "torque_z_nm": f"{torque[2]:.9g}",
+        })
+
     peak_fill = 0.0
     work_j = 0.0
     last_row = {}
@@ -731,6 +774,7 @@ def main() -> int:
     last_torque_x = 0.0
     last_power = 0.0
     record(0.0, 0.0, 0.0)
+    write_loads(0.0)
     next_output = 1.0 / run.fps
 
     t = 0.0
@@ -759,6 +803,7 @@ def main() -> int:
             work_j += fluid_power * h
             last_torque_x = tx
             last_power = fluid_power
+            write_loads(t)
 
             if t >= next_output - 1.0e-12 or t >= run.duration - 1.0e-12:
                 record(t, fluid_power, last_torque_x)
@@ -770,6 +815,8 @@ def main() -> int:
     finally:
         if state_file is not None:
             state_file.close()
+        if loads_file is not None:
+            loads_file.close()
 
     print(
         "\nCRM run complete: "

@@ -35,13 +35,15 @@ Recommended hierarchy going forward:
 3. **PyChrono core as an illustrative CPU demo**, not a predictive model.
 4. **MercuryDPM outputs as historical reference only.**
 
-The excavator is made of PLA plastic. A separate spindle-driven FEA path couples
-a solid tetrahedral drum mesh to CRM, but no tested setup is engineering
-validated: one BCE layer crashes, two layers diverge mechanically by 0.5 s,
+The excavator is made of PLA plastic. For structural estimates, use the new
+one-way path: rigid CRM records the soil wrench with `--loads-file`, and
+`./crm/run_oneway_fea.sh` replays it on the solid tetrahedral drum mesh without
+SPH/flex-BCE coupling. The older two-way spindle-driven FEA path is still only a
+diagnostic: one BCE layer crashes, two layers diverge mechanically by 0.5 s,
 and three layers have interaction/retention instability. Keep rigid Chrono::CRM
 as the production design driver. Soil metrics now count SPH fluid markers only;
 older fill comparisons that included BCE markers are invalid. See
-[`crm/FEA_COUPLING.md`](crm/FEA_COUPLING.md) for evidence and diagnostic commands.
+[`crm/FEA_COUPLING.md`](crm/FEA_COUPLING.md) for evidence and commands.
 
 A combined report runner is available: `./run_full_model.sh` executes rigid CRM
 and FEA with shared settings and writes `combined_report.json` plus

@@ -2,17 +2,91 @@
 
 ## Current status
 
-A separate spindle-driven FEA path now exists. A reproducible diagnostic
-command is provided below.
+Two spindle-driven FEA paths exist: a one-way rigid-CRM wrench replay for
+structural screening and a two-way coupled diagnostic. Commands for both are
+provided below. The earlier two-way-only state is preserved on the local branch
+`two-way-fea-wip` so the coupling diagnostics remain available.
 
 It uses the local Chrono 10 source build, a solid tetrahedral mesh of the STEP
 drum, and the same CRM SPH soil as the production driver. The default mesh is
 `fea/LunarDrumScrew_m_fea_decim8k.node` /
 `fea/LunarDrumScrew_m_fea_decim8k.ele`.
 
-The path is **not engineering-validated**. Treat it as a feasibility and
+The two-way path is **not engineering-validated**. Treat it as a feasibility and
 diagnostic experiment only. The corrected fill/excavation metrics include SPH
 fluid markers only; older values that counted BCE markers are invalid.
+
+## One-way CRM -> FEA structural replay
+
+The supported structural-estimate path is now two-stage. Rigid CRM writes the
+per-step soil wrench with `--loads-file`; `crm/lunar_excavator_oneway.py`
+(`./crm/run_oneway_fea.sh`) replays it on the same solid mesh with no
+CRMTerrain/SPH system. The wrench is transformed into the spindle frame and
+distributed over exterior solid nodes as equivalent nodal forces that reproduce
+the recorded net force and torque to numerical precision. Spindle descent/spin
+remain motor-driven, hub nodes remain tied to the spindle, and the recorded
+drum trajectory is checked against the FEA motion. The replay also aborts if
+the motor angle or descent position stops tracking its command, which is what
+made the earlier GMRES results unusable.
+
+This avoids flex-BCE instability and gives stable short-run PLA stress
+estimates. It is a structural response to rigid-CRM loads, not two-way FSI:
+deformation cannot feed back into the soil, and the rigid drum wrench is only
+valid while the real drum can still be approximated as rigid. Peak stress
+excludes tetrahedra below `--min-stress-volume` (default `1e-12 m^3`); the raw
+peak is retained for transparency because the promoted mesh has a few sliver
+elements. Use rigid CRM for soil/design metrics and this replay only for
+structural screening until coupled contact is validated. It is also a
+single-mesh estimate; no PLA mesh-convergence or coupon-strength calibration has
+been performed.
+
+One-way replay defaults: `dt=2e-3 s`, `pychrono.pardisomkl.ChSolverPardisoMKL`
+with 8 threads, zero spin ramp, load-node radius `>= 0.8 R`, min reported stress
+element volume `1e-12 m^3`, and locked direct-solver sparsity pattern. If
+`pychrono.pardisomkl` is unavailable, the driver warns and falls back to
+`ChSolverSparseLU`. GMRES was tested but did not enforce the spindle/hub
+constraints accurately and is not usable for results.
+
+Full 0.2 s validation gave the same deformation (`9.48433e-5 m`), filtered peak
+stress (`36.15 MPa`), raw peak stress (`57.03 MPa`), and work (`0.3225 J`) for
+PardisoMKL and SparseLU at `dt=2e-3 s`. Timings over that history were:
+
+| Solver / setting | Wall time |
+| --- | --- |
+| SparseLU, `dt=1e-3 s` | 682 s |
+| SparseLU, `dt=2e-3 s`, locked pattern | 309 s |
+| PardisoMKL, `dt=2e-3 s`, 1 MKL thread | 42 s |
+| PardisoMKL, `dt=2e-3 s`, 8 MKL threads | 28 s |
+| PardisoMKL, `dt=5e-3 s`, 8 MKL threads | 12 s |
+
+`dt=5e-3 s` completed with Pardiso but changed peak stress by about 3% and is
+not the default; SparseLU at that step size segfaulted. `dt=2e-3 s` was chosen
+to balance speed and timestep convergence. Individual peak elements remain
+mesh-sensitive.
+
+`ChSolverSparseLU` wraps Eigen's SparseLU, whose factorization is single
+threaded: `system.SetNumThreads(...)` does not make its LU factorization use
+more CPU cores. Pattern locking still helps it by avoiding repeated analysis
+overhead, but it is not multithreading. PardisoMKL is genuinely multithreaded:
+the `ChSolverPardisoMKL(num_threads)` constructor controls its MKL thread pool;
+8 threads were faster than 1 or 16 on this 16-core machine.
+
+MUMPS is not viable in the current Python workflow. Chrono's source contains a
+`ChSolverMumps` module, but this version has no SWIG/Python binding for it, and
+the environment has no MUMPS library or CMake config. It would require building
+MUMPS (Fortran is available) and adding a custom Python binding. PardisoMKL is
+already provided by the installed conda-forge PyChrono 10.0.0 package, so no
+local Chrono rebuild was needed.
+
+```bash
+./crm/run.sh --duration 0.2 --spacing 0.012 --dt 0.00025 \
+    --loads-file /tmp/opencode/oneway_loads_d02.csv \
+    --output-dir /tmp/opencode/oneway_crm_d02
+
+./crm/run_oneway_fea.sh --duration 0.2 \
+    --loads /tmp/opencode/oneway_loads_d02.csv \
+    --output-dir /tmp/opencode/oneway_fea_d02_default
+```
 
 Driver and SPH-coupling fixes applied in the local source/runtime:
 
@@ -21,8 +95,11 @@ Driver and SPH-coupling fixes applied in the local source/runtime:
   rotation-speed motor -> spindle), instead of per-step state overrides on a
   fixed/free body; FEA hub nodes remain tied to the spindle with
   `ChLinkNodeFrame`;
-- default FEA spin-up uses a `0.5 s` linear speed ramp and FEA nodal masses are
-  floored by default (`1e-6 kg`) to stabilize sliver nodes;
+- default two-way FEA spin-up uses a `0.5 s` linear speed ramp and FEA nodal
+  masses are floored by default (`1e-6 kg`) to stabilize sliver nodes; the
+  zero-ramp spin segment used by the one-way replay no longer inherits a
+  `ChFunctionSequence` continuity offset, which previously kept motor speed at
+  zero;
 - local `chrono-src` CRM/SPH RHS handling for flex BCE coupling was hardened
   (no constitutive stress-rate evolution written for non-fluid BCE markers,
   no FSI RHS force for BCE markers without fluid-neighbor support, degenerate
@@ -235,13 +312,15 @@ not make it robust.
 ## Recommended workflow
 
 1. Use rigid-body CRM for fill ratio, torque comparisons, and geometry sweeps.
-2. Use DEME/DEM-Engine only for targeted discrete-mechanism checks.
-3. Use this FEA driver only for short coupling diagnostics; even short runs are
-   not established as physically valid.
-4. Before using any stress magnitude for design, fix the rigid-rotation and
-   contact-marker problem: obtain full rigid spin of the PLA body without
-   bore-driven twist, and match flexible BCE density to SPH resolution.
-5. Calibrate PLA properties from coupon tests of the actual printer, infill, and
+2. Use the one-way wrench replay for structural screening of the promoted PLA
+   mesh; cite it as a response to rigid-CRM loads, not coupled FSI.
+3. Use DEME/DEM-Engine only for targeted discrete-mechanism checks.
+4. Use the two-way FEA driver only for short coupling diagnostics; even short
+   runs are not established as physically valid.
+5. Before treating two-way stress magnitudes as design validation, fix the
+   contact-marker problem: match flexible BCE density to SPH resolution and
+   verify full rigid spin of the PLA body without bore-driven twist.
+6. Calibrate PLA properties from coupon tests of the actual printer, infill, and
    build orientation. FDM PLA is anisotropic and layer-sensitive; the current
    isotropic `E=3 GPa`, `nu=0.38`, `rho=1240 kg/m^3` values are estimates.
 

@@ -277,10 +277,15 @@ def _axis_quat_align_z(chrono, axis: tuple[float, float, float]):
     return chrono.QuatFromAngleAxis(angle, chrono.ChVector3d(cx, cy, cz))
 
 
-def _append_const_duration(seq, chrono, value: float, duration: float) -> None:
+def _append_const_duration(seq, chrono, value: float, duration: float,
+                           continuous: bool = True) -> None:
     if duration <= 0.0:
         return
-    seq.InsertFunct(chrono.ChFunctionConst(value), duration, 1.0, True)
+    # ChFunctionSequence's continuity offset shifts a constant segment so that
+    # it starts at the previous segment's end value.  That is correct for the
+    # descent ramp/plateau, but a zero-ramp spin step from 0 to omega must NOT
+    # be shifted or the motor speed stays at zero forever.
+    seq.InsertFunct(chrono.ChFunctionConst(value), duration, 1.0, continuous)
 
 
 def build_descent_position_function(chrono, motion, t_end: float):
@@ -329,7 +334,7 @@ def build_spin_speed_function(chrono, motion, ramp_time: float, t_end: float):
             if t_end > ramp_end:
                 _append_const_duration(seq, chrono, omega, t_end - ramp_end)
         else:
-            _append_const_duration(seq, chrono, omega, t_end - settle)
+            _append_const_duration(seq, chrono, omega, t_end - settle, continuous=False)
     if t_end <= 0.0:
         _append_const_duration(seq, chrono, 0.0, 1.0)
     return seq
@@ -694,8 +699,14 @@ def max_von_mises(fea, mesh, stride: int) -> float:
     return worst_stress_info(fea, mesh, stride)[1]
 
 
-def worst_stress_info(fea, mesh, stride: int) -> tuple[int, float, float, tuple[float, float, float]]:
-    """Return index, von Mises stress, volume, and centroid of the hot element."""
+def worst_stress_info(fea, mesh, stride: int,
+                      min_volume: float = 0.0) -> tuple[int, float, float, tuple[float, float, float]]:
+    """Return index, von Mises stress, volume, and centroid of the hot element.
+
+    ``min_volume`` can exclude sliver tetrahedra whose stress is dominated by a
+    near-singular element Jacobian; the promoted mesh has a handful of elements
+    below 1e-12 m^3.
+    """
     worst_index = -1
     largest = 0.0
     volume = 0.0
@@ -704,11 +715,14 @@ def worst_stress_info(fea, mesh, stride: int) -> tuple[int, float, float, tuple[
         element = fea.CastToChElementTetraCorot_4(mesh.GetElement(i))
         if element is None:
             continue
+        element_volume = abs(element.ComputeVolume())
+        if element_volume < min_volume:
+            continue
         value = element.GetStress().GetEquivalentVonMises()
         if value > largest:
             largest = value
             worst_index = i
-            volume = abs(element.ComputeVolume())
+            volume = element_volume
             points = [rigid.vec_parts(element.GetTetrahedronNode(j).GetPos()) for j in range(4)]
             centroid = tuple(sum(p[k] for p in points) / 4.0 for k in range(3))
     return worst_index, largest, volume, centroid
