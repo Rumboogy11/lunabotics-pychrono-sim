@@ -258,6 +258,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--vtk-stride", type=int, default=1,
                    help="export every Nth recorded frame to VTK (default: 1). "
                         "Increase to reduce disk/time for large meshes.")
+    p.add_argument("--raw-stress-every", type=int, default=1,
+                   help="compute the unfiltered raw peak von Mises (stride 1, no volume filter) "
+                        "every N recorded frames and reuse the last value otherwise (default: 1, "
+                        "every frame). Use 0 to compute only on the first and last recorded frames.")
     # GMRES does not enforce the spindle/hub constraints accurately with this
     # stiffness matrix. PardisoMKL and SparseLU give the commanded kinematics;
     # PardisoMKL is much faster and is available through pychrono.pardisomkl.
@@ -335,6 +339,14 @@ def rotate_vectors(q_tuple, vectors: np.ndarray) -> np.ndarray:
     return vectors + 2.0 * (w * cross_q_v + np.cross(q_vec, cross_q_v))
 
 
+def _vec3(value) -> tuple[float, float, float]:
+    """Fast 3-vector extraction for Chrono vectors/positions."""
+    try:
+        return (float(value.x), float(value.y), float(value.z))
+    except AttributeError:
+        return rigid.vec_parts(value)
+
+
 def worst_deformation(nodes, local_positions: np.ndarray, spindle) -> tuple[int, float, np.ndarray]:
     """Largest displacement relative to the prescribed rigid spindle motion.
 
@@ -343,9 +355,11 @@ def worst_deformation(nodes, local_positions: np.ndarray, spindle) -> tuple[int,
     reference is the current spindle pose applied to each node's local arm.
     """
     q_tuple = rigid.quat_parts(spindle.GetRot())
-    center = np.asarray(rigid.vec_parts(spindle.GetPos()), dtype=float)
+    center = np.asarray(_vec3(spindle.GetPos()), dtype=float)
     expected = rotate_vectors(q_tuple, local_positions) + center
-    actual = np.asarray([rigid.vec_parts(node.GetPos()) for node in nodes], dtype=float)
+    actual = np.empty((len(nodes), 3), dtype=float)
+    for i, node in enumerate(nodes):
+        actual[i] = _vec3(node.GetPos())
     delta = actual - expected
     mag2 = np.einsum("ij,ij->i", delta, delta)
     index = int(np.argmax(mag2))
@@ -400,14 +414,19 @@ def build_load_mapping(nodes, local_positions: np.ndarray, masses: np.ndarray,
     return indices, matrix, residual
 
 
-def apply_loads(chrono, nodes, indices: np.ndarray, matrix: np.ndarray,
+def apply_loads(chrono, load_nodes, matrix: np.ndarray,
                 wrench: tuple[np.ndarray, np.ndarray], q_tuple, scale: float) -> None:
+    """Distribute a spindle-local wrench as world-frame nodal forces.
+
+    Force computation is vectorized; applying forces still requires one
+    SetForce call per load node (Chrono FEA nodes have no bulk force API).
+    """
     force_local, torque_local = wrench
     target = np.concatenate((force_local, torque_local))
     nodal = (matrix @ target).reshape(-1, 3) * scale
-    rotated = np.array([rigid.quat_rotate(q_tuple, tuple(row)) for row in nodal])
-    for node_index, f in zip(indices, rotated):
-        nodes[int(node_index)].SetForce(chrono.ChVector3d(float(f[0]), float(f[1]), float(f[2])))
+    rotated = rotate_vectors(q_tuple, nodal)
+    for node, f in zip(load_nodes, rotated):
+        node.SetForce(chrono.ChVector3d(float(f[0]), float(f[1]), float(f[2])))
 
 
 def write_config(path: Path, args, run, pla, motion, node_path: Path, ele_path: Path,
@@ -452,6 +471,8 @@ def main() -> int:
         raise SystemExit("--load-scale must be positive")
     if args.min_stress_volume < 0.0:
         raise SystemExit("--min-stress-volume cannot be negative")
+    if args.raw_stress_every < 0:
+        raise SystemExit("--raw-stress-every cannot be negative")
 
     soil = rigid.make_soil(args)
     # The one-way replay has no SPH fluid, so the rigid-CRM CFL limit does not
@@ -579,13 +600,14 @@ def main() -> int:
     q0_tuple = rigid.quat_parts(q0)
     local_positions = np.array([
         rigid.quat_rotate(rigid.quat_conj(q0_tuple),
-                          tuple(rigid.vec_parts(node.GetX0())[k] - center0[k] for k in range(3)))
+                          tuple(_vec3(node.GetX0())[k] - center0[k] for k in range(3)))
         for node in nodes
     ], dtype=float)
     masses = np.array([node.GetMass() for node in nodes], dtype=float)
     load_indices, matrix, mapping_residual = build_load_mapping(
         nodes, local_positions, masses, args.load_radius_fraction * motion.drum_radius
     )
+    load_nodes = [nodes[int(i)] for i in load_indices]
     print(
         f"One-way loads on {len(load_indices)} exterior nodes; "
         f"total lumped load mass={masses[load_indices].sum():.6g} kg; "
@@ -623,15 +645,27 @@ def main() -> int:
     wall_start = time.perf_counter()
     next_progress = 0.0
     axis = np.array(fea_driver.spin_axis_tuple(motion), dtype=float)
+    raw_stress = 0.0
 
-    def record(t: float, applied_force, applied_torque, motor_speed: float) -> None:
-        nonlocal frame, last_row
+    def record(t: float, applied_force, applied_torque, motor_speed: float,
+               is_final: bool = False) -> None:
+        nonlocal frame, last_row, raw_stress
         index, max_stress, element_volume, _center = fea_driver.worst_stress_info(
             fea, mesh, args.stress_stride, args.min_stress_volume
         )
-        _raw_index, raw_stress, _raw_volume, _raw_center = fea_driver.worst_stress_info(
-            fea, mesh, 1, 0.0
-        )
+        # Raw peak (stride 1, no volume filter) is expensive on large meshes.
+        # Reuse the filtered result when equivalent, or recompute only on the
+        # requested cadence (--raw-stress-every).  The previous value is kept
+        # for intermediate frames to avoid a full element scan every record.
+        if args.stress_stride == 1 and args.min_stress_volume == 0.0:
+            raw_stress = max_stress
+        else:
+            every = args.raw_stress_every
+            do_raw = (frame == 0 or is_final or (every > 0 and frame % every == 0))
+            if do_raw:
+                _raw_index, raw_stress, _raw_volume, _raw_center = fea_driver.worst_stress_info(
+                    fea, mesh, 1, 0.0
+                )
         _deform_index, max_deformation, _delta = worst_deformation(
             nodes, local_positions, spindle
         )
@@ -704,7 +738,7 @@ def main() -> int:
                 rigid.quat_rotate(q_inv, tuple(force_world)),
                 rigid.quat_rotate(q_inv, tuple(torque_world)),
             )
-            apply_loads(chrono, nodes, load_indices, matrix, wrench, q_tuple, args.load_scale)
+            apply_loads(chrono, load_nodes, matrix, wrench, q_tuple, args.load_scale)
             system.DoStepDynamics(h)
             t += h
 
@@ -716,7 +750,8 @@ def main() -> int:
                 # Report the wrench at the output time, not the wrench used at
                 # the start of the step that got us here.
                 report_force, report_torque = loads.at(t)
-                record(t, report_force, report_torque, motor_speed)
+                record(t, report_force, report_torque, motor_speed,
+                       is_final=(t >= run.duration - 1.0e-12))
                 next_output += 1.0 / run.fps
             if t >= next_progress:
                 print(f"  t={t:7.3f}s / {run.duration:g}s", flush=True)
