@@ -398,14 +398,32 @@ def get_fluid_system(terrain, fsi):
     return fluid
 
 
-def particle_positions(fluid, fsi):
+def particle_positions(fluid, fsi, terrain=None):
+    """Return positions of SPH fluid (soil) markers only.
+
+    ``fluid.GetParticlePositions()`` returns all markers (fluid SPH, boundary
+    BCE, rigid-body BCE, and flexible BCE).  Excavation/fill metrics must be
+    computed on soil particles only, so we prefer an explicit fluid-group query
+    and otherwise slice to the fluid-marker prefix/count.
+    """
     group = fsi_enum(fsi, "MarkerGroup", "FLUID")
     if group is not None:
         try:
             return fluid.GetParticlePositions(group)
         except TypeError:
             pass
-    return fluid.GetParticlePositions()
+    positions = fluid.GetParticlePositions()
+    count = None
+    if hasattr(fluid, "GetNumFluidMarkers"):
+        count = fluid.GetNumFluidMarkers()
+    elif terrain is not None and hasattr(terrain, "GetNumSPHParticles"):
+        count = terrain.GetNumSPHParticles()
+    if count is not None:
+        return positions[:count]
+    raise RuntimeError(
+        "cannot identify the SPH fluid-marker prefix; this Chrono binding "
+        "exposes neither MarkerGroup.FLUID positions nor a fluid-marker count"
+    )
 
 
 def get_particle_mass(fluid, soil: CrmSoilParams, spacing: float) -> tuple[float, str]:
@@ -666,7 +684,7 @@ def main() -> int:
 
     def record(t: float, fluid_power: float, fluid_torque_x: float) -> None:
         nonlocal frame, peak_fill, last_row
-        positions = particle_positions(fluid, fsi)
+        positions = particle_positions(fluid, fsi, terrain)
         with_flags = bool(args.save_particles and not args.no_output)
         metrics, flags = compute_metrics(
             positions, drum, run, motion, soil, particle_mass,

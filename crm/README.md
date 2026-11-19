@@ -15,13 +15,11 @@ MercuryDPM particle contact parameters.
 | MercuryDPM outputs | historical sanity check only |
 
 The excavator is PLA plastic. A separate spindle-driven FEA structural check is
-available through `./crm/run_fea.sh --smoke-test --no-output`. It couples the
+available through `./crm/run_fea.sh`. It couples the
 promoted solid tetrahedral mesh `fea/LunarDrumScrew_m_fea_decim8k.node/.ele` to
-CRM with `terrain.AddFeaMesh(mesh, False)` at `dt=2.5e-4 s` and one BCE layer.
-Short runs are numerically stable, but the FEA fill is near zero and the reported
-von Mises stress is far above PLA strength. A default 1.0 s run diverges and
-aborts near 0.8 s, so these magnitudes are feasibility artifacts rather than
-engineering results. Keep the rigid kinematic driver in
+CRM with `terrain.AddFeaMesh(mesh, False)`. No tested BCE setup is validated:
+one layer crashes, two layers diverge mechanically by 0.5 s, and three layers
+show interaction/retention instability. Keep the rigid kinematic driver in
 this directory as the production design model. See
 [FEA_COUPLING.md](FEA_COUPLING.md) for the full findings, mesh route, and
 unresolved contact/rigid-rotation issues.
@@ -99,14 +97,18 @@ PYTHON="$CHRONO_ENV/bin/python" ./crm/run.sh \
   --mesh-file geometry/LunarDrumScrew_spiked.obj \
   --output-dir Output_CRM_Spiked
 
-# Separate solid-FEA feasibility check (not a production design run).
-./crm/run_fea.sh --smoke-test --no-output --fps 200 --stress-stride 50
+# Separate short FEA diagnostic only (not a production design run).
+./crm/run_fea.sh --duration 0.05 --spacing 0.012 --dt 0.00025 \
+  --fps 200 --no-output --stress-stride 50 \
+  --solver-iterations 20 --solver-tolerance 1e-3 --bce-layers 2
 ```
 
 The FEA driver uses the promoted solid mesh and its own defaults (`dt=2.5e-4 s`,
-one BCE layer, inward 2-D BCE pattern, GMRES/diagonal preconditioning). Only the
-short smoke case is stable; longer runs diverge and the stress/fill values are
-not engineering results. See [FEA_COUPLING.md](FEA_COUPLING.md).
+two BCE layers, inward 2-D BCE pattern, GMRES/diagonal preconditioning). Two
+layers are the best tested interacting setup and complete 0.5 s, but show
+severe mechanical divergence by the end. One layer crashes in tested
+interacting runs. See
+[FEA_COUPLING.md](FEA_COUPLING.md).
 
 ### Validation performed here
 
@@ -192,9 +194,9 @@ full descent and a fixed number of revolutions).
 
 ## Current limitations
 
-* Only the short smoke test has been run here on the conda CRM build. Long
-  production sweeps and simulant calibration have not been performed, so treat
-  the default soil parameters as estimates.
+* Long production sweeps and simulant calibration have not been performed, so
+  treat the default soil parameters as estimates. The corrected 12 mm fluid-only
+  CRM checks are coarse-resolution comparisons, not soil-model validation.
 * The drum is kinematic; its pose is prescribed analytically and the FSI
   reaction torque is recorded, but drivetrain dynamics are not modeled.
 * Fill ratio uses a nominal cylindrical cavity unless `--capacity-volume` is

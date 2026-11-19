@@ -2,19 +2,17 @@
 
 ## Current status
 
-A separate spindle-driven FEA path now exists:
-
-```bash
-./crm/run_fea.sh --smoke-test --no-output
-```
+A separate spindle-driven FEA path now exists. A reproducible diagnostic
+command is provided below.
 
 It uses the local Chrono 10 source build, a solid tetrahedral mesh of the STEP
-drum, and the same CRM SPH soil as the production driver. The supported default
-mesh is `fea/LunarDrumScrew_m_fea_decim8k.node` /
+drum, and the same CRM SPH soil as the production driver. The default mesh is
+`fea/LunarDrumScrew_m_fea_decim8k.node` /
 `fea/LunarDrumScrew_m_fea_decim8k.ele`.
 
-The path is **improved for short runs, but the stress and fill results are not
-engineering-validated**. Treat it as a feasibility check only.
+The path is **not engineering-validated**. Treat it as a feasibility and
+diagnostic experiment only. The corrected fill/excavation metrics include SPH
+fluid markers only; older values that counted BCE markers are invalid.
 
 Driver and SPH-coupling fixes applied in the local source/runtime:
 
@@ -33,32 +31,40 @@ Driver and SPH-coupling fixes applied in the local source/runtime:
   `share/chrono/python/pychrono/_fsi.so`). `chrono-src`/build/install remain
   local to this workspace.
 
-Short-run validation with the defaults below (12 mm, 2.5e-4 s, 1 BCE layer,
-GMRES 20/1e-3, spin ramp 0.5 s):
+### Corrected fluid-only comparison (12 mm, dt=2.5e-4 s)
 
-- `0.05 s`: final/peak fill `0.00551`, inside `2`, excavated `3`, max
-  displacement `1.49e-5 m`, max von Mises `6.58 MPa`, spindle torque
-  `0.176 N·m`, work `0.105 J` (log: `/tmp/opencode/fea_fixed_005.log`);
-- `0.20 s`: final/peak fill `0.00551`, inside `2`, excavated `3`, max
-  displacement `1.29e-4 m`, max von Mises `59.3 MPa`, spindle torque
-  `1.48 N·m`, work `0.290 J` (log: `/tmp/opencode/fea_fixed_02.log`).
-  Stress/displacement trend upward over this interval (near PLA strength by
-  0.2 s) and should not be interpreted as converged.
+`fluid.GetParticlePositions()` returns marker groups in the order
+`[fluid, boundary, rigid, flex]`; metrics must use only the fluid prefix (576
+particles in these cases). The rigid CRM baseline with this corrected basis is:
 
-Longer-run behavior remains non-physical:
+| Duration | Final/peak fill | Inside | Excavated | Work |
+|---:|---:|---:|---:|---:|
+| 0.20 s | 0.002755 | 1 | 7 | 0.3256 J |
+| 0.50 s | 0.019286 | 7 | 17 | 0.675 J |
 
-- `0.50 s` (same settings, 20 fps sampling): stress/displacement grow after the
-  early stable phase to `3907 MPa` and `6.21 mm` by `0.50 s` with large torque
-  excursions (`156 N·m`, work `14.9 J`, log: `/tmp/opencode/fea_fixed_05.log`);
-- rigid CRM comparison at `0.20 s` / 12 mm: final fill `0.165`, peak `0.198`,
-  inside `60`, excavated `93`, work `0.326 J` (`./crm/run.sh ...`). The FEA case
-  therefore still severely under-predicts fill/excavation and is not suitable
-  for torque/energy comparison.
+Evidence logs: `/tmp/opencode/rigid_fluid_d02.log` and
+`/tmp/opencode/rigid_fluid_d05.log`. These are coarse-resolution alignment
+checks, not the 4 mm production configuration.
+
+FEA interaction outcomes at the same 12 mm spacing, dt, GMRES 20/1e-3, and
+0.5 s spin ramp depend strongly on flex-BCE layering:
+
+| BCE layers | Result |
+|---:|---|
+| 1 | Crashes near 0.005 s with `[calcHashD]` index outside the minimum boundary. |
+| 2 | 576 fluid / 1,152 boundary / 17,442 flex markers; kernel-support warning. At 0.2 s: inside=6, fill=0.016531, excavated=6. At 0.5 s: mechanical divergence (3.356 mm displacement, 5.209 GPa von Mises, 345.7 N·m torque, 3.408 J work). |
+| 3 | 576 fluid / 2,160 boundary / 26,163 flex markers. Interacting default-gap run segfaults between 0.05–0.10 s; a 0.01 m initial-gap run reaches 0.2 s but has no meaningful bed interaction or retained soil. |
+
+Logs: `/tmp/opencode/fea_bce2_d01.log`, `fea_bce2_d02.log`,
+`fea_bce2_d05.log`, `fea_bce3_d02b.log`, and `fea_bce3_gap001_d02.log` under
+`/tmp/opencode/`. These outcomes do not identify an engineering-valid FEA
+configuration. In particular, the 2-layer 0.2 s fill is not proof of a valid
+response because the case diverges by 0.5 s and retains little soil.
 
 Keep the rigid-body CRM model as the production design driver. Do not report FEA
-stress or torque as structural validation. The FEA path is currently a short-run
-feasibility/diagnostic tool pending further stabilization (kernel support/BCE
-layering, contact density and initial contact, and long-run coupled dynamics).
+stress or torque as structural validation. Use the FEA path only for deliberately
+short diagnostics while investigating kernel support/BCE layering, contact
+density and initial contact, and long-run coupled dynamics.
 
 ## What Chrono supports
 
@@ -168,44 +174,37 @@ The FEA-specific defaults are:
 
 | Setting | Default | Why |
 |---|---:|---|
-| mesh | `fea/LunarDrumScrew_m_fea_decim8k.node/.ele` | short-run stable promoted mesh |
+| mesh | `fea/LunarDrumScrew_m_fea_decim8k.node/.ele` | promoted tetrahedral mesh; mesh promotion does not validate coupling |
 | SPH spacing | `0.012 m` | same smoke resolution as rigid CRM |
 | timestep | `2.5e-4 s` | FEA/SPH is unstable at the rigid default `5e-4 s` |
-| BCE layers | `1` | more layers trigger domain/boundary instability here |
+| BCE layers | `2` | best tested interacting setup; warning remains and the run diverges by 0.5 s |
 | BCE pattern | `BcePatternMesh2D_INWARD` | required for a closed solid boundary |
 | GMRES | `20 / 1e-3` | practical direct/iterative choice for FEA stiffness coupling |
+| CPU threads | `8` | Chrono/Eigen parallel work; SPH kernels remain GPU-driven |
 | spin ramp | `0.5 s` | avoids impulsive startup; motion prescribed by motor functions |
 | nodal mass floor | `1e-6 kg` | stabilizes sliver nodes from CAD-derived tetrahedral mesh |
 
-Reproduce the short-run check explicitly:
+For a short diagnostic sample of the two-layer case (not a validated run):
 
 ```bash
 ./crm/run_fea.sh --duration 0.05 --spacing 0.012 --dt 0.00025 \
     --fps 200 --no-output --stress-stride 50 \
-    --solver-iterations 20 --solver-tolerance 1e-3 --bce-layers 1
+    --solver-iterations 20 --solver-tolerance 1e-3 --bce-layers 2
 ```
 
-`--bce-layers 1` emits Chrono's warning that fewer than three layers may cause
-insufficient kernel support and particle leakage. It remains a likely contributor
-to long-run instability and under-predicted excavation, but tested multi-layer
-configurations were not stable in this setup.
+Chrono warns that fewer than three BCE layers may cause insufficient kernel
+support and particle leakage. Three layers did not solve the problem: they
+increased flex-marker count and produced interacting-run crashes or a stable but
+non-interacting gap case. BCE support, occlusion, and bed access remain open.
 
 ### Long-run behavior
 
-With the motor-driven spindle, nodal-mass flooring, and local SPH RHS fixes,
-short runs are stable and physically plausible in magnitude (`0.05 s`: ~6.6 MPa;
-`0.20 s`: ~59 MPa, trending upward). However, longer runs still diverge:
-
-| Time | Max von Mises | Max displacement | Spindle torque |
-|---:|---:|---:|---:|
-| 0.05 s | 6.58 MPa | 14.9 µm | 0.176 N·m |
-| 0.20 s | 59.3 MPa | 129 µm | 1.48 N·m |
-| 0.30 s | 729 MPa | 1.12 mm | 27.4 N·m |
-| 0.50 s | 3907 MPa | 6.21 mm | 156 N·m |
-
-Fill remains ~`0.0055` (2 particles inside) throughout these runs, far below the
-rigid CRM baseline (~`0.165–0.198` at 0.2 s). Do not treat results beyond the
-short-run feasibility window as converged or physically meaningful.
+There is no validated FEA duration window. The corrected 2-layer run already
+shows non-credible mechanical growth by 0.5 s; 1- and 3-layer cases have separate
+crash or interaction failures. Previous one-layer stress/displacement values and
+the prior rigid-vs-FEA fill comparison used BCE-contaminated metrics and are not
+validation evidence. Do not use any FEA stress, spindle torque, or fill value
+for design decisions.
 
 ## Remaining limitations
 
@@ -213,15 +212,15 @@ Motor-driven spindle kinematics and SPH RHS hardening removed the dominant
 short-run stress artifacts, but the coupled long-run response is still not
 validated:
 
-- the flexible boundary has 8,721 surface nodes/BCE markers against only 576
-  SPH particles (`~15x` marker/particle ratio), so contact sampling/support is
-  poorly matched at 12 mm spacing and 1 BCE layer;
-- fill remains near zero while rigid CRM excavates substantially more soil at
-  the same spacing, indicating the FEA/SPH contact and excavation interaction is
-  still not representative;
-- stress/displacement grow over time after an initially plausible short-run
-  phase, so constraint coupling, mass/stiffness distribution, contact forces,
-  and/or SPH boundary support likely still introduce accumulating errors;
+- the flexible boundary has 8,721 surface nodes against only 576 SPH particles;
+  BCE layers raise flex-marker counts to 17,442 or 26,163 and affect support,
+  occlusion, and soil access;
+- corrected rigid CRM shows progressive but low retention at this coarse
+  resolution; the FEA 2-layer case's modest 0.2 s retention does not persist as
+  a credible response through 0.5 s;
+- stress/displacement diverge in the 2-layer case, while 1- and 3-layer cases
+  show hash-domain or segmentation failures, indicating coupled stability and
+  boundary support remain unresolved;
 - earlier diagnostics showed hot spots and shear consistent with drive/contact
   modeling sensitivity; the current setup is improved but not proven mesh- or
   parameter-converged.
@@ -237,8 +236,8 @@ not make it robust.
 
 1. Use rigid-body CRM for fill ratio, torque comparisons, and geometry sweeps.
 2. Use DEME/DEM-Engine only for targeted discrete-mechanism checks.
-3. Use this FEA driver only to demonstrate that solid CAD-derived drum meshes
-   can be coupled and integrated stably in short runs.
+3. Use this FEA driver only for short coupling diagnostics; even short runs are
+   not established as physically valid.
 4. Before using any stress magnitude for design, fix the rigid-rotation and
    contact-marker problem: obtain full rigid spin of the PLA body without
    bore-driven twist, and match flexible BCE density to SPH resolution.

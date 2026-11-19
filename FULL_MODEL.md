@@ -4,11 +4,10 @@
 writes a single combined report:
 
 1. **Rigid CRM production stage** — full coarse OBJ, 4 mm SPH spacing,
-   `dt=5e-4 s`; this remains the source for fill ratio, bulk torque, and
-   specific energy.
-2. **Spindle-driven solid FEA stage** — promoted 8k tetrahedral drum mesh,
-   12 mm SPH spacing, `dt=2.5e-4 s`, one BCE layer, GMRES/diagonal
-   preconditioning; this supplies deformation and stress estimates.
+   `dt=5e-4 s`; use this for fill ratio, bulk torque, and specific energy.
+2. **Spindle-driven solid FEA diagnostic stage** — promoted tetrahedral mesh,
+   12 mm SPH spacing, `dt=2.5e-4 s`, two flex-BCE layers; its outputs are not
+   validated structural estimates.
 
 ```bash
 # Full production run (20 s by default).
@@ -22,14 +21,18 @@ writes a single combined report:
 ./run_full_model.sh --dry-run
 ```
 
-The FEA stage is included intentionally even though it is **not
-engineering-validated**. Recent fixes (motor-driven spindle kinematics, spin
-ramp/mass flooring, hardened local SPH flex-BCE RHS) improved short-run behavior
-(~6.6 MPa at 0.05 s, ~59 MPa at 0.2 s in current checks), but longer runs still
-diverge (GPa-scale by 0.5 s) and fill remains far below rigid CRM. The
-orchestrator records an FEA failure in the report instead of hiding it. By
-default the overall command still succeeds if the rigid CRM stage succeeded;
-use `--strict-fea` to make an FEA failure fail the whole command.
+The FEA stage is included for diagnostics and is **not engineering-validated**.
+Earlier published fill values included BCE markers and must be discarded.
+Correct fluid-only rigid CRM checks at 12 mm spacing give fill `0.002755` at
+0.2 s and `0.019286` at 0.5 s. Tested FEA cases remain inconsistent: one BCE
+layer crashes, two layers retain a small fixed count through 0.2 s but diverge
+by 0.5 s, and three layers either fail in interacting runs or show no retention
+in a stable gap case. The combined runner defaults to the two-layer case, which
+has the longest tested interacting run, and passes `--duration` to both stages.
+The FEA stage may still diverge or fail before reaching that duration. The
+orchestrator records FEA failure and succeeds if
+rigid CRM succeeded unless `--strict-fea` is set. Do not use FEA stress, torque,
+or fill as design validation.
 
 ## Outputs
 
@@ -67,6 +70,8 @@ reach an output frame.
 | `--fea-dt S` | FEA timestep (default 2.5e-4 s) |
 | `--fea-fps F` | FEA output cadence (default 5 Hz) |
 | `--fea-stress-stride N` | stress evaluation stride (default 100) |
+| `--fea-bce-layers N` | FEA flex-BCE layers (default 2; configurable for diagnostics) |
+| `--fea-threads N` | Chrono/Eigen CPU threads for the FEA stage (default 8) |
 | `--extra-crm "..."` | extra argument for `crm/run.sh`; repeatable |
 | `--extra-fea "..."` | extra argument for `crm/run_fea.sh`; repeatable |
 | `--strict-fea` | exit non-zero if FEA fails |

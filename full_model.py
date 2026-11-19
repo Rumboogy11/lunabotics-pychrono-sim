@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Combined production model: rigid CRM soil response plus FEA drum response.
+"""Combined report runner: rigid CRM soil response plus FEA drum diagnostic.
 
 This orchestrator runs the production rigid-body CRM driver and the
 spindle-driven solid-FEA driver with one shared motion/soil setup, then writes a
@@ -8,8 +8,9 @@ stress and fill results are not engineering-validated; see
 ``crm/FEA_COUPLING.md``.
 
 By default the rigid CRM stage uses the full coarse OBJ at 4 mm SPH spacing.
-The FEA stage uses the promoted 8k solid mesh at 12 mm spacing with the short-run
-stable settings (2.5e-4 s timestep, 1 BCE layer, GMRES/diagonal).  Use
+The FEA stage uses the promoted 8k solid mesh at 12 mm spacing with diagnostic
+settings (2.5e-4 s timestep, 2 BCE layers, GMRES/diagonal). Coupling has not been
+validated and its mechanics diverge in longer runs. Use
 ``--smoke-test`` for a short end-to-end check of the orchestration itself.
 """
 
@@ -74,6 +75,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="FEA output cadence in Hz (default: 5)")
     p.add_argument("--fea-stress-stride", type=int, default=None,
                    help="evaluate stress every Nth element (default: 100)")
+    p.add_argument("--fea-bce-layers", type=int, default=2,
+                   help="FEA flex-BCE layers (default: 2, best tested interacting setup)")
+    p.add_argument("--fea-threads", type=int, default=8,
+                   help="Chrono/Eigen CPU threads for FEA (default: 8)")
 
     p.add_argument("--extra-crm", action="append", default=[],
                    help="extra argument passed to crm/run.sh (repeatable)")
@@ -138,7 +143,8 @@ def build_commands(args: argparse.Namespace, out_dir: Path) -> tuple[list[str], 
         "--stress-stride", str(args.fea_stress_stride),
         "--solver-iterations", "20",
         "--solver-tolerance", "1e-3",
-        "--bce-layers", "1",
+        "--bce-layers", str(args.fea_bce_layers),
+        "--num-threads", str(args.fea_threads),
         "--output-dir", str(fea_dir),
     ]
     fea.extend(parse_extras(args.extra_fea))
@@ -239,7 +245,7 @@ def main() -> int:
     crm_cmd, fea_cmd = build_commands(args, out_dir)
     report: dict[str, Any] = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
-        "model": "combined rigid CRM production + spindle-driven FEA structural check",
+            "model": "combined rigid CRM production + spindle-driven FEA diagnostic",
         "requested_duration_s": args.duration,
         "requested_fea_duration_s": args.fea_duration,
         "smoke_test": args.smoke_test,
@@ -247,7 +253,7 @@ def main() -> int:
         "status": "running",
         "notes": [
             "FEA is included intentionally despite not being engineering-validated.",
-            "The FEA stage uses 12 mm spacing and the short-run stable settings; long FEA runs are expected to diverge.",
+            "The FEA stage uses 12 mm spacing and unvalidated diagnostic settings; it may crash or diverge.",
             "The rigid CRM stage remains the production source for fill ratio, torque, and specific energy.",
         ],
     }
@@ -265,6 +271,8 @@ def main() -> int:
     report["crm"] = stage_report("crm", crm_cmd, out_dir / "crm", crm_code)
     if crm_code != 0:
         report["status"] = "crm_failed"
+        report["fea"] = stage_report("fea", fea_cmd, out_dir / "fea", None)
+        report["fea"]["status"] = "not_run"
         write_reports(out_dir, report)
         print(f"CRM stage failed with exit code {crm_code}.", file=sys.stderr, flush=True)
         return crm_code

@@ -65,6 +65,7 @@ class PlaParams:
     density: float = MOTION_DEFAULT.drum_density  # kg/m^3
     rayleigh_beta: float = 0.01         # s, numerical damping
     hub_radius: float = 0.0015          # m, bore radius from the STEP model
+    hub_axial_half_length: float | None = None  # m, None means the full bore
     min_nodal_mass: float = 1.0e-6      # kg, floor for sliver nodes to stabilize FEA dynamics
 
     def __post_init__(self) -> None:
@@ -98,6 +99,8 @@ class PlaParams:
 FEA_METRIC_FIELDS = rigid.METRIC_FIELDS + [
     "spindle_axis_torque_nm",
     "spindle_reaction_force_n",
+    "spindle_motor_angle_rad",
+    "spindle_motor_speed_rad_s",
     "max_nodal_displacement_m",
     "max_von_mises_pa",
 ]
@@ -132,6 +135,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="FEA Rayleigh damping beta in s (default: 0.01)")
     p.add_argument("--hub-radius", type=float, default=None,
                    help="rigid spindle hub radius in m (default: 0.0015)")
+    p.add_argument("--hub-axial-half-length", type=float, default=None,
+                   help="central axial rigid hub half-length in m; 0 uses the full bore")
     p.add_argument("--min-nodal-mass", type=float, default=None,
                    help="floor FEA nodal masses at this value in kg (default: 1e-6)")
     p.add_argument("--stress-stride", type=int, default=1,
@@ -142,12 +147,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="GMRES iterations per MBS step with FEA stiffness (default: 20)")
     p.add_argument("--solver-tolerance", type=float, default=1.0e-3,
                    help="GMRES residual tolerance with FEA stiffness (default: 1e-3)")
+    p.add_argument("--num-threads", type=int, default=8,
+                   help="Chrono/Eigen CPU threads for FEA (default: 8)")
     p.add_argument("--debug-fea", action="store_true",
                    help="print nodal displacement and extents after every step")
     p.add_argument("--debug-stress", action="store_true",
                    help="print worst stress element and displacement node at output frames")
-    p.add_argument("--bce-layers", type=int, default=1,
-                   help="flexible BCE layers for FEA/SPH contact (default: 1, stability choice)")
+    p.add_argument("--bce-layers", type=int, default=2,
+                   help="flexible BCE layers for FEA/SPH contact (default: 2, best tested interacting setup)")
     p.add_argument("--check-fea-embedded", action="store_true",
                    help="prune SPH particles embedded in the FEA solid at initialization")
     p.add_argument("--initial-gap", type=float, default=0.0,
@@ -169,6 +176,7 @@ def make_pla(args: argparse.Namespace) -> PlaParams:
         "density": args.pla_density,
         "rayleigh_beta": args.rayleigh_beta,
         "hub_radius": args.hub_radius,
+        "hub_axial_half_length": args.hub_axial_half_length,
         "min_nodal_mass": args.min_nodal_mass,
     }
     overrides = {k: v for k, v in values.items() if v is not None}
@@ -198,6 +206,8 @@ def resolve_fea_mesh(args: argparse.Namespace) -> tuple[Path, Path]:
         raise SystemExit("--solver-iterations must be at least 1")
     if args.solver_tolerance <= 0.0:
         raise SystemExit("--solver-tolerance must be positive")
+    if args.num_threads < 1:
+        raise SystemExit("--num-threads must be at least 1")
     if args.bce_layers < 1:
         raise SystemExit("--bce-layers must be at least 1")
     if args.spin_ramp_time < 0.0:
@@ -336,7 +346,10 @@ def configure_spindle_drive(chrono, system, motion, drive, ramp_time: float, t_e
     # Linear motor: slider translates along global Z relative to ground.
     z_frame = chrono.ChFramed(chrono.ChVector3d(0.0, 0.0, z0), chrono.ChQuaterniond(1.0, 0.0, 0.0, 0.0))
     lin = chrono.ChLinkMotorLinearPosition()
-    lin.Initialize(ground, slider, z_frame)
+    # Chrono measures the motor coordinate from body B (guide) to body A
+    # (slider).  Keeping the slider first makes a negative Z position function
+    # command the intended downward descent.
+    lin.Initialize(slider, ground, z_frame)
     lin.SetGuideConstraint(chrono.ChLinkMotorLinearPosition.GuideConstraint_PRISMATIC)
     lin.SetMotionFunction(build_descent_position_function(chrono, motion, max(t_end, motion.t_max, 1.0)))
     system.Add(lin)
@@ -454,7 +467,13 @@ def load_fea_drum(chrono, fea, system, motion, node_path: Path, ele_path: Path, 
         p = rigid.vec_parts(node.GetPos())
         local = rigid.quat_rotate(rigid.quat_conj(q0_tuple),
                                   (p[0] - center[0], p[1] - center[1], p[2] - center[2]))
-        if math.hypot(local[0], local[1]) <= pla.hub_radius:
+        radial_ok = math.hypot(local[0], local[1]) <= pla.hub_radius
+        axial_ok = (
+            pla.hub_axial_half_length is None
+            or pla.hub_axial_half_length <= 0.0
+            or abs(local[2]) <= pla.hub_axial_half_length
+        )
+        if radial_ok and axial_ok:
             hub_nodes.append(node)
     if not hub_nodes:
         raise SystemExit(
@@ -503,6 +522,32 @@ def create_contact_skin(chrono, fea, system, nodes, contact_path: Path, motion, 
     solid_points = np.array([rigid.vec_parts(n.GetPos()) for n in nodes], dtype=float)
     skin_points = np.array([rigid.vec_parts(n.GetPos()) for n in skin_nodes], dtype=float)
     nearest = nearest_targets(skin_points, solid_points)
+    # ChLinkNodeNode enforces coincident positions.  Independent nearest-node
+    # mapping can assign multiple skin nodes to the same solid node; snapping
+    # those skin nodes onto their targets then collapses shell triangles.  Keep
+    # the nearest map where it is unique and remap only collisions to the
+    # closest unused solid nodes.
+    used = set()
+    collisions = []
+    for i, target_index in enumerate(nearest):
+        target_index = int(target_index)
+        if target_index in used:
+            collisions.append(i)
+        else:
+            used.add(target_index)
+    if collisions:
+        distance_rows = np.linalg.norm(
+            skin_points[np.asarray(collisions), None, :] - solid_points[None, :, :], axis=2
+        )
+        # Resolve the most constrained shell points first.  A greedy unique
+        # assignment is sufficient here because the solid mesh is much denser.
+        order = sorted(range(len(collisions)), key=lambda j: distance_rows[j].min())
+        for j in order:
+            skin_index = collisions[j]
+            candidates = np.argsort(distance_rows[j])
+            target_index = next(int(k) for k in candidates if int(k) not in used)
+            nearest[skin_index] = target_index
+            used.add(target_index)
     distances = np.linalg.norm(skin_points - solid_points[nearest], axis=1)
 
     for skin_node, target_index in zip(skin_nodes, nearest):
@@ -631,9 +676,8 @@ def spindle_reaction(links, spindle, motion) -> tuple[float, float]:
 
 
 def sph_positions(fluid, fsi, terrain) -> list:
-    """Return only SPH fluid positions, not CRM boundary/FEA BCE markers."""
-    positions = rigid.particle_positions(fluid, fsi)
-    return positions[: terrain.GetNumSPHParticles()]
+    """Return only SPH fluid (soil) positions, not boundary/rigid/flex BCE markers."""
+    return rigid.particle_positions(fluid, fsi, terrain)
 
 
 def max_nodal_displacement(nodes) -> float:
@@ -690,7 +734,10 @@ def worst_disp_info(nodes) -> tuple[int, float, tuple[float, float, float]]:
 def write_fea_config(path: Path, soil, run, pla: PlaParams, motion, node_path: Path,
                      ele_path: Path, mesh, hub_nodes, capacity_volume: float,
                      particle_mass: float, particle_mass_source: str,
-                     spin_ramp_time: float, contact_path: Path | None) -> None:
+                     spin_ramp_time: float, contact_path: Path | None,
+                     bce_layers: int, solver_name: str, solver_iterations: int,
+                     solver_tolerance: float, timestepper: str,
+                     num_threads: int) -> None:
     config = {
         "model": "Chrono::CRM + FEA solid drum (spindle-driven)",
         "soil": asdict(soil),
@@ -705,6 +752,13 @@ def write_fea_config(path: Path, soil, run, pla: PlaParams, motion, node_path: P
             "elements": mesh.GetNumElements(),
             "hub_nodes": len(hub_nodes),
             "link_constraints": 3 * len(hub_nodes),
+            "bce_layers": bce_layers,
+            "bce_pattern": "BcePatternMesh2D_INWARD",
+            "solver": solver_name,
+            "solver_iterations": solver_iterations,
+            "solver_tolerance": solver_tolerance,
+            "timestepper": timestepper,
+            "chrono_eigen_threads": num_threads,
             "contact": (
                 "terrain.AddFeaMesh(contact_mesh, False); no rigid drum obstacle"
                 if contact_path is not None
@@ -796,6 +850,10 @@ def main() -> int:
     chrono.SetChronoOutputPath(str(out_dir) + "/")
 
     system = chrono.ChSystemNSC()
+    # Chrono uses this setting for its parallel assembly work and Eigen's
+    # threaded sparse/dense kernels.  Keep Bullet collision processing serial:
+    # the FEA/CRM coupling does not rely on multicore collision detection.
+    system.SetNumThreads(args.num_threads, 1, args.num_threads)
     system.SetGravitationalAcceleration(
         chrono.ChVector3d(0.0, 0.0, MOTION_DEFAULT.gravity)
     )
@@ -908,6 +966,8 @@ def main() -> int:
             mesh, hub_nodes, capacity_volume, particle_mass, mass_source,
             args.spin_ramp_time,
             contact_path,
+            args.bce_layers, args.solver, args.solver_iterations,
+            args.solver_tolerance, args.timestepper, args.num_threads,
         )
         state_file = (out_dir / "summary.csv").open("w", newline="", encoding="utf-8")
         writer = csv.DictWriter(state_file, fieldnames=FEA_METRIC_FIELDS)
@@ -930,6 +990,9 @@ def main() -> int:
         )
         peak_fill = max(peak_fill, metrics["fill_ratio_mass"])
         angle = math.degrees(spin_ramp_angle(motion, t, args.spin_ramp_time))
+        motor = drive["rotation_motor"]
+        motor_angle = motor.GetMotorAngle()
+        motor_speed = motor.GetMotorAngleDt()
         stress_index, max_stress, stress_volume, stress_center = worst_stress_info(
             fea, mesh, args.stress_stride
         )
@@ -940,7 +1003,7 @@ def main() -> int:
             "wall_s": f"{time.perf_counter() - wall_start:.3f}",
             "drum_z_m": f"{rigid.vec_parts(spindle.GetPos())[2]:.7f}",
             "spin_deg": f"{angle:.3f}",
-            "omega_rad_s": f"{run.omega:.6g}",
+            "omega_rad_s": f"{motor_speed:.6g}",
             "sph_particles": metrics["sph_particles"],
             "inside_drum": metrics["inside_drum"],
             "lifted": metrics["lifted"],
@@ -956,6 +1019,8 @@ def main() -> int:
             "specific_energy_j_kg": f"{work_j / max(metrics['excavated_mass_kg'], 1e-12):.6g}",
             "spindle_axis_torque_nm": f"{axis_torque:.6g}",
             "spindle_reaction_force_n": f"{reaction_force:.6g}",
+            "spindle_motor_angle_rad": f"{motor_angle:.6g}",
+            "spindle_motor_speed_rad_s": f"{motor_speed:.6g}",
             "max_nodal_displacement_m": f"{max_disp:.6g}",
             "max_von_mises_pa": f"{max_stress:.6g}",
         }
@@ -1022,7 +1087,8 @@ def main() -> int:
                 )
 
             axis_torque, reaction_force = spindle_reaction(links, spindle, motion)
-            fluid_power = max(0.0, -axis_torque * run.omega)
+            motor_speed = drive["rotation_motor"].GetMotorAngleDt()
+            fluid_power = max(0.0, -axis_torque * motor_speed)
             work_j += fluid_power * h
 
             if t >= next_output - 1.0e-12 or t >= run.duration - 1.0e-12:

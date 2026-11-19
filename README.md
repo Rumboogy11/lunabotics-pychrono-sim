@@ -36,21 +36,17 @@ Recommended hierarchy going forward:
 4. **MercuryDPM outputs as historical reference only.**
 
 The excavator is made of PLA plastic. A separate spindle-driven FEA path couples
-a solid tetrahedral mesh of the STEP drum to CRM through
-`./crm/run_fea.sh --smoke-test --no-output`. Driver kinematics and local SPH
-flex-BCE handling have been improved (motor-driven spindle with spin ramp,
-nodal-mass flooring, hardened CRM RHS for flex BCE), giving physically plausible
-short-run stresses (e.g. ~6.6 MPa at 0.05 s, ~59 MPa at 0.2 s) but not a
-validated long-run response: stresses grow in longer runs (GPa-scale by 0.5 s)
-and fill remains far below rigid CRM. Keep the rigid kinematic CRM model as the
-production design driver. See [`crm/FEA_COUPLING.md`](crm/FEA_COUPLING.md) for
-current settings, evidence, and remaining limitations.
+a solid tetrahedral drum mesh to CRM, but no tested setup is engineering
+validated: one BCE layer crashes, two layers diverge mechanically by 0.5 s,
+and three layers have interaction/retention instability. Keep rigid Chrono::CRM
+as the production design driver. Soil metrics now count SPH fluid markers only;
+older fill comparisons that included BCE markers are invalid. See
+[`crm/FEA_COUPLING.md`](crm/FEA_COUPLING.md) for evidence and diagnostic commands.
 
-A combined production runner is also available:
-`./run_full_model.sh` executes the rigid CRM design run and the FEA structural
-run with shared settings and writes `combined_report.json` plus
-`combined_summary.csv`. See [`FULL_MODEL.md`](FULL_MODEL.md); the FEA stage is
-included intentionally as a non-validated feasibility/diagnostic check.
+A combined report runner is available: `./run_full_model.sh` executes rigid CRM
+and FEA with shared settings and writes `combined_report.json` plus
+`combined_summary.csv`. Its long FEA stage is not a design result and may fail;
+for production studies run `./crm/run.sh` directly. See [`FULL_MODEL.md`](FULL_MODEL.md).
 
 Actual lunar regolith is mostly tens to hundreds of micrometres in size. The
 current 1.8 mm DEM grains are roughly 10–40× too large relative to the 61 mm
@@ -348,14 +344,15 @@ postprocess on 1 s coarse frames      last t=1.000 s         min_z ~= 0.00089 m
 drum VTK pose at t=0 -> 1.0 s          spin axis (1,0,0)      z=0.1210 -> 0.1205 m
 ```
 
-The CRM driver passed static validation (`py_compile`, `bash -n`, `--help`,
-`--print-soil`) and real runs on the earlier conda PyChrono 10.0.0 build: a
+The CRM driver passed setup checks and real runs on the earlier conda PyChrono
+10.0.0 build: a
 0.05 s smoke test and a 1.0 s run at 12 mm SPH spacing. Both used the coarse
 mesh, 576 SPH particles, 2,160 boundary BCE markers, and 5e-4 s steps;
 `config.json` and `summary.csv` were written successfully. The 1.0 s run took
-2.4 s wall time. These checks validate setup and metrics plumbing, not physical
-soil calibration. The local source build now runs the same driver; its smoke
-test result is recorded in `crm/README.md`.
+2.4 s wall time. These historical runs validate basic setup only; their fill
+metrics predate the fluid-only correction and must not be used. The local source
+build now runs the corrected driver; see `crm/FEA_COUPLING.md` for the updated
+12 mm CRM comparison.
 
 All completed DEME runs finished without contact-count or non-finite-force
 errors. The full 60 s DEME run has **not** been rerun at the selected settings. Based on
