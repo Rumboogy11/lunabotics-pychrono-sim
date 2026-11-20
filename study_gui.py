@@ -1343,12 +1343,27 @@ class StudyGUI:
             for cls in ("TEntry", "TCombobox", "TSpinbox"):
                 style.configure(cls, fieldbackground=field, foreground=color,
                                 insertcolor=color, arrowcolor=color)
+            style.configure("TCombobox", background=button,
+                            selectbackground=button, selectforeground=color)
             style.configure("Treeview", background=field, fieldbackground=field,
                             foreground=color)
             style.map("Treeview", background=[("selected", button)],
                       foreground=[("selected", color)])
         except tk.TclError:
             pass  # Some platform themes do not allow every style option.
+
+        # ttk creates the combobox popdown as a plain Tk Listbox, so the ttk
+        # style above cannot color it.  Set option defaults for future popdowns.
+        for pattern, value in (
+            ("*ComboboxPopdown*background", bg),
+            ("*ComboboxPopdown*Listbox*background", field),
+            ("*ComboboxPopdown*Listbox*foreground", color),
+            ("*ComboboxPopdown*Listbox*selectBackground", button),
+            ("*ComboboxPopdown*Listbox*selectForeground", color),
+            ("*ComboboxPopdown*Listbox*activeBackground", button),
+            ("*ComboboxPopdown*Listbox*highlightBackground", bg),
+        ):
+            self.root.option_add(pattern, value)
 
         self.root.configure(background=bg)
         for widget in self._walk_widgets():
@@ -1359,10 +1374,34 @@ class StudyGUI:
                                      insertbackground=color, font=("TkFixedFont", size))
                 elif wclass == "Canvas":
                     widget.configure(background=bg)
+                elif wclass == "TCombobox":
+                    self._style_combobox_popdown(widget, bg, field, button, color)
             except tk.TclError:
                 continue
 
         self._apply_preview_visibility(bool(values.get("show_output_preview", True)))
+
+    def _style_combobox_popdown(self, widget, bg: str, field: str,
+                               button: str, color: str) -> None:
+        """Recolor an already-created ttk combobox popdown, if it exists."""
+        popdown = f"{widget}.popdown"
+        try:
+            if not self.root.tk.call("winfo", "exists", popdown):
+                return
+            self.root.tk.call(popdown, "configure", "-background", bg)
+            listbox = f"{popdown}.f.l"
+            if self.root.tk.call("winfo", "exists", listbox):
+                for option, value in (
+                    ("background", field),
+                    ("foreground", color),
+                    ("selectbackground", button),
+                    ("selectforeground", color),
+                    ("activebackground", button),
+                    ("highlightbackground", bg),
+                ):
+                    self.root.tk.call(listbox, "configure", f"-{option}", value)
+        except tk.TclError:
+            pass
 
     def _apply_preview_visibility(self, show: bool) -> None:
         notebook = getattr(self, "notebook", None)
