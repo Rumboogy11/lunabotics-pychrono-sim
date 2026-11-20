@@ -23,15 +23,49 @@ manifest, after local validation).  A one-frame/t=0 FEA PVD from a cancelled run
 is ignored, so it cannot obscure or freeze the excavation animation.
 
 If no argument is given, the script tries ./paraview in the current directory.
+
+A camera-orbit animation is created by default.  Tune it with --orbit-speed
+(revolutions per simulation second), --orbit-radius, --orbit-inclination,
+--orbit-start-angle, and --orbit-keyframes; use --no-camera-orbit to disable it.
+The GUI launcher passes the same settings through PYCHRONO_ORBIT_* environment
+variables.  Press Play in ParaView to run the camera orbit with the time series.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None or not str(value).strip():
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_float(name: str, default: float | None) -> float | None:
+    value = os.environ.get(name)
+    if value is None or not str(value).strip():
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int | None) -> int | None:
+    value = os.environ.get(name)
+    if value is None or not str(value).strip():
+        return default
+    try:
+        return int(float(value))
+    except ValueError:
+        return default
 
 
 def _parse_args(argv: list[str]):
@@ -59,7 +93,30 @@ def _parse_args(argv: list[str]):
                     help="load only the validated FEA series (stress/deformation)")
     ap.add_argument("--no-interact", action="store_true",
                     help="do not keep the pvpython render window open (batch setups only)")
+    # Camera orbit keyframes.  Environment variables are used by the full
+    # ParaView GUI launcher, where passing flags after --script is unreliable.
+    ap.add_argument("--camera-orbit", dest="camera_orbit", action="store_true", default=None,
+                    help="create a camera track orbiting the drum (default: on)")
+    ap.add_argument("--no-camera-orbit", dest="camera_orbit", action="store_false",
+                    help="do not create a camera orbit track")
+    ap.add_argument("--orbit-speed", type=float,
+                    default=_env_float("PYCHRONO_ORBIT_SPEED", 0.10),
+                    help="camera revolutions per simulation second (default: 0.10)")
+    ap.add_argument("--orbit-radius", type=float,
+                    default=_env_float("PYCHRONO_ORBIT_RADIUS", 0.0),
+                    help="horizontal orbit radius in meters; 0 uses the current horizontal camera distance (default: 0)")
+    ap.add_argument("--orbit-inclination", type=float,
+                    default=_env_float("PYCHRONO_ORBIT_INCLINATION", 20.0),
+                    help="camera elevation above the orbit plane in degrees (default: 20)")
+    ap.add_argument("--orbit-start-angle", type=float,
+                    default=_env_float("PYCHRONO_ORBIT_START_ANGLE", None),
+                    help="starting azimuth in degrees; default continues the current camera azimuth")
+    ap.add_argument("--orbit-keyframes", type=int,
+                    default=_env_int("PYCHRONO_ORBIT_KEYFRAMES", 0),
+                    help="number of camera keyframes; 0 chooses automatically (default: 0)")
     args, unknown = ap.parse_known_args(user_argv)
+    if args.camera_orbit is None:
+        args.camera_orbit = _env_bool("PYCHRONO_CAMERA_ORBIT", True)
     # In ParaView GUI script mode the environment variable is authoritative;
     # ParaView's own argv can otherwise be mistaken for a positional directory.
     in_paraview_gui = ("--script=" in " ".join(argv)
@@ -185,6 +242,82 @@ def find_valid_fea_pvd(export_dir: Path, manifest: dict) -> tuple[Path | None, s
     return None, "no fea.pvd found in the export or study FEA directory"
 
 
+def _center_at_time(reader, time_s: float, fallback: tuple[float, float, float]):
+    """Return the center of a time-varying reader's bounds at ``time_s``."""
+    if reader is None:
+        return fallback
+    try:
+        from paraview.simple import UpdatePipeline  # type: ignore
+
+        UpdatePipeline(time=float(time_s), proxy=reader)
+        bounds = reader.GetDataInformation().GetBounds()
+        if bounds and len(bounds) == 6:
+            return ((float(bounds[0]) + float(bounds[1])) / 2.0,
+                    (float(bounds[2]) + float(bounds[3])) / 2.0,
+                    (float(bounds[4]) + float(bounds[5])) / 2.0)
+    except Exception:
+        pass
+    return fallback
+
+
+def _install_camera_orbit(args, view, scene, excav_reader, times):
+    """Add a normalized camera track that orbits the excavator while time plays."""
+    from paraview.simple import CameraKeyFrame, GetCameraTrack  # type: ignore
+
+    if not times:
+        return "no scene times available"
+    t0, t1 = float(times[0]), float(times[-1])
+    duration = max(0.0, t1 - t0)
+    camera = view.GetActiveCamera()
+    pos = tuple(float(v) for v in camera.GetPosition())
+    base_center = _center_at_time(excav_reader, t0,
+                                  tuple(float(v) for v in camera.GetFocalPoint()))
+    dx, dy = pos[0] - base_center[0], pos[1] - base_center[1]
+    radius = float(args.orbit_radius) if args.orbit_radius and args.orbit_radius > 0.0 else math.hypot(dx, dy)
+    if radius <= 0.0:
+        radius = math.dist(pos, base_center) or 0.5
+    start_angle = (float(args.orbit_start_angle) if args.orbit_start_angle is not None
+                   else math.degrees(math.atan2(dy, dx)))
+    inclination = max(-80.0, min(80.0, float(args.orbit_inclination)))
+    speed = float(args.orbit_speed)  # revolutions per simulation second
+    if args.orbit_keyframes and args.orbit_keyframes > 0:
+        n = max(2, int(args.orbit_keyframes))
+    else:
+        n = int(max(24, min(360, math.ceil(max(abs(speed) * duration, 1.0) * 24))))
+    inc = math.radians(inclination)
+    rxy = radius * math.cos(inc)
+    zoff = radius * math.sin(inc)
+    view_angle = float(camera.GetViewAngle())
+
+    frames = []
+    for i in range(n + 1):
+        frac = i / n
+        t = t0 + frac * duration
+        center = _center_at_time(excav_reader, t, base_center) if i else base_center
+        azimuth = math.radians(start_angle + 360.0 * speed * (t - t0))
+        camera_pos = (center[0] + rxy * math.cos(azimuth),
+                      center[1] + rxy * math.sin(azimuth),
+                      center[2] + zoff)
+        key = CameraKeyFrame()
+        key.KeyTime = frac
+        key.Position = list(camera_pos)
+        key.FocalPoint = list(center)
+        key.ViewUp = [0.0, 0.0, 1.0]
+        key.ViewAngle = view_angle
+        frames.append(key)
+
+    cue = GetCameraTrack(view=view)
+    cue.Mode = 'Interpolate Camera'
+    cue.TimeMode = 'Normalized'
+    cue.Interpolation = 'Linear'
+    cue.KeyFrames = frames
+    camera.SetFocalPoint(*base_center)
+    camera.SetPosition(*frames[0].Position)
+    camera.SetViewUp(0.0, 0.0, 1.0)
+    return (f"{n + 1} keyframes, {speed:g} rev/s, radius {radius:g} m, "
+            f"inclination {inclination:g} deg")
+
+
 def main():
     args = _parse_args(sys.argv)
     export_dir = _resolve_export_dir(args.export_dir or "paraview")
@@ -252,6 +385,7 @@ def main():
         pass
 
     sources_shown = []
+    excav_reader = None
 
     # --- CRM particles ---
     particles_pvd = find_pvd(export_dir, "crm_particles.pvd")
@@ -372,6 +506,7 @@ def main():
     if exc_pvd and not args.no_excavator and want_crm:
         print(f"  loading excavator: {exc_pvd}")
         excav = PVDReader(FileName=str(exc_pvd))
+        excav_reader = excav
         try:
             UpdatePipeline(proxy=excav)
         except Exception:
@@ -505,12 +640,32 @@ def main():
         pass
 
     # sync animation to timesteps
+    scene = None
     try:
         scene = GetAnimationScene()
         scene.PlayMode = 'Sequence'
         scene.UpdateAnimationUsingDataTimeSteps()
     except Exception:
         pass
+
+    if args.camera_orbit:
+        times = []
+        try:
+            if scene is not None:
+                times = [float(v) for v in scene.TimeKeeper.TimestepValues]
+        except Exception:
+            times = []
+        if not times and excav_reader is not None:
+            try:
+                times = [float(v) for v in excav_reader.TimestepValues]
+            except Exception:
+                times = []
+        try:
+            status = _install_camera_orbit(args, view, scene, excav_reader, times)
+            print(f"[view_study_paraview] camera orbit: {status}")
+            print("  Press Play in the Animation/Time controls to rotate around the drum while excavation advances.")
+        except Exception as exc:
+            print(f"[view_study_paraview] camera orbit unavailable: {exc}")
 
     try:
         Render()

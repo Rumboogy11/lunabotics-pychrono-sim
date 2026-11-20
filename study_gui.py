@@ -151,6 +151,12 @@ PARAM_INFO: dict[str, str] = {
     "tools_study_dir": "Study/output directory to inspect. Use the folder containing study_config.json or a previous Output_* run.",
     "tools_stride": "Export every Nth CRM frame when using the Export ParaView VTK/PVD tool. Use 1 for all frames. All series stay time-aligned.",
     "tools_particle_render_stride": "Render only every Nth particle in each exported frame in the Export ParaView VTK/PVD tool. Use 1 for all particles; >1 reduces particle file size and ParaView load without skipping frames.",
+    "tools_camera_orbit": "Automatically add a ParaView camera track that orbits the excavator drum while the time animation plays. The track follows the drum center from the excavator frames.",
+    "tools_orbit_speed": "Camera revolutions per simulation second. Positive orbits one way, negative reverses. 0.1 means one revolution every 10 seconds of study time.",
+    "tools_orbit_radius": "Horizontal camera distance from the drum center in meters. Use 0 to keep the currently fitted horizontal distance; inclination controls the elevation separately.",
+    "tools_orbit_inclination": "Camera elevation above the horizontal orbit plane in degrees. Clamped to +/-80 degrees to avoid an unstable up direction.",
+    "tools_orbit_start_angle": "Starting camera azimuth in degrees. Leave blank to begin at the current camera angle.",
+    "tools_orbit_keyframes": "Number of camera keyframes. Use 0 to choose automatically from orbit speed and animation duration; more keyframes make fast orbits smoother.",
     "tools_workers": "Number of worker processes used by the Export ParaView VTK/PVD tool. Match it to available CPU cores; 4 is a good starting point.",
 }
 
@@ -758,6 +764,28 @@ class StudyGUI:
                    command=lambda: self._show_info("Particle render stride", PARAM_INFO["tools_particle_render_stride"])).grid(
                        row=r, column=3, sticky=W, padx=6)
         r += 1
+        self.tools_camera_orbit = BooleanVar(value=True)
+        ttk.Checkbutton(p, text="Auto camera orbit around drum",
+                        variable=self.tools_camera_orbit).grid(
+                            row=r, column=0, columnspan=2, sticky=W, padx=8, pady=4)
+        ttk.Button(p, text="Info", width=6,
+                   command=lambda: self._show_info("Auto camera orbit", PARAM_INFO["tools_camera_orbit"])).grid(
+                       row=r, column=3, sticky=W, padx=6)
+        r += 1
+        for label, attr, default, info_key in (
+            ("Orbit speed (revolutions/s)", "tools_orbit_speed", "0.10", "tools_orbit_speed"),
+            ("Orbit radius (m, 0 = fitted)", "tools_orbit_radius", "0", "tools_orbit_radius"),
+            ("Orbit inclination (deg)", "tools_orbit_inclination", "20", "tools_orbit_inclination"),
+            ("Orbit start angle (deg, blank = current)", "tools_orbit_start_angle", "", "tools_orbit_start_angle"),
+            ("Orbit keyframes (0 = automatic)", "tools_orbit_keyframes", "0", "tools_orbit_keyframes"),
+        ):
+            setattr(self, attr, StringVar(value=default))
+            ttk.Label(p, text=label).grid(row=r, column=0, sticky=W, padx=8, pady=4)
+            ttk.Entry(p, textvariable=getattr(self, attr), width=12).grid(row=r, column=1, sticky=W)
+            ttk.Button(p, text="Info", width=6,
+                       command=lambda key=info_key, lbl=label: self._show_info(lbl, PARAM_INFO[key])).grid(
+                           row=r, column=3, sticky=W, padx=6)
+            r += 1
         ttk.Label(p, text="Export workers (parallel frame writes)").grid(row=r, column=0, sticky=W, padx=8, pady=4)
         self.tools_workers = StringVar(value=self._g("export_workers") or "4")
         ttk.Entry(p, textvariable=self.tools_workers, width=8).grid(row=r, column=1, sticky=W)
@@ -1685,6 +1713,30 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         env = os.environ.copy()
         env["PYCHRONO_EXPORT_DIR"] = str(pdir)
         env["PYCHRONO_STUDY_DIR"] = str(d)
+
+        def env_number(name: str, text: str, default: float, low: float | None = None,
+                       high: float | None = None):
+            try:
+                value = float(text)
+            except (TypeError, ValueError):
+                value = default
+            if low is not None:
+                value = max(low, value)
+            if high is not None:
+                value = min(high, value)
+            env[name] = f"{value:g}"
+
+        env["PYCHRONO_CAMERA_ORBIT"] = "1" if self.tools_camera_orbit.get() else "0"
+        env_number("PYCHRONO_ORBIT_SPEED", self.tools_orbit_speed.get(), 0.10)
+        env_number("PYCHRONO_ORBIT_RADIUS", self.tools_orbit_radius.get(), 0.0, low=0.0)
+        env_number("PYCHRONO_ORBIT_INCLINATION", self.tools_orbit_inclination.get(), 20.0,
+                   low=-80.0, high=80.0)
+        start_angle = self.tools_orbit_start_angle.get().strip()
+        if start_angle:
+            env_number("PYCHRONO_ORBIT_START_ANGLE", start_angle, 0.0)
+        else:
+            env.pop("PYCHRONO_ORBIT_START_ANGLE", None)
+        env_number("PYCHRONO_ORBIT_KEYFRAMES", self.tools_orbit_keyframes.get(), 0, low=0)
         # ParaView 6.2 can abort on Wayland; X11/XWayland is the stable backend here.
         env["QT_QPA_PLATFORM"] = os.environ.get("PYCHRONO_PARAVIEW_QT_PLATFORM", "xcb")
 
