@@ -12,6 +12,8 @@ soil response, torque, and specific energy across drum/spike geometries.
 
 Soil/FEA metrics count **SPH fluid markers only**. Older comparisons that included BCE markers are invalid.
 
+Fill/cavity metrics require **full particle containment**, not just a centre-inside test: the SPH particle radius `rp = 0.5 × --spacing` (Chrono `d0 = --spacing`) is subtracted from the cavity radius, outer drum radius, and axial half-length (clamped at zero) before classifying particles. A particle whose centre lies near any boundary is rejected even if that centre is nominally inside the envelope. The nominal cavity volume used as the capacity denominator is unchanged; only the particle counts change.
+
 ## Requirements
 
 A standard PyPI `pychrono` wheel is not sufficient (it omits `pychrono.fsi` and `pychrono.vehicle`).
@@ -151,7 +153,7 @@ Typical rigid CRM run directory (`--output-dir ...`):
 - `particles_*.csv` — per-frame particle positions/flags when `--save-particles` is used
 - `paraview/` — PVD/VTP/VTU exports when `--export-vtk` is used
 
-Fill ratio uses a nominal cylindrical cavity by default (`--inner-radius` × drum length). Pass `--capacity-volume` when a CAD-derived free volume is available for fairer geometry comparisons.
+Fill ratio uses a nominal cylindrical cavity by default (`--inner-radius` × drum length); retained particles must be completely inside that cavity eroded by one SPH particle radius (`0.5 × --spacing`, with Chrono `d0 = --spacing`), and excavated particles must be completely inside the similarly eroded outer drum envelope. The capacity denominator always remains the nominal (un-eroded) volume; pass `--capacity-volume` when a CAD-derived free volume is available for fairer geometry comparisons.
 
 ## Limitations
 

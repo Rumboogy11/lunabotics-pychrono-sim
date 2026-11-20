@@ -15,17 +15,21 @@ Fill-ratio definition
 ---------------------
 At each output time, SPH particles are transformed into the drum's local frame.
 The mesh's local Z axis is the long axis of the drum.  A particle is "retained"
-if it lies inside a nominal cylindrical cavity of radius ``--inner-radius`` and
-half-length equal to the drum half-length::
+only when the *whole particle* is inside the nominal cylindrical cavity.  With
+SPH particle radius ``rp = 0.5 * spacing`` (Chrono ``d0 = spacing``), its centre
+must satisfy ``radial <= inner_radius - rp`` and
+``abs(local_z) <= drum_half_length - rp`` (bounds clamped at zero)::
 
     retained_mass = n_retained * particle_mass
     capacity_mass = bulk_density * pi * inner_radius**2 * drum_length
     fill_ratio    = retained_mass / capacity_mass
 
-The cylindrical capacity is a nominal envelope; the screw flights displace some
-of it.  Pass ``--capacity-volume`` if a CAD-derived free volume is available.
-"Excavated" particles are those inside the outer drum envelope and above the
-initial bed surface, used for specific energy.
+The cylindrical capacity denominator stays the nominal envelope; the screw
+flights displace some of it.  Pass ``--capacity-volume`` if a CAD-derived free
+volume is available.  "Excavated" particles must likewise be fully inside the
+eroded outer drum envelope (``drum_radius - rp`` and the same eroded axial
+half-length) and above the initial bed surface by the ``rp`` lift tolerance;
+they are used for specific energy.
 
 Requirements
 ------------
@@ -740,16 +744,21 @@ def compute_metrics(positions: np.ndarray, drum, run: CrmRunParams, motion,
     lz = np.abs(local[:, 2])
     radial2 = lx * lx + ly * ly
 
-    r_inner2 = run.inner_radius**2
-    r_outer2 = (motion.drum_radius + 0.5 * run.spacing) ** 2
-    half_len = motion.drum_half_length
-    lift_tol = 0.5 * run.spacing
+    # Chrono's SPH initial spacing d0 is the particle diameter, so a particle
+    # is only fully contained when its centre is at least rp (0.5*d0) inside
+    # every cavity wall.  Erode the inner radius, outer radius, and both axial
+    # endcaps by rp (clamped at zero) before classifying particles.
+    rp = 0.5 * run.spacing
+    r_inner2 = max(0.0, run.inner_radius - rp) ** 2
+    r_outer2 = max(0.0, run.drum_radius - rp) ** 2
+    half_len_eff = max(0.0, run.drum_half_length - rp)
+    lift_tol = rp
 
-    inside = (radial2 < r_inner2) & (lz <= half_len)
+    inside = (radial2 <= r_inner2) & (lz <= half_len_eff)
     lifted = pos[:, 2] > surface_z + lift_tol
     excavated = (
         (radial2 <= r_outer2)
-        & (lz <= half_len + 0.5 * run.spacing)
+        & (lz <= half_len_eff)
         & lifted
     )
 
