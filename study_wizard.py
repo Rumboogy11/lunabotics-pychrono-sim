@@ -415,6 +415,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="export every Nth recorded FEA frame to VTU (default: 1)")
     p.add_argument("--paraview-stride", type=int, default=None,
                    help="export every Nth CRM/excavator frame to ParaView (default: 1)")
+    p.add_argument("--paraview-particle-render-stride", type=int, default=None,
+                   help="render only every Nth particle in each ParaView frame "
+                        "(default: 1 = all particles)")
     p.add_argument("--open-paraview", action="store_true",
                    help="open the ParaView export in the full ParaView GUI (pvpython fallback) after a successful run")
 
@@ -1060,11 +1063,21 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         )
     if export_vtk:
         paraview_stride = args.paraview_stride if args.paraview_stride is not None else prompt_int(
-            "ParaView CRM/excavator export stride (every N frames)", 1, minimum=1,
-            detail="Use >1 to reduce export size/time; all sources stay time-aligned.",
+            "ParaView export stride (every N frames)", 1, minimum=1,
+            detail="Use >1 to reduce export size/time; all series stay time-aligned.",
+        )
+        paraview_particle_render_stride = (
+            args.paraview_particle_render_stride
+            if args.paraview_particle_render_stride is not None else prompt_int(
+                "ParaView particle render stride (every N particles/frame)", 1, minimum=1,
+                detail="Use >1 to reduce particle file size and viewer load without skipping frames.",
+            )
         )
     else:
         paraview_stride = args.paraview_stride if args.paraview_stride is not None else 1
+        paraview_particle_render_stride = (
+            args.paraview_particle_render_stride if args.paraview_particle_render_stride is not None else 1
+        )
 
     dry_run = args.dry_run
     if INTERACTIVE and not args.dry_run and not args.yes:
@@ -1082,7 +1095,8 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             f"Bed:          height={bed_height:g} m, box={','.join(f'{v:g}' for v in active_box)} m, "
             f"descent={descent_speed:g} m/s",
             f"FEA:          dt={fea_dt:g} s, solver={solver}, threads={num_threads}, fea-vtk={fea_export_vtk}",
-            f"ParaView:     export={export_vtk} (stride {paraview_stride})",
+            f"ParaView:     export={export_vtk} (frame stride {paraview_stride}, "
+            f"particle render stride {paraview_particle_render_stride})",
         ]
         print("\n" + "\n".join(summary) + "\n")
         dry_run = prompt_bool(
@@ -1151,6 +1165,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "fea_vtk_stride": int(fea_vtk_stride),
         "export_vtk": export_vtk,
         "paraview_stride": int(paraview_stride),
+        "paraview_particle_render_stride": max(1, int(paraview_particle_render_stride)),
         "open_results": args.open_results,
         "open_paraview": args.open_paraview,
         "no_open": args.no_open,
@@ -1254,6 +1269,7 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
             str(ROOT / "export_study_vtk.py"),
             "--study-dir", str(out_dir),
             "--stride", str(max(1, int(cfg.get("paraview_stride", 1)))),
+            "--particle-render-stride", str(max(1, int(cfg.get("paraview_particle_render_stride", 1)))),
             "--workers", str(max(1, int(cfg.get("export_workers", 1)))),
         ]
         steps.append({"name": "export-ParaView-VTK", "command": export_cmd})

@@ -143,12 +143,14 @@ PARAM_INFO: dict[str, str] = {
     "fea_export_vtk": "Write fea/vtk/frame_*.vtu and fea.pvd so ParaView can show von Mises stress and deformation. Required for 3D stress/deformation views.",
     "fea_vtk_stride": "Export every Nth recorded FEA frame to VTU. Use >1 to reduce disk/time for long runs.",
     "export_vtk": "Create separate ParaView series (crm_particles.pvd, excavator.pvd, optional fea.pvd) plus combined.pvd and a manifest after the run.",
-    "paraview_stride": "Export every Nth CRM/excavator frame. All sources stay time-aligned.",
+    "paraview_stride": "Export every Nth CRM frame. Use 1 for all frames; all series stay time-aligned.",
+    "paraview_particle_render_stride": "Render only every Nth particle in each exported frame. Use 1 for all particles; >1 reduces particle file size and ParaView load without skipping frames.",
     "open_results": "Open the output folder when the study finishes.",
     "open_paraview": "Open the preconfigured 3D view in the full ParaView GUI after a successful run (pvpython render window is the fallback).",
     # Tools tab
     "tools_study_dir": "Study/output directory to inspect. Use the folder containing study_config.json or a previous Output_* run.",
-    "tools_stride": "Export every Nth CRM frame when using the Export ParaView VTK/PVD tool. Use 1 for all frames. All exported series stay time-aligned.",
+    "tools_stride": "Export every Nth CRM frame when using the Export ParaView VTK/PVD tool. Use 1 for all frames. All series stay time-aligned.",
+    "tools_particle_render_stride": "Render only every Nth particle in each exported frame in the Export ParaView VTK/PVD tool. Use 1 for all particles; >1 reduces particle file size and ParaView load without skipping frames.",
     "tools_workers": "Number of worker processes used by the Export ParaView VTK/PVD tool. Match it to available CPU cores; 4 is a good starting point.",
 }
 
@@ -302,6 +304,7 @@ def shipped_defaults() -> dict[str, object]:
         "fea_vtk_stride": "1",
         "export_vtk": True,
         "paraview_stride": "1",
+        "paraview_particle_render_stride": "1",
         "open_paraview": False,
         "open_results": False,
         "auto_geometry": True,
@@ -372,6 +375,7 @@ DEFAULT_GROUPS: list[tuple[str, list[tuple[str, str, dict]]]] = [
         ("FEA VTK stride (frames)", "fea_vtk_stride", {}),
         ("Export ParaView datasets after run", "export_vtk", {"check": True}),
         ("ParaView export stride (frames)", "paraview_stride", {}),
+        ("ParaView particle render stride", "paraview_particle_render_stride", {}),
         ("ParaView export workers", "export_workers", {}),
         ("Open results folder after run", "open_results", {"check": True}),
         ("Open ParaView after run", "open_paraview", {"check": True}),
@@ -641,6 +645,7 @@ class StudyGUI:
         r = self._row(p, r, "Export ParaView datasets after run", "export_vtk", check=True,
                       help_text="Creates separate particle and excavator series + combined PVD.")
         r = self._row(p, r, "ParaView export stride (frames)", "paraview_stride")
+        r = self._row(p, r, "ParaView particle render stride", "paraview_particle_render_stride")
         ttk.Separator(p).grid(row=r, column=0, columnspan=4, sticky="ew", pady=8); r += 1
         r = self._row(p, r, "Open results folder after run", "open_results", check=True)
         r = self._row(p, r, "Open ParaView after run", "open_paraview", check=True)
@@ -744,6 +749,13 @@ class StudyGUI:
         ttk.Entry(p, textvariable=self.tools_stride, width=8).grid(row=r, column=1, sticky=W)
         ttk.Button(p, text="Info", width=6,
                    command=lambda: self._show_info("Quick export stride", PARAM_INFO["tools_stride"])).grid(
+                       row=r, column=3, sticky=W, padx=6)
+        r += 1
+        ttk.Label(p, text="Particle render stride (every N particles/frame)").grid(row=r, column=0, sticky=W, padx=8, pady=4)
+        self.tools_particle_render_stride = StringVar(value="1")
+        ttk.Entry(p, textvariable=self.tools_particle_render_stride, width=8).grid(row=r, column=1, sticky=W)
+        ttk.Button(p, text="Info", width=6,
+                   command=lambda: self._show_info("Particle render stride", PARAM_INFO["tools_particle_render_stride"])).grid(
                        row=r, column=3, sticky=W, padx=6)
         r += 1
         ttk.Label(p, text="Export workers (parallel frame writes)").grid(row=r, column=0, sticky=W, padx=8, pady=4)
@@ -1293,6 +1305,7 @@ class StudyGUI:
             "fea_vtk_stride": max(1, int(float(self._g("fea_vtk_stride") or 1))),
             "export_vtk": self._gb("export_vtk"),
             "paraview_stride": max(1, int(float(self._g("paraview_stride") or 1))),
+            "paraview_particle_render_stride": max(1, int(float(self._g("paraview_particle_render_stride") or 1))),
             "export_workers": export_workers,
             "open_results": self._gb("open_results"),
             "open_paraview": self._gb("open_paraview"),
@@ -1468,7 +1481,7 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                    "shifting_ppst_push", "crm_fps", "fea_fps", "fea_dt",
                   "bed_height", "settle_time", "descent_speed", "omega", "num_threads",
                   "load_radius_fraction", "raw_stress_every", "export_workers",
-                  "fea_vtk_stride", "paraview_stride"]:
+                  "fea_vtk_stride", "paraview_stride", "paraview_particle_render_stride"]:
             setv(k, data.get(k))
         for k in ["reverse_spin", "save_particles", "fea_export_vtk", "export_vtk", "open_results", "open_paraview", "auto_geometry"]:
             if k in data:
@@ -1645,11 +1658,14 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
     def _tool_export(self):
         d = Path(self.tools_study_dir.get()).expanduser()
         stride = max(1, int(float(self.tools_stride.get() or 1)))
+        particle_render_stride = max(1, int(float(self.tools_particle_render_stride.get() or 1)))
         workers = max(1, int(float(self.tools_workers.get() or 4)))
         cmd = [py_exec(), str(ROOT / "export_study_vtk.py"), "--study-dir", str(d),
-               "--stride", str(stride), "--workers", str(workers)]
+               "--stride", str(stride), "--workers", str(workers),
+               "--particle-render-stride", str(particle_render_stride)]
         self._tool_log(f"# exporting {workers} frame worker process(es) "
-                       "(point-cloud particle frames, columnar CSV parsing)")
+                       f"(stride {stride}, particle render stride "
+                       f"{particle_render_stride}, columnar CSV parsing)")
         self._run_tool_cmd(cmd, stream=True)
 
     def _watch_tool_process(self, proc: subprocess.Popen, label: str):

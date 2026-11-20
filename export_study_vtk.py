@@ -97,13 +97,16 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(f))
 
 
-def read_numeric_csv(path: Path, columns: tuple[str, ...]) -> dict[str, np.ndarray]:
+def read_numeric_csv(path: Path, columns: tuple[str, ...],
+                     row_stride: int = 1) -> dict[str, np.ndarray]:
     """Read selected numeric columns with a C-backed NumPy pass.
 
-    NumPy's loader is much faster than converting every field in Python.  Keep
-    the original parser as a fallback for ragged/non-numeric rows so a partially
+    ``row_stride`` keeps only every Nth data row, which lets the exporter render
+    a sparse subset of particles without paying full CSV parse cost.  Keep the
+    original parser as a fallback for ragged/non-numeric rows so a partially
     written CSV does not abort an export.
     """
+    row_stride = max(1, int(row_stride))
     result = {name: np.empty(0, dtype=float) for name in columns}
     with path.open("r", encoding="utf-8") as handle:
         header = handle.readline().rstrip("\r\n").split(",")
@@ -115,15 +118,26 @@ def read_numeric_csv(path: Path, columns: tuple[str, ...]) -> dict[str, np.ndarr
                 indices.append(-1)
         if indices and all(i >= 0 for i in indices):
             try:
-                values = np.loadtxt(path, delimiter=",", skiprows=1,
-                                    usecols=tuple(indices), dtype=float, ndmin=2)
+                if row_stride == 1:
+                    values = np.loadtxt(path, delimiter=",", skiprows=1,
+                                        usecols=tuple(indices), dtype=float, ndmin=2)
+                else:
+                    selected = [line for i, line in enumerate(handle)
+                                if i % row_stride == 0 and line.strip()]
+                    values = (np.loadtxt(selected, delimiter=",",
+                                         usecols=tuple(indices), dtype=float, ndmin=2)
+                              if selected else np.empty((0, len(indices)), dtype=float))
                 for offset, name in enumerate(columns):
                     result[name] = values[:, offset] if values.size else np.empty(0, dtype=float)
                 return result
             except ValueError:
                 pass  # malformed/partial row: use the tolerant parser below
+        handle.seek(0)
+        handle.readline()  # skip header
         rows = []
-        for line in handle:
+        for i, line in enumerate(handle):
+            if row_stride > 1 and i % row_stride != 0:
+                continue
             if not line.strip():
                 continue
             fields = line.rstrip("\r\n").split(",")
@@ -446,11 +460,12 @@ def validate_fea_pvd(fea_pvd: Path, study_cfg: dict[str, Any], fea_dir: Path) ->
 
 
 def _read_particle_frame(args):
-    idx, path_str, time_s, radius, out_dir_str = args
+    idx, path_str, time_s, radius, out_dir_str, render_stride = args
     path = Path(path_str)
     out_path = Path(out_dir_str) / f"frame_{idx:06d}.vtp"
     # Always rewrite: a frame from an earlier export may reflect older CSV data.
-    cols = read_numeric_csv(path, ("X", "Y", "Z", "inside_drum", "excavated"))
+    cols = read_numeric_csv(path, ("X", "Y", "Z", "inside_drum", "excavated"),
+                            row_stride=render_stride)
     n = len(cols["X"])
     if not n:
         return None
@@ -468,7 +483,7 @@ def _read_particle_frame(args):
 
 def export_crm_particles(crm_dir: Path, out_dir: Path, stride: int = 1,
                          particle_radius_m: float | None = None,
-                         workers: int = 1):
+                         workers: int = 1, render_stride: int = 1):
     summary_path = crm_dir / "summary.csv"
     if not summary_path.is_file():
         print(f"  skip particles: missing {summary_path}")
@@ -495,7 +510,7 @@ def export_crm_particles(crm_dir: Path, out_dir: Path, stride: int = 1,
         if path is None:
             continue
         jobs.append((idx, str(path), float(summary["time_s"][idx]),
-                     particle_radius_m, str(frames_dir)))
+                     particle_radius_m, str(frames_dir), render_stride))
     entries = []
     if workers > 1 and len(jobs) > 1:
         with ProcessPoolExecutor(max_workers=workers) as pool:
@@ -605,6 +620,10 @@ def main() -> int:
     ap.add_argument("--stride", type=int, default=1,
                     help="export every Nth CRM frame (default: 1 = all). "
                          "Use >1 to reduce size for long/high-fps runs.")
+    ap.add_argument("--particle-render-stride", type=int, default=1,
+                    help="render only every Nth particle in each exported frame "
+                         "(default: 1 = all particles). Use >1 to reduce particle "
+                         "file size and viewer load without skipping frames.")
     ap.add_argument("--particles-only", action="store_true", help="export only particles")
     ap.add_argument("--excavator-only", action="store_true", help="export only excavator surface")
     ap.add_argument("--workers", type=int, default=1,
@@ -618,6 +637,7 @@ def main() -> int:
                else (study_dir / "paraview"))
     out_dir.mkdir(parents=True, exist_ok=True)
     stride = max(1, int(args.stride))
+    particle_render_stride = max(1, int(args.particle_render_stride or 1))
     workers = max(1, int(args.workers))
 
     info = discover(study_dir)
@@ -641,7 +661,8 @@ def main() -> int:
     particle_radius_m = (particle_spacing / 2.0) if particle_spacing is not None else None
     print(f"Exporting study: {study_dir}")
     print(f"  out: {out_dir}")
-    print(f"  spin axis: {spin_axis}  stride: {stride}  workers: {workers}")
+    print(f"  spin axis: {spin_axis}  stride: {stride}  particle render stride: "
+          f"{particle_render_stride}  workers: {workers}")
     if particle_radius_m is not None:
         print(f"  particle radius: {particle_radius_m:g} m (spacing {particle_spacing:g} m)")
     if surface:
@@ -652,7 +673,8 @@ def main() -> int:
     crm_parts: list[tuple[str, Path]] = []
     if not args.excavator_only:
         p = export_crm_particles(crm_dir, out_dir, stride=stride,
-                                 particle_radius_m=particle_radius_m, workers=workers)
+                                 particle_radius_m=particle_radius_m, workers=workers,
+                                 render_stride=particle_render_stride)
         if p:
             crm_parts.append(("crm_particles", p))
     if not args.particles_only:
@@ -706,6 +728,7 @@ def main() -> int:
         "out_dir": str(out_dir),
         "spin_axis": spin_axis,
         "stride": stride,
+        "particle_render_stride": particle_render_stride,
         "workers": workers,
         "surface": str(surface) if surface else None,
         "particle_spacing_m": particle_spacing,
