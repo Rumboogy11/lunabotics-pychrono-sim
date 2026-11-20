@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
 """Lunar bucket-drum excavator -- spindle-driven FEA structural check.
 
 This variant couples the generated solid PLA tetrahedral mesh to the same
@@ -820,6 +820,7 @@ def main() -> int:
         lower_speed=run.descent_speed,
         drum_omega=run.omega,
         bed_height=run.bed_height,
+        bed_padding=run.bed_padding,
         drum_spin_axis=run.spin_axis,
         drum_rest_clearance=MOTION_DEFAULT.drum_rest_clearance + args.initial_gap,
     )

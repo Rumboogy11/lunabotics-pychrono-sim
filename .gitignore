@@ -4,13 +4,15 @@ chrono-build/
 chrono-env/
 chrono-install/
 chrono-src/
-deme-env/
 pychrono-env/
 
 # Simulation output and large generated result sets.
 Output_*/
 output/
 geometry_checks/
+
+# User-edited GUI defaults (workspace-local, regenerated from shipped values).
+study_gui_defaults.json
 
 # Python bytecode and caches.
 __pycache__/

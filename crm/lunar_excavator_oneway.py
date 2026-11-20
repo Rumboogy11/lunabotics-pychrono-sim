@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
 """One-way CRM -> FEA lunar excavator structural driver.
 
 This variant avoids the unstable two-way SPH/flex-BCE coupling in
@@ -110,21 +110,12 @@ def read_tetgen_ele(path: Path) -> np.ndarray:
 
 def _vtk_append_array(data, name: str, values: np.ndarray, components: int = 1) -> None:
     import vtk  # type: ignore
+    from vtk.util.numpy_support import numpy_to_vtk
 
-    arr = vtk.vtkDoubleArray()
+    flat = np.ascontiguousarray(values, dtype=float).reshape(-1)
+    arr = numpy_to_vtk(flat, deep=True, array_type=vtk.VTK_DOUBLE)
     arr.SetName(name)
     arr.SetNumberOfComponents(components)
-    n = len(values)
-    arr.SetNumberOfTuples(n)
-    flat = np.asarray(values, dtype=float)
-    if components == 1:
-        flat = flat.reshape(-1)
-        for i in range(n):
-            arr.SetValue(i, float(flat[i]))
-    else:
-        flat = flat.reshape(n, components)
-        for i in range(n):
-            arr.SetTuple(i, [float(x) for x in flat[i]])
     data.AddArray(arr)
 
 
@@ -137,12 +128,19 @@ class FeaVtkExporter:
         self.frames_dir.mkdir(parents=True, exist_ok=True)
         self.connectivity = np.asarray(connectivity, dtype=np.int64)
         self.ref_positions = np.asarray(ref_positions, dtype=float)
+        # VTK 9.6 no longer accepts InsertNextCell(type, int) from Python.
+        # Precompute the legacy cell array once and import it in bulk per frame.
+        n_cells = len(self.connectivity)
+        self.cells = np.empty(n_cells * 5, dtype=np.int64)
+        self.cells.reshape(n_cells, 5)[:, 0] = 4
+        self.cells.reshape(n_cells, 5)[:, 1:] = self.connectivity
         self.entries: list[tuple[float, str]] = []
 
     def write_frame(self, fea, mesh, nodes, local_positions: np.ndarray,
                     spindle, frame_index: int, time_s: float) -> Path | None:
         try:
             import vtk  # type: ignore
+            from vtk.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
         except Exception as exc:  # pragma: no cover
             print(f"  VTK export unavailable: {exc}", flush=True)
             return None
@@ -155,25 +153,18 @@ class FeaVtkExporter:
         # Deformation relative to the current rigid spindle pose.
         q_tuple = rigid.quat_parts(spindle.GetRot())
         center = np.asarray(rigid.vec_parts(spindle.GetPos()), dtype=float)
-        expected = fea_driver.rotate_vectors(q_tuple, local_positions) + center
+        expected = rotate_vectors(q_tuple, local_positions) + center
         disp = points - expected
         disp_mag = np.linalg.norm(disp, axis=1)
 
         grid = vtk.vtkUnstructuredGrid()
         vtk_points = vtk.vtkPoints()
-        vtk_points.SetDataTypeToDouble()
-        for p in points:
-            vtk_points.InsertNextPoint(float(p[0]), float(p[1]), float(p[2]))
+        vtk_points.SetData(numpy_to_vtk(np.ascontiguousarray(points), deep=True))
         grid.SetPoints(vtk_points)
 
-        tet_type = vtk.VTK_TETRA
-        conn = self.connectivity
-        for j in range(conn.shape[0]):
-            grid.InsertNextCell(tet_type, 4)
-            grid.InsertCellPoint(int(conn[j, 0]))
-            grid.InsertCellPoint(int(conn[j, 1]))
-            grid.InsertCellPoint(int(conn[j, 2]))
-            grid.InsertCellPoint(int(conn[j, 3]))
+        cell_array = vtk.vtkCellArray()
+        cell_array.ImportLegacyFormat(numpy_to_vtkIdTypeArray(self.cells, deep=True))
+        grid.SetCells(vtk.VTK_TETRA, cell_array)
 
         _vtk_append_array(grid.GetPointData(), "Displacement", disp, components=3)
         _vtk_append_array(grid.GetPointData(), "DisplacementMagnitude", disp_mag, components=1)
@@ -426,8 +417,12 @@ def apply_loads(chrono, load_nodes, matrix: np.ndarray,
     target = np.concatenate((force_local, torque_local))
     nodal = (matrix @ target).reshape(-1, 3) * scale
     rotated = rotate_vectors(q_tuple, nodal)
+    # Reuse one ChVector3d: allocating ~45k temporaries per dynamics step is a
+    # significant Python-side cost on large meshes.
+    force = chrono.ChVector3d()
     for node, f in zip(load_nodes, rotated):
-        node.SetForce(chrono.ChVector3d(float(f[0]), float(f[1]), float(f[2])))
+        force.x, force.y, force.z = float(f[0]), float(f[1]), float(f[2])
+        node.SetForce(force)
 
 
 def write_config(path: Path, args, run, pla, motion, node_path: Path, ele_path: Path,

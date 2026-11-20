@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
 """Combined report runner: rigid CRM soil response plus FEA drum diagnostic.
 
 This orchestrator runs the production rigid-body CRM driver and the
@@ -62,9 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="short 0.05 s end-to-end orchestration check")
 
     p.add_argument("--crm-spacing", type=float, default=None,
-                   help="rigid CRM SPH spacing in m (default: 0.004)")
+                   help="rigid CRM SPH spacing in m (default: 0.002)")
     p.add_argument("--crm-dt", type=float, default=None,
-                   help="rigid CRM timestep in s (default: spacing-dependent, 8e-5 at 4 mm)")
+                   help="rigid CRM timestep in s (default: spacing-dependent, 4e-5 at 2 mm)")
     p.add_argument("--crm-fps", type=float, default=None,
                    help="rigid CRM output cadence in Hz (default: 20)")
 
@@ -106,7 +106,7 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
         args.fea_stress_stride = 50 if args.fea_stress_stride is None else args.fea_stress_stride
     else:
         args.duration = 20.0 if args.duration is None else args.duration
-        args.crm_spacing = 0.004 if args.crm_spacing is None else args.crm_spacing
+        args.crm_spacing = 0.002 if args.crm_spacing is None else args.crm_spacing
         args.crm_dt = suggested_sph_dt(args.crm_spacing) if args.crm_dt is None else args.crm_dt
         args.crm_fps = 20.0 if args.crm_fps is None else args.crm_fps
         args.fea_spacing = 0.012 if args.fea_spacing is None else args.fea_spacing

@@ -231,25 +231,28 @@ mesh and CRM surface so that axis becomes local +Z for the FEA drivers. Pass
     --axis Y --mesh-size 0.012 --hub-radius 0.035
 ```
 
-Route: OpenCASCADE STL triangulation -> MeshFix repair -> face decimation with
-`trimesh.remesh.subdivide_to_size` -> TetGen with `pYQ`. Direct Gmsh 3D meshing
-was abandoned because the screw/thread surfaces produce segment/facet
+Route: OpenCASCADE Boolean fusion -> `ShapeUpgrade_UnifySameDomain` ->
+STL triangulation -> topology-preserving quadric decimation ->
+`trimesh.remesh.subdivide_to_size` -> TetGen with `pYQ`. Direct Gmsh 3D
+meshing was abandoned because screw/thread surfaces produce segment/facet
 intersection failures. OpenCASCADE's parallel tessellation mode is enabled by
-default; `--no-occ-parallel` disables it, and `--time-stages` reports the time
-spent in fusion, tessellation, surface processing, TetGen, and output writing.
+default; `--no-occ-parallel` disables it, and `--time-stages` reports time in
+fusion, tessellation, surface processing, TetGen, and output writing.
 
 For multi-solid STEP assemblies, add:
 
 ```bash
     --min-solid-volume 1e-5 \
-    --surface-target-faces 80000 \
-    --repair-after-decimation
+    --surface-target-faces 8000 \
+    --surface-max-faces 256000
 ```
 
-This boolean-fuses the retained solids, drops sub-millimetre fasteners, and
-runs MeshFix *after* quadric decimation. Repairing the full fused assembly
-before decimation inflated the SPIKEY volume by about 391%; the
-decimate-then-repair route keeps it near 0.8%.
+This drops sub-millimetre fasteners, removes the splitter edges left by Boolean
+fusion, and increases the decimation target automatically until the surface is
+watertight and TetGen accepts it. MeshFix is intentionally **not** used by the
+default route: on fused shells it can seal the wrong side and inflate the SPIKEY
+volume by several hundred percent. `--repair-after-decimation` remains as a
+legacy compatibility option.
 
 The promoted 8k mesh has:
 
@@ -264,9 +267,9 @@ either lose the hub/volume or make TetGen report self-intersections. The
 converter now warns instead of aborting when decimation leaves no `HUB` nodes,
 because the FEA driver selects hub nodes from the loaded mesh.
 
-Production CRM and DEME geometry remains
-`geometry/LunarDrumScrew_m_coarse.obj`. The 1,200-face simplification closes the
-physical holes and must not be used for production.
+Production CRM geometry remains `geometry/LunarDrumScrew_m_coarse.obj` when using
+the supplied reference meshes. Avoid overly simplified meshes for production work
+because aggressive simplification can close physical holes and alter contact behavior.
 
 ### Verifying a conversion visually
 
@@ -360,7 +363,7 @@ not make it robust.
 1. Use rigid-body CRM for fill ratio, torque comparisons, and geometry sweeps.
 2. Use the one-way wrench replay for structural screening of the promoted PLA
    mesh; cite it as a response to rigid-CRM loads, not coupled FSI.
-3. Use DEME/DEM-Engine only for targeted discrete-mechanism checks.
+3. Use separate, targeted discrete-mechanism checks only when a continuum model cannot represent the mechanism of interest.
 4. Use the two-way FEA driver only for short coupling diagnostics; even short
    runs are not established as physically valid.
 5. Before treating two-way stress magnitudes as design validation, fix the

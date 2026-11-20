@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
 """Render the original STEP CAD and its converted FEA surface side by side.
 
 The STEP converter (:mod:`step_to_chrono_fea`) rotates the drum axis onto the

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
 """Interactive wrapper for a complete CRM -> one-way FEA excavator study.
 
 It asks for geometry, run time, bed/numerics, and solver settings, writes a
@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -31,10 +32,15 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "crm"))
 
 try:
-    from lunar_excavator_crm import suggested_sph_dt
+    from lunar_excavator_crm import CrmRunParams, fit_active_box, suggested_sph_dt
 except Exception:  # pragma: no cover - fallback keeps the wizard usable
+    CrmRunParams = None  # type: ignore[assignment]
+
     def suggested_sph_dt(spacing: float, d0_multiplier: float = 1.0) -> float:
         return min(5.0e-4, 8.0e-5 * (spacing / 0.004) * d0_multiplier)
+
+    def fit_active_box(run) -> tuple[float, float, float]:
+        return (0.631333, 0.687407, 0.866370)
 
 
 def discover_default(relative: str) -> Path:
@@ -66,7 +72,7 @@ LEGACY_DRUM_HALF_LENGTH = 0.033
 LEGACY_BED_HEIGHT = 0.06
 LEGACY_DESCENT_SPEED = 0.0015
 LEGACY_ACTIVE_BOX = 0.244
-LEGACY_SPACING = 0.004  # SPH spacing in m (smaller = finer particles/more simulation resolution)
+LEGACY_SPACING = 0.002  # SPH spacing in m (smaller = finer particles/more simulation resolution)
 
 SOIL_DEFAULTS = {
     "density": 1650.0,
@@ -236,17 +242,20 @@ def geometry_defaults(measured: dict[str, float | int] | None,
     scale = max(scale, 0.05)
     bed_height = LEGACY_BED_HEIGHT * scale
     descent_speed = LEGACY_DESCENT_SPEED * scale
-    # Fit the active domain to the drum instead of cubing the scale factor:
-    # a 3x larger drum needs ~3x more cells per axis, not 27x the particle
-    # count from scaling every side by the full legacy box.
-    active_box = (
-        max(LEGACY_ACTIVE_BOX, 2.0 * (half_length + 0.01 * scale) + 0.04 * scale),
-        max(LEGACY_ACTIVE_BOX, 2.0 * (radius + 0.005 * scale) + 0.04 * scale),
-        max(0.5 * scale, bed_height + 2.0 * radius + 0.20 * scale),
-    )
     # Keep the particle count in the validated range; a large drum needs a
     # proportionally coarser SPH spacing, capped at the validated 12 mm case.
     spacing = min(0.012, LEGACY_SPACING * scale)
+    # Fit the active domain to the padded bed footprint and the full drum
+    # travel.  Chrono deactivates particles outside this drum-centred box, so
+    # its walls must lie outside the reflective bed walls and above the drum.
+    if CrmRunParams is not None:
+        run_params = CrmRunParams(
+            spacing=spacing, bed_height=bed_height,
+            drum_radius=radius, drum_half_length=half_length,
+        )
+        active_box = fit_active_box(run_params)
+    else:
+        active_box = (LEGACY_ACTIVE_BOX, LEGACY_ACTIVE_BOX, 0.5 * scale)
     inner_radius = min(0.9 * radius, 0.055 * scale)
     # Multi-solid assemblies in this workspace have a much larger structural
     # core than the legacy single-solid screw drum.  A generated mesh records
@@ -320,7 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--duration", type=float, default=None, help="simulated CRM duration in s (default: 20)")
     p.add_argument("--fea-duration", type=float, default=None,
                    help="FEA duration in s (default: same as CRM)")
-    p.add_argument("--spacing", type=float, default=None, help="SPH spacing in m (default: geometry-scaled, ~0.004 for legacy size; smaller = higher resolution)")
+    p.add_argument("--spacing", type=float, default=None, help="SPH spacing in m (default: geometry-scaled, ~0.002 for legacy size; smaller = higher resolution)")
     p.add_argument("--crm-dt", default=None,
                    help="CRM timestep in s, or 'auto' for spacing-dependent default")
     p.add_argument("--d0-multiplier", type=float, default=None, help="SPH kernel length multiplier")
@@ -356,10 +365,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="STEP coordinate scale to metres (default: 0.001 for mm CAD)")
     p.add_argument("--mesh-size", type=float, default=None, help="FEA target tet size in m")
     p.add_argument("--surface-target-faces", type=int, default=None,
-                   help="STEP surface decimation target faces")
-    p.add_argument("--surface-repair-order", choices=("before", "after"), default=None,
-                   help="STEP MeshFix order: before decimation (legacy) or after decimation "
-                        "(recommended for multi-solid assemblies; default: after)")
+                   help="minimum STEP surface decimation target faces; raised automatically "
+                        "when needed to keep the surface watertight")
+    p.add_argument("--surface-max-faces", type=int, default=None,
+                   help="upper bound for watertight decimation retry (default: 256000)")
+    p.add_argument("--surface-repair-order", choices=("none", "before", "after"), default=None,
+                   help="legacy MeshFix route (default: none; OCC unify + topology-preserving "
+                        "decimation is used instead)")
     p.add_argument("--min-solid-volume", type=float, default=None,
                    help="drop STEP assembly solids smaller than this volume in m^3 before meshing")
     p.add_argument("--hub-radius", type=float, default=None, help="rigid hub radius in m")
@@ -372,8 +384,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--solver", choices=("pardiso-mkl", "sparse-lu", "sparse-qr", "gmres"),
                    default=None, help="one-way FEA linear solver")
     p.add_argument("--num-threads", type=int, default=None, help="FEA solver threads")
+    p.add_argument("--load-radius-fraction", type=float, default=None,
+                   help="apply soil loads to nodes with r >= fraction * drum radius (default: 0.8; 0.95 is cheaper)")
+    p.add_argument("--raw-stress-every", type=int, default=None,
+                   help="compute peak stress on every Nth recorded frame (default: 1)")
+    p.add_argument("--export-workers", type=int, default=None,
+                   help="parallel worker processes for ParaView frame export (default: 1)")
     p.add_argument("--save-particles", action="store_true", help="write CRM particle CSV frames")
     p.add_argument("--no-particles", action="store_true", help="do not write CRM particle CSV frames")
+    p.add_argument("--export-vtk", action="store_true",
+                   help="export study outputs to ParaView PVD/VTK time series after the run")
+    p.add_argument("--no-export-vtk", action="store_true",
+                   help="do not export ParaView PVD/VTK time series")
+    p.add_argument("--fea-export-vtk", action="store_true",
+                   help="export per-frame FEA stress/deformation VTU during one-way FEA (needed for ParaView stresses)")
+    p.add_argument("--no-fea-export-vtk", action="store_true",
+                   help="do not export per-frame FEA VTU files")
+    p.add_argument("--vtk-stride", type=int, default=None,
+                   help="export every Nth recorded FEA frame to VTU (default: 1)")
+    p.add_argument("--paraview-stride", type=int, default=None,
+                   help="export every Nth CRM/excavator frame to ParaView (default: 1)")
+    p.add_argument("--open-paraview", action="store_true",
+                   help="open the ParaView export in the full ParaView GUI (pvpython fallback) after a successful run")
 
     p.add_argument("--dry-run", action="store_true", help="write config and commands, but do not simulate")
     p.add_argument("--yes", action="store_true", help="accept defaults and skip confirmation")
@@ -553,7 +585,8 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
     unit_scale = args.unit_scale if args.unit_scale is not None else 0.001
     mesh_size = args.mesh_size if args.mesh_size is not None else 0.012
     surface_faces = args.surface_target_faces if args.surface_target_faces is not None else 8000
-    surface_repair_order = args.surface_repair_order or "after"
+    surface_max_faces = args.surface_max_faces if args.surface_max_faces is not None else 256000
+    surface_repair_order = args.surface_repair_order or "none"
     hub_radius = args.hub_radius if args.hub_radius is not None else 0.0015
     min_solid_volume = args.min_solid_volume if args.min_solid_volume is not None else 0.0
 
@@ -666,7 +699,14 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         if args.surface_target_faces is None:
             surface_faces = prompt_int(
                 "STEP surface target faces", surface_faces, minimum=100,
-                detail="Target triangle count for the CRM/FEA contact surface (80k for complex assemblies).",
+                detail="Minimum contact-surface triangle count. The converter raises it automatically "
+                       "if decimation would break watertightness (complex screws often need 50k-80k).",
+            )
+        if args.surface_max_faces is None:
+            surface_max_faces = prompt_int(
+                "STEP surface max faces", surface_max_faces, minimum=100,
+                detail="Retry ceiling for the watertight decimation search; raise it if the "
+                       "converter cannot find a valid surface.",
             )
         if args.min_solid_volume is None:
             min_solid_volume = prompt_float(
@@ -675,9 +715,10 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             )
         if args.surface_repair_order is None:
             surface_repair_order = prompt_choice(
-                "STEP MeshFix order (before | after decimation)",
-                ("before", "after"), surface_repair_order,
-                detail="'after' preserves volume better for fused multi-solid assemblies.",
+                "STEP MeshFix order (none | before | after decimation)",
+                ("none", "before", "after"), surface_repair_order,
+                detail="'none' unifies fused CAD faces and retries decimation until watertight; "
+                       "'before'/'after' are legacy MeshFix routes.",
             )
 
         mesh_dir = out_dir / "mesh"
@@ -722,6 +763,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
                 "--unit-scale", f"{unit_scale:g}",
                 "--mesh-size", f"{mesh_size:g}",
                 "--surface-target-faces", str(surface_faces),
+                "--surface-max-faces", str(surface_max_faces),
                 "--min-solid-volume", f"{min_solid_volume:g}",
                 "--hub-radius", f"{hub_radius:g}",
                 "--axis", cad_axis,
@@ -807,7 +849,8 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
     geo_box = ",".join(f"{v:g}" for v in geo["active_box"])
     active_box = prompt_box(
         "Active SPH box X,Y,Z (m)", args.active_box or geo_box,
-        detail="Particle domain size (X along drum axis, Y lateral, Z vertical); must contain the bed+drum.",
+        detail="Active SPH domain X,Y,Z (drum-centred). Chrono freezes particles outside it, so keep its "
+               "walls outside the padded bed and its top above the drum's maximum height.",
     )
     settle_time = args.settle_time if args.settle_time is not None else prompt_float(
         "Settle time (s)", 0.001, minimum=0.0,
@@ -878,6 +921,18 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "FEA threads", 8, minimum=1,
         detail="Thread count for the FEA solver (effective with pardiso-mkl).",
     )
+    load_radius_fraction = args.load_radius_fraction if args.load_radius_fraction is not None else prompt_float(
+        "Load node radius fraction", 0.95, minimum=0.01, maximum=1.0,
+        detail="Soil loads are spread over exterior nodes within this radius; 0.95 greatly reduces per-step load work while preserving the wrench.",
+    )
+    raw_stress_every = args.raw_stress_every if args.raw_stress_every is not None else prompt_int(
+        "Raw stress interval", 5, minimum=1,
+        detail="Scan tetrahedra for peak stress every Nth recorded frame; set to 1 for every frame.",
+    )
+    export_workers = args.export_workers if args.export_workers is not None else prompt_int(
+        "ParaView export workers", 4, minimum=1,
+        detail="Number of processes used to write ParaView frame files in parallel.",
+    )
 
     pla_flags = {
         "youngs_modulus": "pla_youngs_modulus",
@@ -915,6 +970,40 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             detail="Write per-frame particle positions from CRM (useful for visualization, uses disk space).",
         )
 
+    if args.fea_export_vtk:
+        fea_export_vtk = True
+    elif args.no_fea_export_vtk:
+        fea_export_vtk = False
+    else:
+        fea_export_vtk = prompt_bool(
+            "Export per-frame FEA stress/deformation VTK during one-way FEA?", True,
+            detail="Writes fea/vtk/frame_*.vtu and fea.pvd so ParaView can show von Mises stress and deformation.",
+        )
+    if fea_export_vtk:
+        fea_vtk_stride = args.vtk_stride if args.vtk_stride is not None else prompt_int(
+            "FEA VTK export stride (every N recorded frames)", 1, minimum=1,
+            detail="Use >1 to reduce disk/time for long runs while keeping 3D stress snapshots.",
+        )
+    else:
+        fea_vtk_stride = args.vtk_stride if args.vtk_stride is not None else 1
+
+    if args.export_vtk:
+        export_vtk = True
+    elif args.no_export_vtk:
+        export_vtk = False
+    else:
+        export_vtk = prompt_bool(
+            "Export study to ParaView datasets after the run?", True,
+            detail="Creates paraview/crm_particles.pvd, paraview/excavator.pvd and combined.pvd for 3D viewing.",
+        )
+    if export_vtk:
+        paraview_stride = args.paraview_stride if args.paraview_stride is not None else prompt_int(
+            "ParaView CRM/excavator export stride (every N frames)", 1, minimum=1,
+            detail="Use >1 to reduce export size/time; all sources stay time-aligned.",
+        )
+    else:
+        paraview_stride = args.paraview_stride if args.paraview_stride is not None else 1
+
     dry_run = args.dry_run
     if INTERACTIVE and not args.dry_run and not args.yes:
         dt_text = f"auto ({auto_dt:g} s)" if crm_dt == auto_dt else f"{crm_dt:g} s"
@@ -930,7 +1019,8 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             f"SPH:          spacing={spacing:g} m, dt={dt_text}",
             f"Bed:          height={bed_height:g} m, box={','.join(f'{v:g}' for v in active_box)} m, "
             f"descent={descent_speed:g} m/s",
-            f"FEA:          dt={fea_dt:g} s, solver={solver}, threads={num_threads}",
+            f"FEA:          dt={fea_dt:g} s, solver={solver}, threads={num_threads}, fea-vtk={fea_export_vtk}",
+            f"ParaView:     export={export_vtk} (stride {paraview_stride})",
         ]
         print("\n" + "\n".join(summary) + "\n")
         dry_run = prompt_bool(
@@ -958,6 +1048,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "unit_scale": unit_scale,
         "mesh_size": mesh_size,
         "surface_faces": surface_faces,
+        "surface_max_faces": surface_max_faces,
         "surface_repair_order": surface_repair_order,
         "hub_radius": hub_radius,
         "drum_radius": drum_radius,
@@ -984,9 +1075,17 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "fea_dt": fea_dt,
         "solver": solver,
         "num_threads": num_threads,
+        "load_radius_fraction": load_radius_fraction,
+        "raw_stress_every": raw_stress_every,
+        "export_workers": export_workers,
         "pla": pla,
         "save_particles": save_particles,
+        "fea_export_vtk": fea_export_vtk,
+        "fea_vtk_stride": int(fea_vtk_stride),
+        "export_vtk": export_vtk,
+        "paraview_stride": int(paraview_stride),
         "open_results": args.open_results,
+        "open_paraview": args.open_paraview,
         "no_open": args.no_open,
         "dry_run": dry_run,
     }
@@ -1060,6 +1159,8 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         "--hub-radius", f"{cfg['hub_radius']:g}",
         "--solver", cfg["solver"],
         "--num-threads", str(cfg["num_threads"]),
+        "--load-radius-fraction", f"{cfg['load_radius_fraction']:g}",
+        "--raw-stress-every", str(int(cfg["raw_stress_every"])),
         "--output-dir", str(fea_dir),
     ]
     pla_flags = {
@@ -1070,7 +1171,20 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     }
     for key, value in cfg["pla"].items():
         fea_cmd.extend([pla_flags[key], f"{value:g}"])
+    if cfg.get("fea_export_vtk", True):
+        fea_cmd.extend(["--export-vtk", "--vtk-stride", str(max(1, int(cfg.get("fea_vtk_stride", 1)))),
+                        "--vtk-dir", str(fea_dir / "vtk")])
     steps.append({"name": "one-way-FEA", "command": fea_cmd})
+
+    if cfg.get("export_vtk", True):
+        export_cmd = [
+            str(ROOT / "chrono-env" / "bin" / "python"),
+            str(ROOT / "export_study_vtk.py"),
+            "--study-dir", str(out_dir),
+            "--stride", str(max(1, int(cfg.get("paraview_stride", 1)))),
+            "--workers", str(max(1, int(cfg.get("export_workers", 1)))),
+        ]
+        steps.append({"name": "export-ParaView-VTK", "command": export_cmd})
 
     for step in steps:
         step["log"] = str(out_dir / f"{step['name']}.log")
@@ -1164,6 +1278,35 @@ def open_path(path: Path) -> bool:
         return False
 
 
+def launch_paraview_viewer(paraview_script: Path, paraview_dir: Path, study_dir: Path) -> bool:
+    """Open the preconfigured ParaView scene in the full GUI (pvpython fallback)."""
+    env = os.environ.copy()
+    env["PYCHRONO_EXPORT_DIR"] = str(paraview_dir)
+    env["PYCHRONO_STUDY_DIR"] = str(study_dir)
+    # ParaView 6.2 can abort on Wayland; use X11/XWayland unless overridden.
+    env["QT_QPA_PLATFORM"] = os.environ.get("PYCHRONO_PARAVIEW_QT_PLATFORM", "xcb")
+    paraview_bin = shutil.which("paraview")
+    if paraview_bin:
+        try:
+            subprocess.Popen(
+                [paraview_bin, f"--script={paraview_script}"], cwd=ROOT, env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return True
+        except OSError:
+            pass
+    try:
+        subprocess.Popen(
+            ["pvpython", str(paraview_script), str(paraview_dir)], cwd=ROOT, env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except OSError:
+        return False
+
+
 def print_results(cfg: dict[str, Any], *, offer_open: bool = True) -> None:
     out_dir: Path = cfg["output_dir"]
     crm_path = out_dir / "crm" / "summary.csv"
@@ -1197,6 +1340,9 @@ def print_results(cfg: dict[str, Any], *, offer_open: bool = True) -> None:
         else:
             print(f"  Plot generation failed: {(result.stderr or result.stdout).strip()}")
 
+    paraview_dir = out_dir / "paraview"
+    paraview_script = ROOT / "view_study_paraview.py"
+    combined_pvd = paraview_dir / "combined.pvd"
     print("\nHow to view the results")
     print(f"  Study folder:  {out_dir}")
     print(f"  CRM metrics:   {crm_path}")
@@ -1205,6 +1351,15 @@ def print_results(cfg: dict[str, Any], *, offer_open: bool = True) -> None:
         print(f"  Soil wrench:   {loads_path}")
     if cfg.get("save_particles"):
         print(f"  CRM particles: {out_dir / 'crm' / 'particles_*.csv'}")
+    if paraview_dir.is_dir():
+        print(f"  ParaView export: {paraview_dir}")
+        print(f"  ParaView 3D view (recommended): QT_QPA_PLATFORM=xcb "
+              f"PYCHRONO_EXPORT_DIR={shlex.quote(str(paraview_dir))} paraview --script={paraview_script}")
+        print(f"  pvpython render window (stays open): pvpython {paraview_script} {paraview_dir}")
+        if combined_pvd.is_file():
+            print(f"  Combined PVD:  {combined_pvd}")
+        print("    Notes: particles render as 3D spheres; excavator is a separate source;")
+        print("           FEA is colored by von Mises stress and warped by displacement when exported.")
     print(f"  Interactive plot: {sys.executable} {plot_script} --output-dir {out_dir} --show")
     print(f"  Open folder:      xdg-open {shlex.quote(str(out_dir))}")
 
@@ -1228,6 +1383,17 @@ def print_results(cfg: dict[str, Any], *, offer_open: bool = True) -> None:
                 print("Opened the result plots.")
             except OSError:
                 print("Could not open plots automatically; run the interactive plot command above.")
+        if paraview_dir.is_dir() and paraview_script.is_file():
+            if prompt_bool("Open 3D ParaView view now (particles as spheres, excavator separate, FEA stress)?", False):
+                if launch_paraview_viewer(paraview_script, paraview_dir, out_dir):
+                    print("Opened ParaView visualization. If it does not appear, run the ParaView command above.")
+                else:
+                    print("Could not launch ParaView automatically; run the ParaView command above.")
+    elif offer_open and cfg.get("open_paraview") and paraview_dir.is_dir() and paraview_script.is_file():
+        if launch_paraview_viewer(paraview_script, paraview_dir, out_dir):
+            print("Opened ParaView visualization.")
+        else:
+            print("Could not launch ParaView automatically; run the ParaView command above.")
 
 
 def main() -> int:
