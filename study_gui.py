@@ -130,7 +130,7 @@ PARAM_INFO: dict[str, str] = {
     "reverse_spin": "Flip rotation direction if the CAD excavator spins the wrong way. Signed omega is written as negative.",
     "spin_axis": "Global axis the drum spins about during excavation (usually X for the supplied geometry).",
     "solver": "One-way FEA linear solver: pardiso-mkl is default; sparse-lu/qr are fallbacks; gmres is diagnostic only.",
-    "num_threads": "Thread count for the FEA solver (effective with pardiso-mkl).",
+    "num_threads": "Thread count for the FEA solver (pardiso-mkl) and the geometry comparison tool's OCC tessellation/fuse.",
     "load_radius_fraction": "Apply soil loads only to exterior nodes within this fraction of drum radius; 0.95 cuts per-step load work sharply.",
     "raw_stress_every": "Scan tetrahedra for peak stress every Nth recorded frame; higher is cheaper.",
     "export_workers": "Number of processes used to write ParaView frame files in parallel.",
@@ -144,7 +144,7 @@ PARAM_INFO: dict[str, str] = {
     "open_paraview": "Open the preconfigured 3D view in the full ParaView GUI after a successful run (pvpython render window is the fallback).",
     # Tools tab
     "tools_study_dir": "Study/output directory to inspect. Use the folder containing study_config.json or a previous Output_* run.",
-    "tools_stride": "Export every Nth CRM frame when using the Export ParaView VTK/PVD tool. Use 1 for all frames.",
+    "tools_stride": "Export every Nth CRM frame when using the Export ParaView VTK/PVD tool. Use 1 for all frames. The export uses the 'ParaView export workers' setting for parallel frame writes; the geometry comparison uses 'FEA threads' for OCC.",
 }
 
 PARAM_INFO.update({
@@ -1291,7 +1291,10 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
     def _tool_export(self):
         d = Path(self.tools_study_dir.get()).expanduser()
         stride = max(1, int(float(self.tools_stride.get() or 1)))
-        cmd = [py_exec(), str(ROOT / "export_study_vtk.py"), "--study-dir", str(d), "--stride", str(stride)]
+        workers = max(1, int(float(self._g("export_workers") or 4)))
+        cmd = [py_exec(), str(ROOT / "export_study_vtk.py"), "--study-dir", str(d),
+               "--stride", str(stride), "--workers", str(workers)]
+        self._tool_log(f"# exporting {workers} frame worker process(es)")
         self._run_tool_cmd(cmd)
 
     def _watch_tool_process(self, proc: subprocess.Popen, label: str):
@@ -1359,8 +1362,11 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
 
     def _tool_geometry(self):
         d = Path(self.tools_study_dir.get()).expanduser()
-        cmd = [py_exec(), str(ROOT / "view_geometry.py"), "--study-dir", str(d)]
+        threads = max(0, int(float(self._g("num_threads") or 8)))
+        cmd = [py_exec(), str(ROOT / "view_geometry.py"), "--study-dir", str(d),
+               "--threads", str(threads)]
         self._tool_log("$ " + shlex.join(cmd))
+        self._tool_log(f"# OCC parallel tessellation/fuse enabled ({threads or 'all'} threads)")
         try:
             subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self._tool_log("[launched geometry view]")

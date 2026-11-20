@@ -112,8 +112,17 @@ def normalize_surface_units(surface: pv.PolyData, meta: dict[str, Any],
 
 def tessellate_step(step_path: Path, meta: dict[str, Any], *, unit_scale: float,
                     deflection: float, angular: float, source_axis: str | None,
-                    tmp_dir: Path) -> tuple[pv.PolyData, float, int, str]:
-    """Tessellate the CAD with the converter's exact fusion and deflection."""
+                    tmp_dir: Path, parallel: bool = True,
+                    threads: int = 0) -> tuple[pv.PolyData, float, int, str]:
+    """Tessellate the CAD with the converter's exact fusion and deflection.
+
+    The fuse is the dominant cost for multi-solid STEP assemblies (a 43-solid
+    drum took ~89 s as a serial accumulator fold).  Use the converter's
+    all-at-once general Boolean fuse with OCC threads here: it is the same
+    geometric union (identical CAD volume and bounding box, verified) but
+    finishes in ~3 s instead of ~89 s.  This is a display/verification path
+    only; production mesh generation keeps its historic sequential fuse order.
+    """
     if source_axis:
         axis_name = source_axis.upper()
     else:
@@ -122,11 +131,14 @@ def tessellate_step(step_path: Path, meta: dict[str, Any], *, unit_scale: float,
     axis = conv.AXES.get(axis_name, conv.AXES["Y"])
     min_volume = float(meta.get("min_solid_volume_m3", 0.0))
 
-    shape, n_solids, n_faces, cad_volume_cad, kept = conv.read_cad(
+    conv.enable_occ_parallel(threads, parallel=parallel)
+    shape, n_solids, n_faces, cad_volume_cad, kept, _solid_features = conv.read_cad(
         step_path,
         fuse_assembly=True,
         min_volume_m3=min_volume,
         unit_scale=unit_scale,
+        fuse_method="general" if parallel else "sequential",
+        parallel_fuse=parallel,
     )
     stl_path = tmp_dir / "cad_surface.stl"
     conv.write_surface_stl(shape, stl_path, deflection / unit_scale, angular)
@@ -169,6 +181,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="decimate the CAD display mesh to this many faces (0 disables)")
     p.add_argument("--mesh-volume-error", type=float, default=None,
                    help="override the volume-error tolerance for the pass/fail line (percent)")
+    p.add_argument("--threads", type=int, default=0,
+                   help="limit OpenCASCADE/OMP worker threads (0 = all logical cores)")
+    p.add_argument("--no-parallel", action="store_true",
+                   help="disable OCC parallel meshing/fuse (diagnostic; much slower)")
     return p
 
 
@@ -231,7 +247,8 @@ def main() -> int:
             cad, cad_volume, _kept, cad_info = tessellate_step(
                 step_path, meta, unit_scale=unit_scale, deflection=deflection,
                 angular=angular, source_axis=args.source_axis,
-                tmp_dir=Path(tmp),
+                tmp_dir=Path(tmp), parallel=not args.no_parallel,
+                threads=args.threads,
             )
     else:
         print("No original STEP found; showing the converted mesh only. "
