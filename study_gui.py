@@ -73,7 +73,7 @@ import threading
 import time
 from datetime import datetime
 import tkinter as tk
-from tkinter import BOTH, END, HORIZONTAL, LEFT, RIGHT, VERTICAL, W, X, Y
+from tkinter import BOTH, DISABLED, END, HORIZONTAL, LEFT, NORMAL, RIGHT, VERTICAL, W, X, Y
 from tkinter import BooleanVar, StringVar, Tk, colorchooser, filedialog, messagebox
 from tkinter import font as tkfont
 from tkinter import ttk
@@ -186,6 +186,9 @@ DEFAULT_FILE = ROOT / "study_gui_defaults.json"
 SETTINGS_FILE = ROOT / "study_gui_settings.json"
 HEADER_FONT = "StudyHeaderFont"
 SECTION_FONT = "StudySectionFont"
+DOC_TITLE_FONT = "StudyDocTitleFont"
+DOC_HEADING_FONT = "StudyDocHeadingFont"
+DOC_CODE_FONT = "StudyDocCodeFont"
 LIGHT_TEXT = "#000000"
 DARK_TEXT = "#F2F2F2"
 
@@ -204,6 +207,17 @@ SETTINGS_INFO: dict[str, str] = {
     "text_color": "Foreground text color as #RRGGBB. Pick... opens the system color dialog.",
     "dark_mode": "Use a dark interface palette. If the text color is still the default, it switches to a light shade automatically.",
 }
+
+GENERATED_DOC_ID = "<generated>"
+
+# Docs tab entries. ``None`` means generated from the GUI's own help tables.
+DOC_ENTRIES: tuple[tuple[str, str | None], ...] = (
+    ("Getting started", "README.md"),
+    ("GUI parameter reference", None),
+    ("CRM solver", "crm/README.md"),
+    ("One-way FEA coupling", "crm/FEA_COUPLING.md"),
+    ("Full model notes", "FULL_MODEL.md"),
+)
 
 
 def _valid_color(value: object) -> bool:
@@ -496,14 +510,17 @@ class StudyGUI:
         self.study_tab = ttk.Frame(nb)
         self.defaults_tab = ttk.Frame(nb)
         self.tools_tab = ttk.Frame(nb)
+        self.docs_tab = ttk.Frame(nb)
         self.settings_tab = ttk.Frame(nb)
         nb.add(self.study_tab, text="Study Wizard")
         nb.add(self.defaults_tab, text="Defaults")
         nb.add(self.tools_tab, text="Tools / View Results")
+        nb.add(self.docs_tab, text="Docs")
         nb.add(self.settings_tab, text="Settings")
         self._build_study_tab()
         self._build_defaults_tab()
         self._build_tools_tab()
+        self._build_docs_tab()
         self._build_settings_tab()
         self._apply_ui_settings(self.settings)
 
@@ -696,6 +713,176 @@ class StudyGUI:
         f.rowconfigure(0, weight=1)
         f.columnconfigure(0, weight=1)
         return txt
+
+    def _build_docs_tab(self):
+        pane = ttk.Panedwindow(self.docs_tab, orient=HORIZONTAL)
+        pane.pack(fill=BOTH, expand=True, padx=6, pady=6)
+
+        left = ttk.Frame(pane, width=220)
+        right = ttk.Frame(pane)
+        pane.add(left, weight=0)
+        pane.add(right, weight=1)
+
+        ttk.Label(left, text="Documentation", font=HEADER_FONT).pack(
+            anchor="w", padx=8, pady=(6, 4))
+        self.docs_tree = ttk.Treeview(left, show="tree", selectmode="browse")
+        self.docs_tree.pack(fill=BOTH, expand=True, padx=4, pady=(0, 6))
+        self.docs_tree.bind("<<TreeviewSelect>>", self._show_doc)
+
+        toolbar = ttk.Frame(right)
+        toolbar.pack(fill=X, padx=4, pady=(4, 2))
+        self.doc_path_var = StringVar(value="")
+        ttk.Label(toolbar, textvariable=self.doc_path_var, foreground="#777777").pack(
+            side=LEFT, fill=X, expand=True, padx=4)
+        self.doc_search_var = StringVar(value="")
+        search_entry = ttk.Entry(toolbar, textvariable=self.doc_search_var, width=22)
+        search_entry.pack(side=RIGHT, padx=4)
+        search_entry.bind("<Return>", self._find_doc_text)
+        ttk.Button(toolbar, text="Find", command=self._find_doc_text).pack(side=RIGHT)
+        ttk.Button(toolbar, text="Refresh", command=self._show_doc).pack(side=RIGHT, padx=4)
+
+        frame = ttk.Frame(right)
+        frame.pack(fill=BOTH, expand=True, padx=4, pady=(0, 4))
+        self.doc_text = tk.Text(frame, wrap="word", height=20, spacing1=1, spacing3=1)
+        self.text_widgets.append(self.doc_text)
+        vs = ttk.Scrollbar(frame, orient=VERTICAL, command=self.doc_text.yview)
+        self.doc_text.configure(yscrollcommand=vs.set)
+        self.doc_text.grid(row=0, column=0, sticky="nsew")
+        vs.grid(row=0, column=1, sticky="ns")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+
+        self.doc_text.tag_configure("doc_title", font=DOC_TITLE_FONT, spacing3=8)
+        self.doc_text.tag_configure("doc_heading", font=DOC_HEADING_FONT, spacing1=10, spacing3=4)
+        self.doc_text.tag_configure("doc_code", font=DOC_CODE_FONT, lmargin1=16, spacing1=2, spacing3=2)
+        self.doc_text.tag_configure("doc_bullet", lmargin1=16, lmargin2=26, spacing3=2)
+        self.doc_text.tag_configure("doc_quote", lmargin1=16, lmargin2=16, spacing1=4, spacing3=4)
+        self.doc_text.tag_configure("doc_rule", spacing1=6, spacing3=6)
+        self.doc_text.tag_configure("doc_search", background="#FFD400", foreground="#000000")
+        self.doc_text.configure(state=DISABLED)
+
+        first = None
+        for index, (title, relative) in enumerate(DOC_ENTRIES):
+            doc_id = GENERATED_DOC_ID if relative is None else relative
+            iid = f"doc_{index}"
+            self.docs_tree.insert("", "end", iid=iid, text=title, values=(doc_id,))
+            if first is None:
+                first = iid
+        if first is not None:
+            self.docs_tree.selection_set(first)
+
+    @staticmethod
+    def _clean_doc_inline(line: str) -> str:
+        line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
+        line = re.sub(r"`([^`]+)`", r"\1", line)
+        line = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", line)
+        return line
+
+    def _render_doc_markdown(self, body: str) -> None:
+        in_code = False
+        for raw in body.splitlines():
+            if raw.strip().startswith("```"):
+                in_code = not in_code
+                continue
+            if in_code:
+                self.doc_text.insert(END, raw + "\n", "doc_code")
+                continue
+
+            line = self._clean_doc_inline(raw.rstrip())
+            stripped = line.strip()
+            if not stripped:
+                self.doc_text.insert(END, "\n")
+                continue
+
+            heading = re.match(r"^(#{1,4})\s+(.*)$", stripped)
+            if heading:
+                tag = "doc_title" if len(heading.group(1)) == 1 else "doc_heading"
+                self.doc_text.insert(END, heading.group(2) + "\n", tag)
+                continue
+            if re.fullmatch(r"[-*_]\s*[-*_]\s*[-*_][-*_ ]*", stripped):
+                self.doc_text.insert(END, "─" * 60 + "\n", "doc_rule")
+                continue
+            if re.match(r"^\s*[-*+]\s+", line):
+                bullet = re.sub(r"^\s*[-*+]\s+", "", line)
+                self.doc_text.insert(END, "• " + bullet + "\n", "doc_bullet")
+                continue
+            if re.match(r"^\s*\d+\.\s+", line):
+                self.doc_text.insert(END, line.lstrip() + "\n", "doc_bullet")
+                continue
+            if stripped.startswith(">"):
+                self.doc_text.insert(END, stripped.lstrip("> ") + "\n", "doc_quote")
+                continue
+            self.doc_text.insert(END, line + "\n")
+
+    def _generated_doc_text(self) -> str:
+        lines = [
+            "# GUI parameter reference",
+            "",
+            "These are the help strings shown throughout the study wizard and the Settings tab.",
+            "",
+            "## Study parameters",
+            "",
+        ]
+        for key, info in PARAM_INFO.items():
+            lines.extend([f"### `{key}`", info, ""])
+        lines.extend(["## Appearance settings", ""])
+        for key, info in SETTINGS_INFO.items():
+            lines.extend([f"### `{key}`", info, ""])
+        return "\n".join(lines)
+
+    def _show_doc(self, *_):
+        selection = self.docs_tree.selection()
+        if not selection:
+            return
+        values = self.docs_tree.item(selection[0], "values")
+        doc_id = values[0] if values else ""
+        if doc_id == GENERATED_DOC_ID:
+            body = self._generated_doc_text()
+            label = "Generated from the GUI help tables"
+        else:
+            path = ROOT / doc_id
+            if not path.is_file():
+                messagebox.showerror("Docs", f"Documentation file not found:\n{path}")
+                return
+            try:
+                body = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                messagebox.showerror("Docs", f"Could not read {path}:\n{exc}")
+                return
+            label = str(path)
+
+        self.doc_text.configure(state=NORMAL)
+        self.doc_text.delete("1.0", END)
+        self._render_doc_markdown(body)
+        self.doc_text.configure(state=DISABLED)
+        self.doc_text.yview_moveto(0.0)
+        self.doc_path_var.set(label)
+        status = getattr(self, "status_var", None)
+        if status is not None:
+            status.set(f"Viewing {label}")
+
+    def _find_doc_text(self, *_):
+        needle = self.doc_search_var.get().strip()
+        if not needle:
+            return
+        self.doc_text.tag_remove("doc_search", "1.0", END)
+        pos = self.doc_text.search(needle, "insert", nocase=1, stopindex=END)
+        wrapped = False
+        if not pos:
+            pos = self.doc_text.search(needle, "1.0", nocase=1, stopindex=END)
+            wrapped = bool(pos)
+        status = getattr(self, "status_var", None)
+        if not pos:
+            if status is not None:
+                status.set(f"Docs: no match for '{needle}'.")
+            return
+        end = f"{pos}+{len(needle)}c"
+        self.doc_text.tag_add("doc_search", pos, end)
+        self.doc_text.mark_set("insert", end)
+        self.doc_text.see(pos)
+        if status is not None:
+            suffix = " (wrapped)" if wrapped else ""
+            status.set(f"Docs: found '{needle}'{suffix}.")
 
     def _back(self):
         i = self.step_nb.index("current")
@@ -1061,13 +1248,19 @@ class StudyGUI:
                 tkfont.nametofont(name).configure(size=size)
             except tk.TclError:
                 pass
-        for name, font_size in ((HEADER_FONT, size), (SECTION_FONT, max(7, size - 1))):
+        for name, font_size, family, weight in (
+            (HEADER_FONT, size, "TkDefaultFont", "bold"),
+            (SECTION_FONT, max(7, size - 1), "TkDefaultFont", "bold"),
+            (DOC_TITLE_FONT, size + 4, "TkDefaultFont", "bold"),
+            (DOC_HEADING_FONT, size + 1, "TkDefaultFont", "bold"),
+            (DOC_CODE_FONT, size, "TkFixedFont", "normal"),
+        ):
             try:
                 font = tkfont.nametofont(name)
             except tk.TclError:
-                font = tkfont.Font(name=name, exists=False, family="TkDefaultFont",
-                                   size=font_size, weight="bold")
-            font.configure(family="TkDefaultFont", size=font_size, weight="bold")
+                font = tkfont.Font(name=name, exists=False, family=family,
+                                   size=font_size, weight=weight)
+            font.configure(family=family, size=font_size, weight=weight)
 
         style = ttk.Style()
         theme = "clam" if dark and "clam" in style.theme_names() else self._base_theme
