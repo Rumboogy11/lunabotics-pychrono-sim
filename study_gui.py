@@ -1345,6 +1345,17 @@ class StudyGUI:
                                 insertcolor=color, arrowcolor=color)
             style.configure("TCombobox", background=button,
                             selectbackground=button, selectforeground=color)
+            # "clam" maps readonly comboboxes to a light gray fieldbackground,
+            # which overrides the configured value for selectors like Geometry source.
+            style.map("TCombobox",
+                      fieldbackground=[("readonly", "focus", field),
+                                       ("readonly", field),
+                                       ("disabled", frame)],
+                      foreground=[("readonly", "focus", color),
+                                  ("readonly", color),
+                                  ("disabled", frame)],
+                      background=[("active", button), ("pressed", button)],
+                      bordercolor=[("focus", button)])
             style.configure("Treeview", background=field, fieldbackground=field,
                             foreground=color)
             style.map("Treeview", background=[("selected", button)],
