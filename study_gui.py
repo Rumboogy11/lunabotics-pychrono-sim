@@ -1284,6 +1284,10 @@ class StudyGUI:
             for cls in ("TEntry", "TCombobox", "TSpinbox"):
                 style.configure(cls, fieldbackground=field, foreground=color,
                                 insertcolor=color, arrowcolor=color)
+            style.configure("Treeview", background=field, fieldbackground=field,
+                            foreground=color)
+            style.map("Treeview", background=[("selected", button)],
+                      foreground=[("selected", color)])
         except tk.TclError:
             pass  # Some platform themes do not allow every style option.
 
