@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
 """Export a CRM/one-way-FEA study to ParaView-friendly VTK time series.
 
 This script converts existing study outputs into files that ParaView can load
@@ -28,8 +28,10 @@ Typical use::
     ./chrono-env/bin/python export_study_vtk.py \
         --study-dir Output_study_20261119_144040
 
-    # then in ParaView:
-    paraview --script=view_study_paraview.py -- Output_study_20261119_144040/paraview
+    # then in ParaView (recommended):
+    pvpython /path/to/view_study_paraview.py Output_study_20261119_144040/paraview
+    # or ParaView GUI:
+    # PYCHRONO_EXPORT_DIR=Output_study_20261119_144040/paraview paraview --script=/path/to/view_study_paraview.py
 
 Notes on coordinates/poses:
   - CRM particle CSVs are already in world coordinates.
@@ -48,6 +50,7 @@ import json
 import math
 import os
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +88,39 @@ def read_json(path: Path) -> dict[str, Any]:
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
+
+
+def read_numeric_csv(path: Path, columns: tuple[str, ...]) -> dict[str, np.ndarray]:
+    """Read selected numeric columns with one NumPy pass instead of Python dicts."""
+    result = {name: np.empty(0, dtype=float) for name in columns}
+    with path.open("r", encoding="utf-8") as handle:
+        header = handle.readline().rstrip("\r\n").split(",")
+        indices = []
+        for name in columns:
+            try:
+                indices.append(header.index(name))
+            except ValueError:
+                indices.append(-1)
+        rows = []
+        for line in handle:
+            if not line.strip():
+                continue
+            fields = line.rstrip("\r\n").split(",")
+            rows.append(fields)
+        if not rows:
+            return result
+        ncols = max((len(r) for r in rows), default=len(header))
+        data = np.empty((len(rows), ncols), dtype=float)
+        data.fill(np.nan)
+        for i, fields in enumerate(rows):
+            for j, value in enumerate(fields):
+                try:
+                    data[i, j] = float(value)
+                except ValueError:
+                    pass
+        for name, col_idx in zip(columns, indices):
+            result[name] = data[:, col_idx] if col_idx >= 0 else np.zeros(len(rows))
+    return result
 
 
 def quat_xyzw_to_matrix(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
@@ -183,46 +219,52 @@ def surface_points_faces(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return pts, np.asarray(faces, dtype=np.int64)
 
 
-def write_polydata_vtp(points: np.ndarray, faces: np.ndarray | None,
-                       point_data: dict[str, np.ndarray] | None,
-                       path: Path) -> None:
-    poly = vtk.vtkPolyData()
+def _vtk_points(points: np.ndarray):
+    from vtk.util.numpy_support import numpy_to_vtk
+
     vtk_pts = vtk.vtkPoints()
-    vtk_pts.SetDataTypeToDouble()
-    for p in points:
-        vtk_pts.InsertNextPoint(float(p[0]), float(p[1]), float(p[2]))
-    poly.SetPoints(vtk_pts)
+    vtk_pts.SetData(numpy_to_vtk(np.ascontiguousarray(points, dtype=float), deep=True))
+    return vtk_pts
+
+
+def _vtk_cell_array(n_per_cell: int, indices: np.ndarray | None, n_points: int):
+    from vtk.util.numpy_support import numpy_to_vtkIdTypeArray
+
+    ca = vtk.vtkCellArray()
+    if indices is not None and len(indices):
+        cells = np.empty((len(indices), n_per_cell + 1), dtype=np.int64)
+        cells[:, 0] = n_per_cell
+        cells[:, 1:] = np.asarray(indices, dtype=np.int64).reshape(len(indices), n_per_cell)
+        ca.ImportLegacyFormat(numpy_to_vtkIdTypeArray(cells.ravel(), deep=True))
+    elif n_per_cell == 1 and n_points:
+        from vtk.util.numpy_support import numpy_to_vtk
+
+        offsets = np.arange(n_points + 1, dtype=np.int64)
+        connectivity = np.arange(n_points, dtype=np.int64)
+        ca.SetData(numpy_to_vtkIdTypeArray(offsets, deep=True),
+                   numpy_to_vtkIdTypeArray(connectivity, deep=True))
+    return ca
+
+
+def write_polydata_vtp(points: np.ndarray, faces: np.ndarray | None,
+                        point_data: dict[str, np.ndarray] | None,
+                        path: Path) -> None:
+    from vtk.util.numpy_support import numpy_to_vtk
+
+    poly = vtk.vtkPolyData()
+    poly.SetPoints(_vtk_points(points))
     if faces is not None and len(faces):
-        polys = vtk.vtkCellArray()
-        for tri in faces:
-            polys.InsertNextCell(3)
-            polys.InsertCellPoint(int(tri[0]))
-            polys.InsertCellPoint(int(tri[1]))
-            polys.InsertCellPoint(int(tri[2]))
-        poly.SetPolys(polys)
+        poly.SetPolys(_vtk_cell_array(3, faces, len(points)))
     else:
-        verts = vtk.vtkCellArray()
-        for i in range(len(points)):
-            verts.InsertNextCell(1)
-            verts.InsertCellPoint(i)
-        poly.SetVerts(verts)
+        poly.SetVerts(_vtk_cell_array(1, None, len(points)))
     if point_data:
         for name, arr in point_data.items():
             a = np.asarray(arr)
-            if a.ndim == 1:
-                va = vtk.vtkDoubleArray()
-                va.SetName(name)
-                va.SetNumberOfComponents(1)
-                va.SetNumberOfTuples(len(a))
-                for i, v in enumerate(a):
-                    va.SetValue(i, float(v))
-            else:
-                va = vtk.vtkDoubleArray()
-                va.SetName(name)
-                va.SetNumberOfComponents(a.shape[1])
-                va.SetNumberOfTuples(len(a))
-                for i, v in enumerate(a):
-                    va.SetTuple(i, [float(x) for x in v])
+            components = 1 if a.ndim == 1 else int(a.shape[1])
+            va = numpy_to_vtk(np.ascontiguousarray(a, dtype=float).reshape(-1),
+                              deep=True, array_type=vtk.VTK_DOUBLE)
+            va.SetName(name)
+            va.SetNumberOfComponents(components)
             poly.GetPointData().AddArray(va)
         # set first scalar/vector as active if sensible
         names = list(point_data.keys())
@@ -305,98 +347,124 @@ def write_combined_pvd(parts: list[tuple[str, Path]], path: Path) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def export_crm_particles(crm_dir: Path, out_dir: Path, stride: int = 1):
+def _read_particle_frame(args):
+    idx, path_str, time_s, radius, out_dir_str = args
+    path = Path(path_str)
+    out_path = Path(out_dir_str) / f"frame_{idx:06d}.vtp"
+    if out_path.exists():
+        return (time_s, str(out_path), 0)
+    cols = read_numeric_csv(path, ("X", "Y", "Z", "inside_drum", "excavated"))
+    n = len(cols["X"])
+    if not n:
+        return None
+    pts = np.column_stack([cols["X"], cols["Y"], cols["Z"]])
+    point_data = {
+        "inside_drum": cols["inside_drum"],
+        "excavated": cols["excavated"],
+    }
+    if radius is not None and radius > 0.0:
+        point_data["radius_m"] = np.full(n, float(radius), dtype=float)
+        point_data["diameter_m"] = np.full(n, float(2.0 * radius), dtype=float)
+    write_polydata_vtp(pts, None, point_data, out_path)
+    return (time_s, str(out_path), 1)
+
+
+def export_crm_particles(crm_dir: Path, out_dir: Path, stride: int = 1,
+                         particle_radius_m: float | None = None,
+                         workers: int = 1):
     summary_path = crm_dir / "summary.csv"
     if not summary_path.is_file():
         print(f"  skip particles: missing {summary_path}")
         return None
-    summary = read_csv_rows(summary_path)
+    summary = read_numeric_csv(summary_path, ("time_s",))
     part_files = sorted(crm_dir.glob("particles_*.csv"))
     if not part_files:
         print(f"  skip particles: no particles_*.csv in {crm_dir}")
         return None
-    # map frame index -> file
     by_idx = {}
-    for p in part_files:
+    for path in part_files:
         try:
-            idx = int(p.stem.split('_')[-1])
+            idx = int(path.stem.split('_')[-1])
         except Exception:
             continue
-        by_idx[idx] = p
-    entries = []
+        by_idx[idx] = path
     frames_dir = out_dir / "crm_particles"
-    count = 0
-    for idx, row in enumerate(summary):
-        if idx % stride != 0 and idx != len(summary) - 1:
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    jobs = []
+    for idx in range(len(summary["time_s"])):
+        if idx % stride != 0 and idx != len(summary["time_s"]) - 1:
             continue
-        pf = by_idx.get(idx)
-        if pf is None:
+        path = by_idx.get(idx)
+        if path is None:
             continue
-        try:
-            t = float(row.get("time_s", "0") or 0.0)
-        except Exception:
-            t = 0.0
-        # read particles
-        prows = read_csv_rows(pf)
-        if not prows:
-            continue
-        pts = np.empty((len(prows), 3), dtype=float)
-        inside = np.zeros(len(prows), dtype=float)
-        excav = np.zeros(len(prows), dtype=float)
-        for i, r in enumerate(prows):
-            pts[i, 0] = float(r.get("X", 0) or 0)
-            pts[i, 1] = float(r.get("Y", 0) or 0)
-            pts[i, 2] = float(r.get("Z", 0) or 0)
-            inside[i] = float(r.get("inside_drum", 0) or 0)
-            excav[i] = float(r.get("excavated", 0) or 0)
-        out_path = frames_dir / f"frame_{idx:06d}.vtp"
-        write_polydata_vtp(pts, None, {"inside_drum": inside, "excavated": excav}, out_path)
-        entries.append((t, str(out_path)))
-        count += 1
+        jobs.append((idx, str(path), float(summary["time_s"][idx]),
+                     particle_radius_m, str(frames_dir)))
+    entries = []
+    if workers > 1 and len(jobs) > 1:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for result in pool.map(_read_particle_frame, jobs, chunksize=2):
+                if result:
+                    entries.append(result[:2])
+    else:
+        for job in jobs:
+            result = _read_particle_frame(job)
+            if result:
+                entries.append(result[:2])
     pvd = out_dir / "crm_particles.pvd"
     if entries:
         write_pvd(entries, pvd)
-        print(f"  particles: {count} frames -> {pvd}")
+        print(f"  particles: {len(entries)} frames -> {pvd}")
         return pvd
     print("  particles: no frames exported")
     return None
 
 
+def _write_excavator_frame(args):
+    idx, xyz, faces, time_s, out_dir_str = args
+    out_path = Path(out_dir_str) / f"frame_{idx:06d}.vtp"
+    if out_path.exists():
+        return (time_s, str(out_path), 0)
+    write_polydata_vtp(xyz, faces, None, out_path)
+    return (time_s, str(out_path), 1)
+
+
 def export_excavator(crm_dir: Path, surface_path: Path, out_dir: Path,
-                     spin_axis: str = "X", stride: int = 1):
+                     spin_axis: str = "X", stride: int = 1,
+                     workers: int = 1):
     summary_path = crm_dir / "summary.csv"
     if not summary_path.is_file() or surface_path is None or not surface_path.is_file():
         print("  skip excavator: missing summary or surface mesh")
         return None
-    summary = read_csv_rows(summary_path)
+    cols = read_numeric_csv(summary_path, ("time_s", "drum_z_m", "spin_deg"))
     base_pts, faces = surface_points_faces(surface_path)
     q0 = initial_quaternion_xyzw(spin_axis)
     R0 = quat_xyzw_to_matrix(*q0)
-    # precompute local-after-initial? world = Rspin * R0 * v_local + (0,0,z)
-    v0 = (R0 @ base_pts.T).T  # (n,3)
-    entries = []
+    v0 = np.ascontiguousarray((R0 @ base_pts.T).T)
     frames_dir = out_dir / "excavator"
-    count = 0
-    for idx, row in enumerate(summary):
-        if idx % stride != 0 and idx != len(summary) - 1:
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    jobs = []
+    for idx in range(len(cols["time_s"])):
+        if idx % stride != 0 and idx != len(cols["time_s"]) - 1:
             continue
-        try:
-            t = float(row.get("time_s", "0") or 0.0)
-            z = float(row.get("drum_z_m", "0") or 0.0)
-            spin_deg = float(row.get("spin_deg", "0") or 0.0)
-        except Exception:
-            continue
-        Rspin = axis_angle_matrix(spin_axis, spin_deg)
-        pts = (Rspin @ v0.T).T
-        pts[:, 2] += z
-        out_path = frames_dir / f"frame_{idx:06d}.vtp"
-        write_polydata_vtp(pts, faces, None, out_path)
-        entries.append((t, str(out_path)))
-        count += 1
+        Rspin = axis_angle_matrix(spin_axis, float(cols["spin_deg"][idx]))
+        pts = np.ascontiguousarray((Rspin @ v0.T).T)
+        pts[:, 2] += float(cols["drum_z_m"][idx])
+        jobs.append((idx, pts, faces, float(cols["time_s"][idx]), str(frames_dir)))
+    entries = []
+    if workers > 1 and len(jobs) > 1:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for result in pool.map(_write_excavator_frame, jobs, chunksize=2):
+                if result:
+                    entries.append(result[:2])
+    else:
+        for job in jobs:
+            result = _write_excavator_frame(job)
+            if result:
+                entries.append(result[:2])
     pvd = out_dir / "excavator.pvd"
     if entries:
         write_pvd(entries, pvd)
-        print(f"  excavator: {count} frames -> {pvd} (surface {surface_path.name})")
+        print(f"  excavator: {len(entries)} frames -> {pvd} (surface {surface_path.name})")
         return pvd
     print("  excavator: no frames exported")
     return None
@@ -412,6 +480,8 @@ def main() -> int:
                          "Use >1 to reduce size for long/high-fps runs.")
     ap.add_argument("--particles-only", action="store_true", help="export only particles")
     ap.add_argument("--excavator-only", action="store_true", help="export only excavator surface")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="parallel worker processes for frame export (default: 1; try 4-8)")
     args = ap.parse_args()
 
     study_dir = args.study_dir.expanduser().resolve()
@@ -421,6 +491,7 @@ def main() -> int:
                else (study_dir / "paraview"))
     out_dir.mkdir(parents=True, exist_ok=True)
     stride = max(1, int(args.stride))
+    workers = max(1, int(args.workers))
 
     info = discover(study_dir)
     crm_dir = info["crm_dir"]
@@ -440,9 +511,12 @@ def main() -> int:
                 particle_spacing = float(run_cfg.get("spacing"))
         except Exception:
             pass
+    particle_radius_m = (particle_spacing / 2.0) if particle_spacing is not None else None
     print(f"Exporting study: {study_dir}")
     print(f"  out: {out_dir}")
-    print(f"  spin axis: {spin_axis}  stride: {stride}")
+    print(f"  spin axis: {spin_axis}  stride: {stride}  workers: {workers}")
+    if particle_radius_m is not None:
+        print(f"  particle radius: {particle_radius_m:g} m (spacing {particle_spacing:g} m)")
     if surface:
         print(f"  surface: {surface}")
     else:
@@ -450,12 +524,14 @@ def main() -> int:
 
     parts = []
     if not args.excavator_only:
-        p = export_crm_particles(crm_dir, out_dir, stride=stride)
+        p = export_crm_particles(crm_dir, out_dir, stride=stride,
+                                 particle_radius_m=particle_radius_m, workers=workers)
         if p:
             parts.append(("crm_particles", p))
     if not args.particles_only:
         if surface:
-            p = export_excavator(crm_dir, surface, out_dir, spin_axis=spin_axis, stride=stride)
+            p = export_excavator(crm_dir, surface, out_dir, spin_axis=spin_axis,
+                                 stride=stride, workers=workers)
             if p:
                 parts.append(("excavator", p))
         else:
@@ -478,9 +554,16 @@ def main() -> int:
         "out_dir": str(out_dir),
         "spin_axis": spin_axis,
         "stride": stride,
+        "workers": workers,
         "surface": str(surface) if surface else None,
         "particle_spacing_m": particle_spacing,
         "particle_diameter_m": (particle_spacing if particle_spacing is not None else None),
+        "particle_radius_m": particle_radius_m,
+        "series": {
+            "crm_particles": "crm_particles.pvd",
+            "excavator": "excavator.pvd",
+            "fea": str(fea_pvd.resolve()) if fea_pvd.is_file() else None,
+        },
         "has_particles": (out_dir / "crm_particles.pvd").is_file(),
         "has_excavator": (out_dir / "excavator.pvd").is_file(),
         "has_fea_vtk": fea_pvd.is_file(),
@@ -489,7 +572,8 @@ def main() -> int:
     print(f"  manifest: {out_dir / 'export_manifest.json'}")
     print("Done. Open in ParaView, e.g.:")
     print(f"  paraview {out_dir / 'combined.pvd'}")
-    print(f"  # or use the helper script: paraview --script=view_study_paraview.py -- {out_dir}")
+    print("  # recommended (separate sources, spheres, and FEA stress by default):")
+    print(f"  pvpython {ROOT / 'view_study_paraview.py'} {out_dir}")
     return 0
 
 

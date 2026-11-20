@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
 """Copy directory trees onto filesystems with unreliable symlink support.
 
 The project directory is on an NTFS mount.  ntfs3 can create symlinks, but

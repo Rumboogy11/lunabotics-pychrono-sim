@@ -1,11 +1,8 @@
+#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
 """Independent soil estimates for the Chrono::CRM excavator model.
 
-These values are deliberately *not* derived from ``lunar_excavator_config.py``.
-The old MercuryDPM spring/dashpot parameters were rough numerical settings, not
-measurements, and should not constrain a continuum soil model.
-
-The defaults below are best-estimate starting values for a loose lunar-regolith
-simulant at the scale of this 122 mm drum.  They are meant to be calibrated
+These values are best-estimate starting points for a loose lunar-regolith
+simulant at the scale of this 122 mm drum. They are meant to be calibrated
 against bulk tests (angle of repose, direct shear, cone penetration, and a small
 bucket draw test), then held fixed while excavator geometries are compared.
 
@@ -68,7 +65,7 @@ class CrmSoilParams:
     def summary(self) -> str:
         return "\n".join(
             [
-                "CRM soil (independent best estimates, not MercuryDPM):",
+                "CRM soil (independent best-estimate parameters):",
                 f"  bulk density      {self.density:,.1f} kg/m^3",
                 f"  Young's modulus   {self.youngs_modulus:.3g} Pa",
                 f"  Poisson ratio     {self.poisson_ratio:.3f}",

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
 """Lunar bucket-drum excavator -- primary Chrono::CRM design driver.
 
 This is the geometry-optimization model for the project.  It treats lunar
@@ -7,9 +7,9 @@ grains.  That is deliberate: the design target is bulk fill ratio and soil flow
 around alternative drum/spike geometries, while real regolith grains are tens
 to hundreds of micrometres across.
 
-The soil block in ``crm_soil.py`` is independent of the old MercuryDPM material
-parameters.  Geometry and kinematics reuse the shared excavator dimensions, but
-no old stiffness/dashpot/friction/cohesion value is used here.
+The soil block in ``crm_soil.py`` defines independent bulk soil parameters.
+Geometry and kinematics reuse the shared excavator dimensions from
+``lunar_excavator_config``.
 
 Fill-ratio definition
 ---------------------
@@ -67,9 +67,11 @@ sys.path.insert(0, str(ROOT))
 from crm_soil import DEFAULT_SOIL, CrmSoilParams  # noqa: E402
 from crm_soil import _enum as fsi_enum  # noqa: E402
 from lunar_excavator_config import (  # noqa: E402
+    BED_PADDING_RADIUS_FRACTION,
     DEFAULT as MOTION_DEFAULT,
     OBJ_COARSE,
     OBJ_MEDIUM,
+    bed_half_extents,
 )
 
 
@@ -77,8 +79,8 @@ from lunar_excavator_config import (  # noqa: E402
 class CrmRunParams:
     """Numerics, geometry hooks, and excavation metrics for a CRM run."""
 
-    spacing: float = 0.004               # SPH particle spacing [m] (smaller = finer resolution/more particles)
-    dt: float = 8.0e-5                   # CRM/FSI step [s] at the default 4 mm spacing
+    spacing: float = 0.002               # SPH particle spacing [m] (smaller = finer resolution/more particles)
+    dt: float = 4.0e-5                   # CRM/FSI step [s] at the default 2 mm spacing
     duration: float = MOTION_DEFAULT.t_max
     fps: float = 20.0                    # metric/particle output cadence
     settle_time: float = MOTION_DEFAULT.settle_time
@@ -86,14 +88,15 @@ class CrmRunParams:
     omega: float = MOTION_DEFAULT.drum_omega
     reverse_spin: bool = False
     bed_height: float = MOTION_DEFAULT.bed_height
+    bed_padding: float = BED_PADDING_RADIUS_FRACTION  # soil padding per side, fraction of drum radius
     spin_axis: str = MOTION_DEFAULT.drum_spin_axis
     drum_radius: float = MOTION_DEFAULT.drum_radius        # outer/crest radius [m]
     drum_half_length: float = MOTION_DEFAULT.drum_half_length
     inner_radius: float = 0.055          # nominal cavity radius [m]
     capacity_volume: float | None = None  # override for CAD free volume [m^3]
-    active_box_x: float = 0.244
-    active_box_y: float = 0.244
-    active_box_z: float = 0.5
+    active_box_x: float = 0.631333  # padded bed + 2 drum diameters (reference drum)
+    active_box_y: float = 0.687407
+    active_box_z: float = 0.866370  # bed + initial centre height + 2 diameters
     max_velocity: float = 1.0            # SPH max velocity for EOS stabilization
     d0_multiplier: float = 1.0           # h = d0_multiplier * spacing
     free_surface_threshold: float = 2.4  # divergence threshold for free surface
@@ -111,6 +114,8 @@ class CrmRunParams:
             raise ValueError("spin axis must be X, Y, or Z")
         if self.proximity_steps < 1:
             raise ValueError("proximity_steps must be at least 1")
+        if self.bed_padding < 0.0:
+            raise ValueError("bed_padding must be non-negative")
         if self.inner_radius >= self.drum_radius:
             raise ValueError("inner radius must be smaller than the outer drum radius")
         if min(self.active_box_x, self.active_box_y, self.active_box_z) <= 0.0:
@@ -167,14 +172,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="simulated seconds (default: 60)")
     p.add_argument("--dt", type=float, default=None,
                    help="CRM/FSI step size in seconds (default: spacing-dependent, "
-                        "8e-5 at 4 mm and 2.4e-4 at 12 mm)")
+                        "4e-5 at 2 mm and 2.4e-4 at 12 mm)")
     p.add_argument("--allow-unsafe-dt", action="store_true",
                    help="allow an explicitly requested --dt above the stable SPH bound "
                         "(normally rejected to prevent GPU boundary blowups)")
     p.add_argument("--fps", type=float, default=None,
                    help="metric output cadence in Hz (default: 20)")
     p.add_argument("--spacing", type=float, default=None,
-                   help="SPH particle spacing in metres (default: 0.004; smaller = finer particles/more resolution)")
+                   help="SPH particle spacing in metres (default: 0.002; smaller = finer particles/more resolution)")
     p.add_argument("--settle-time", type=float, default=None,
                    help="seconds before spin/descent begins")
     p.add_argument("--descent-speed", type=float, default=None,
@@ -185,6 +190,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="reverse the drum spin direction (flip rotation sign)")
     p.add_argument("--bed-height", type=float, default=None,
                    help="initial soil bed height in m (default: 0.06)")
+    p.add_argument("--bed-padding", type=float, default=None,
+                   help="soil padding around the drum per side, as a fraction of drum radius "
+                        f"(default: {BED_PADDING_RADIUS_FRACTION:g})")
     p.add_argument("--spin-axis", choices=("X", "Y", "Z"), default=None,
                    help="global spin axis (default: X)")
     p.add_argument("--drum-radius", type=float, default=None,
@@ -201,7 +209,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--capacity-volume", type=float, default=None,
                    help="override nominal cavity volume in m^3 (for CAD-calibrated designs)")
     p.add_argument("--active-box", type=str, default=None,
-                   help="active SPH domain size X,Y,Z in metres (default: 0.244,0.244,0.5)")
+                   help="active SPH domain full size X,Y,Z in metres (default: padded bed + 2 drum "
+                        "diameters laterally; bed + initial height + 2 diameters + padding vertically)")
     p.add_argument("--max-velocity", type=float, default=None,
                    help="SPH stabilizing max velocity in m/s (default: 1.0)")
     p.add_argument("--d0-multiplier", type=float, default=None,
@@ -280,6 +289,35 @@ def max_stable_sph_dt(spacing: float, d0_multiplier: float = 1.0) -> float:
     return 1.25e-4 * (spacing / 0.004) * d0_multiplier
 
 
+def fit_active_box(run: CrmRunParams) -> tuple[float, float, float]:
+    """Size the SPH active box with generous clearance around the excavator.
+
+    Chrono deactivates particles (and zeros their velocity) outside a box
+    centred on the FSI body.  The box is a full-size extent (Chrono halves it
+    internally), so each returned component is twice the half-distance from the
+    drum centre.  Flung particles can clear the reflective BCE walls, so the
+    lateral half-extent must include the padded bed *plus* two excavator
+    diameters, not just a few particle spacings.  Likewise the vertical
+    half-height covers the soil bed, the initial excavator centre height, and
+    two more diameters above the crest.  This keeps the deactivation ceiling
+    far above any plausible ejected particle trajectory.
+    """
+    half_x, half_y = bed_half_extents(
+        run.drum_radius, run.drum_half_length, run.spin_axis, run.bed_padding
+    )
+    # A few particle spacings, with a floor of 10% of the drum radius.
+    padding = max(4.0 * run.spacing, 0.1 * run.drum_radius)
+    excavator_diameter = 2.0 * run.drum_radius
+    clearance = 2.0 * excavator_diameter + padding
+    initial_height = run.bed_height + MOTION_DEFAULT.drum_rest_clearance + run.drum_radius
+    z_half = run.bed_height + initial_height + clearance
+    return (
+        2.0 * (half_x + clearance),
+        2.0 * (half_y + clearance),
+        2.0 * z_half,
+    )
+
+
 def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -> CrmRunParams:
     overrides: dict[str, object] = {}
     mapping = {
@@ -292,6 +330,7 @@ def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -
         "omega": args.omega,
         "reverse_spin": getattr(args, "reverse_spin", None),
         "bed_height": args.bed_height,
+        "bed_padding": getattr(args, "bed_padding", None),
         "spin_axis": args.spin_axis,
         "drum_radius": getattr(args, "drum_radius", None),
         "drum_half_length": getattr(args, "drum_half_length", None),
@@ -334,7 +373,11 @@ def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -
     else:
         overrides["dt"] = suggested_sph_dt(spacing, d0_multiplier)
 
-    return CrmRunParams(**overrides)  # type: ignore[arg-type]
+    run = CrmRunParams(**overrides)  # type: ignore[arg-type]
+    if args.active_box is None:
+        box = fit_active_box(run)
+        run = replace(run, active_box_x=box[0], active_box_y=box[1], active_box_z=box[2])
+    return run
 
 
 def resolve_mesh(args: argparse.Namespace) -> Path:
@@ -629,6 +672,9 @@ def write_config(path: Path, soil: CrmSoilParams, run: CrmRunParams,
             "drum_radius_m": motion.drum_radius,
             "drum_half_length_m": motion.drum_half_length,
             "bed_height_m": motion.bed_height,
+            "bed_padding_radius_fraction": motion.bed_padding,
+            "bed_x_half_m": motion.bed_x_half,
+            "bed_y_half_m": motion.bed_y_half,
             "target_bottom_clearance_m": motion.target_bottom_clearance,
             "spin_axis_global": motion.drum_spin_axis,
             "capacity_volume_m3": capacity_volume,
@@ -659,6 +705,7 @@ def main() -> int:
         lower_speed=run.descent_speed,
         drum_omega=run.omega,
         bed_height=run.bed_height,
+        bed_padding=run.bed_padding,
         drum_spin_axis=run.spin_axis,
         drum_radius=run.drum_radius,
         drum_half_length=run.drum_half_length,
@@ -684,8 +731,11 @@ def main() -> int:
                 f"spin={motion.drum_spin_axis.upper()}, omega={run.omega:g} rad/s",
                 f"descent: {run.descent_speed:g} m/s, z0={motion.drum_center_z0:.4f} m -> "
                 f"{motion.z_target:.4f} m, bed surface z={surface_z:.4f} m",
+                f"soil bed: {2.0 * motion.bed_x_half:.4g} x {2.0 * motion.bed_y_half:.4g} m "
+                f"(padding {run.bed_padding:g} R), height={motion.bed_height:.4g} m",
                 f"active SPH box: {run.active_box}, capacity={capacity_volume:.6g} m^3 "
-                f"({capacity_volume * soil.density:.4f} kg)",
+                f"({capacity_volume * soil.density:.4f} kg) "
+                "[deactivation boundary outside the reflective bed walls]",
             ]
         ),
         flush=True,

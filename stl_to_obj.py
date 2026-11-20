@@ -1,15 +1,14 @@
-#!/usr/bin/env python3
-"""Convert the excavator STL files to Wavefront OBJ for Chrono's mesh loaders.
+#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
+"""Convert STL meshes to Wavefront OBJ.
 
-DEM-Engine loads meshes through ``AddWavefrontMeshObject`` (OBJ only), and
-PyChrono's ``ChTriangleMeshConnected`` accepts OBJ on all supported versions.
-The STL files are already in metres and centred on the drum axis, so this is a
-pure format conversion -- no scaling or reorientation is applied here.
+Chrono mesh loaders commonly consume OBJ files. The shipped excavator STL files
+are already in metres and centred on the drum axis, so this is a pure format
+conversion (no scaling or reorientation).
 
 Usage
 -----
-    python3 stl_to_obj.py                 # convert medium + coarse (defaults)
-    python3 stl_to_obj.py path/to/a.stl   # convert one file
+    python3 stl_to_obj.py                 # convert default medium + coarse meshes
+    python3 stl_to_obj.py path/to/a.stl   # convert one or more files
 """
 
 from __future__ import annotations
@@ -78,8 +77,11 @@ def main() -> None:
     if len(sys.argv) > 1:
         pairs = [(Path(a), None) for a in sys.argv[1:]]
     for stl, obj in pairs:
-        out, n = convert(stl, obj)
-        print(f"{stl.name}: {n} triangles -> {out}")
+        if not Path(stl).is_file():
+            print(f"skip: {stl} (not found)")
+            continue
+        out, n = convert(Path(stl), obj)
+        print(f"{Path(stl).name}: {n} triangles -> {out}")
 
 
 if __name__ == "__main__":

@@ -1,27 +1,21 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
 """ParaView visualization script for a CRM/FEA study exported by export_study_vtk.py.
 
-This is intended to be run inside ParaView's Python environment so it can build
-a ready-to-view scene:
+Recommended full ParaView GUI (pass the export dir via environment variable):
+    QT_QPA_PLATFORM=xcb PYCHRONO_EXPORT_DIR=/path/to/study/paraview paraview --script=/path/to/view_study_paraview.py
 
-    # from the study export directory produced by export_study_vtk.py
-    paraview --script=/path/to/view_study_paraview.py -- /path/to/study/paraview
-
-    # or with pvpython (offscreen/state setup depends on your ParaView build)
+pvpython render window (stays open until the render window is closed):
     pvpython /path/to/view_study_paraview.py /path/to/study/paraview
 
-It loads, when available:
-  - crm_particles.pvd : particle point cloud over time
-        colored by 'excavated' (or 'inside_drum'), rendered as 3D spheres
-        sized from the study's SPH spacing when available
-  - excavator.pvd     : rigid excavator/drum surface over time
-  - fea/vtk/fea.pvd   : one-way FEA unstructured grid over time (if exported)
-        colored by cell data 'von_mises_MPa'/'von_mises_pa' (stress gradient)
-        and deformable via point data 'Displacement' (Warp By Vector).
-        Increase --warp-scale (e.g. 100, 1000) to exaggerate elastic deformation.
+It loads, when available (as separate pipeline sources so each can have its own
+render settings):
+  - crm_particles.pvd : particle point cloud over time, rendered as 3D spheres
+        sized from the study's SPH spacing/radius and colored by state.
+  - excavator.pvd     : rigid excavator/drum surface over time.
+  - fea.pvd/fea/vtk/fea.pvd : one-way FEA mesh over time, colored by von Mises
+        stress (von_mises_MPa) and warped by Displacement when available.
 
-All sources share the study time steps, so they animate together in one view.
-
+All sources share study time steps where possible so they can animate together.
 If no argument is given, the script tries ./paraview in the current directory.
 """
 
@@ -35,29 +29,48 @@ from pathlib import Path
 
 
 def _parse_args(argv: list[str]):
-    # ParaView passes its own args; user args typically come after '--'
+    # Prefer explicit environment variables (works with `paraview --script=...`).
+    env_dir = os.environ.get("PYCHRONO_EXPORT_DIR") or os.environ.get("PYCHRONO_STUDY_DIR")
+    # ParaView often passes its own args; user args may come after '--'.
     if "--" in argv:
-        argv = argv[argv.index("--") + 1:]
+        user_argv = argv[argv.index("--") + 1:]
     else:
-        # try to drop program name and keep trailing path-like args
-        argv = [a for a in argv[1:] if not a.startswith("-") and ("/" in a or a.endswith("paraview") or Path(a).exists())]
-    ap = argparse.ArgumentParser(add_help=True)
-    ap.add_argument("export_dir", nargs="?", default=None,
-                    help="directory containing combined.pvd / *_pvd files (default: ./paraview)")
-    ap.add_argument("--warp-scale", type=float, default=1.0,
-                    help="scale factor for FEA Warp By Vector (displacement). "
-                         "Increase (e.g. 100, 1000) to exaggerate elastic deformation.")
-    ap.add_argument("--color-by", choices=("excavated", "inside_drum"), default="excavated",
-                    help="particle coloring array")
-    ap.add_argument("--particle-radius", type=float, default=None,
-                    help="particle sphere radius in metres (default: half of exported SPH spacing)")
-    ap.add_argument("--particle-style", choices=("spheres", "points"), default="spheres",
-                    help="how to render CRM particles (default: spheres)")
+        user_argv = argv[1:]
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("export_dir", nargs="?", default=None)
+    ap.add_argument("--export-dir", dest="export_dir_opt", default=None)
+    ap.add_argument("--warp-scale", type=float, default=1.0)
+    ap.add_argument("--color-by", choices=("excavated", "inside_drum"), default="excavated")
+    ap.add_argument("--particle-radius", type=float, default=None)
+    ap.add_argument("--particle-style", choices=("spheres", "points"), default="spheres")
     ap.add_argument("--no-particles", action="store_true")
     ap.add_argument("--no-excavator", action="store_true")
     ap.add_argument("--no-fea", action="store_true")
-    # be tolerant of unknown ParaView args
-    args, _unknown = ap.parse_known_args(argv)
+    ap.add_argument("--no-interact", action="store_true",
+                    help="do not keep the pvpython render window open (batch setups only)")
+    args, unknown = ap.parse_known_args(user_argv)
+    # In ParaView GUI script mode the environment variable is authoritative;
+    # ParaView's own argv can otherwise be mistaken for a positional directory.
+    in_paraview_gui = ("--script=" in " ".join(argv)
+                       or "paraview" in Path(sys.executable).name.lower()
+                       or "vtkpython" in Path(sys.executable).name.lower())
+    if env_dir and in_paraview_gui:
+        export_dir = env_dir
+    else:
+        export_dir = args.export_dir or args.export_dir_opt or env_dir
+    if export_dir is None:
+        # Heuristic: pick the last path-like existing argument (useful if ParaView
+        # appended it in a nonstandard way, or user passed a study dir).
+        candidates = []
+        for token in reversed(unknown + user_argv):
+            if token.startswith("-"):
+                continue
+            p = Path(token).expanduser()
+            if p.exists() or p.name in {"paraview", "combined.pvd"} or str(token).endswith("paraview"):
+                candidates.append(token)
+        if candidates:
+            export_dir = candidates[0]
+    args.export_dir = export_dir
     return args
 
 
@@ -66,17 +79,37 @@ def find_pvd(export_dir: Path, name: str) -> Path | None:
     return p if p.is_file() else None
 
 
+def _resolve_export_dir(path_like: str | None) -> Path | None:
+    if not path_like:
+        return None
+    p = Path(path_like).expanduser()
+    try:
+        p = p.resolve()
+    except Exception:
+        p = Path(path_like).expanduser()
+    if p.is_file() and p.name.endswith(".pvd"):
+        p = p.parent
+    if p.is_dir():
+        if (p / "combined.pvd").is_file() or (p / "crm_particles.pvd").is_file() or (p / "excavator.pvd").is_file():
+            return p
+        if (p / "paraview").is_dir():
+            return (p / "paraview").resolve()
+        return p
+    if (p.parent / "combined.pvd").is_file():
+        return p.parent
+    return p if p.exists() else None
+
+
 def main():
     args = _parse_args(sys.argv)
-    export_dir = Path(args.export_dir or "paraview").expanduser().resolve()
-    if not export_dir.is_dir():
-        # maybe user passed study dir
-        cand = export_dir / "paraview"
-        if cand.is_dir():
-            export_dir = cand
-    if not export_dir.is_dir():
-        print(f"[view_study_paraview] export directory not found: {export_dir}")
-        print("  Run export_study_vtk.py first, then pass the export/paraview directory.")
+    export_dir = _resolve_export_dir(args.export_dir or "paraview")
+    if export_dir is None or not export_dir.is_dir():
+        tried = args.export_dir or "paraview"
+        print(f"[view_study_paraview] export directory not found: {tried}")
+        print("Usage:")
+        print("  pvpython view_study_paraview.py /path/to/study/paraview")
+        print("  QT_QPA_PLATFORM=xcb PYCHRONO_EXPORT_DIR=/path/to/study/paraview paraview --script=view_study_paraview.py")
+        print("Run export_study_vtk.py first if the study has no paraview/ export yet.")
         return 1
 
     try:
@@ -93,7 +126,8 @@ def main():
             has_point_gaussian = False
     except Exception as exc:
         print(f"[view_study_paraview] ParaView Python modules not available: {exc}")
-        print("  Run this script with: paraview --script=view_study_paraview.py -- <export_dir>")
+        print("  Run with: pvpython view_study_paraview.py <export_dir>")
+        print("  Or in ParaView GUI: QT_QPA_PLATFORM=xcb PYCHRONO_EXPORT_DIR=<export_dir> paraview --script=view_study_paraview.py")
         return 1
 
     manifest = {}
@@ -133,12 +167,18 @@ def main():
         except Exception:
             pass
 
-        # Particle radius: prefer explicit override, else half SPH spacing from manifest.
+        # Particle radius: prefer explicit override, else manifest radius/spacing.
         p_diam = manifest.get("particle_diameter_m") or manifest.get("particle_spacing_m")
+        p_radius = manifest.get("particle_radius_m")
         try:
-            default_radius = float(p_diam) / 2.0 if p_diam is not None else 0.004
+            if p_radius is not None:
+                default_radius = float(p_radius)
+            elif p_diam is not None:
+                default_radius = float(p_diam) / 2.0
+            else:
+                default_radius = 0.001  # half the 2 mm default SPH spacing
         except Exception:
-            default_radius = 0.004
+            default_radius = 0.001
         particle_radius = float(args.particle_radius) if args.particle_radius is not None else default_radius
         if particle_radius <= 0.0:
             particle_radius = default_radius
@@ -150,12 +190,17 @@ def main():
                 sphere.Radius = particle_radius
                 glyph = Glyph(Input=particles, GlyphType=sphere)
                 glyph.GlyphMode = 'All Points'
+                for attr, value in (('ScaleMode', 'data_scaling_off'), ('ScaleFactor', 1.0)):
+                    try:
+                        setattr(glyph, attr, value)
+                    except Exception:
+                        pass
                 try:
                     glyph.ScaleArray = ['POINTS', 'No scale array']
                 except Exception:
                     pass
                 try:
-                    glyph.ScaleFactor = 1.0
+                    glyph.Orient = 0
                 except Exception:
                     pass
                 try:
@@ -163,7 +208,7 @@ def main():
                 except Exception:
                     pass
                 particle_display_src = glyph
-                print(f"  particles: rendered as spheres (radius={particle_radius:g} m)")
+                print(f"  particles: rendered as 3D spheres (radius={particle_radius:g} m)")
             except Exception as e:
                 print(f"  particles: sphere glyph unavailable ({e}); falling back to point display")
                 particle_display_src = particles
@@ -203,8 +248,18 @@ def main():
                 lut.ApplyPreset('Cool to Warm', True)
             except Exception:
                 pass
-            disp.RescaleTransferFunctionToDataRange(True, False)
-            disp.SetScalarBarVisibility(view, True)
+            try:
+                disp.RescaleTransferFunctionToDataRange(True, False)
+            except Exception:
+                pass
+            try:
+                disp.RescaleTransferFunctionToDataRange(False, True)
+            except Exception:
+                pass
+            try:
+                disp.SetScalarBarVisibility(view, True)
+            except Exception:
+                pass
         except Exception as e:
             print(f"  (particles color setup note: {e})")
         try:
@@ -239,18 +294,33 @@ def main():
 
     # --- FEA (stress + deformation) ---
     fea_pvd = None
-    # common locations
-    for cand in [export_dir / "fea.pvd", export_dir / "fea" / "fea.pvd",
-                 export_dir.parent / "fea" / "vtk" / "fea.pvd"]:
-        if cand.is_file():
-            fea_pvd = cand
+    manifest_fea = manifest.get("series", {}).get("fea") if isinstance(manifest.get("series"), dict) else None
+    candidates = []
+    if manifest_fea:
+        candidates.append(Path(str(manifest_fea)))
+    candidates.extend([
+        export_dir / "fea.pvd",
+        export_dir / "fea" / "fea.pvd",
+        export_dir.parent / "fea" / "vtk" / "fea.pvd",
+        export_dir.parent / "vtk" / "fea.pvd",
+    ])
+    for cand in candidates:
+        try:
+            c = cand if cand.is_absolute() else (export_dir / cand)
+            c = c.resolve()
+        except Exception:
+            c = cand
+        if c.is_file():
+            fea_pvd = c
             break
-    # also allow manifest / study-relative hints
     if fea_pvd is None:
-        # search
         for cand in export_dir.rglob("fea.pvd"):
             fea_pvd = cand
             break
+        if fea_pvd is None and export_dir.parent.is_dir():
+            for cand in export_dir.parent.rglob("fea.pvd"):
+                fea_pvd = cand
+                break
     if fea_pvd and not args.no_fea:
         print(f"  loading FEA: {fea_pvd}")
         fea = PVDReader(FileName=str(fea_pvd))
@@ -263,7 +333,11 @@ def main():
         disp_source = fea
         try:
             # Try to warp by displacement for visible deformation
-            warp = WarpByVector(Input=fea, Vectors=['POINTS', 'Displacement'])
+            warp = WarpByVector(Input=fea)
+            try:
+                warp.Vectors = ['POINTS', 'Displacement']
+            except Exception:
+                pass
             warp.ScaleFactor = float(args.warp_scale)
             try:
                 UpdatePipeline(proxy=warp)
@@ -280,6 +354,8 @@ def main():
         try:
             disp.Representation = 'Surface With Edges'
             disp.Opacity = 1.0
+            # Avoid a flat solid that hides stress coloring intent.
+            disp.ColorArrayName = None
         except Exception:
             pass
         # color by von Mises stress if present (avoid default vtkBlockColors)
@@ -297,27 +373,29 @@ def main():
                 try:
                     lut.ApplyPreset('Cool to Warm', True)
                 except Exception:
-                    pass
-                try:
-                    disp.RescaleTransferFunctionToDataRange(True, False)
-                except Exception:
                     try:
-                        disp.RescaleTransferFunctionToDataRange(False, True)
+                        lut.ApplyPreset('Rainbow Uniform', True)
                     except Exception:
                         pass
+                for use_timestep in (True, False):
+                    try:
+                        disp.RescaleTransferFunctionToDataRange(False, use_timestep)
+                        break
+                    except Exception:
+                        continue
                 try:
                     disp.SetScalarBarVisibility(view, True)
                     sb = GetScalarBar(lut, view)
                     if sb is not None and 'MPa' in name:
-                        sb.Title = 'von Mises (MPa)'
+                        sb.Title = 'von Mises stress (MPa)'
                     elif sb is not None and name == 'von_mises_pa':
-                        sb.Title = 'von Mises (Pa)'
+                        sb.Title = 'von Mises stress (Pa)'
                     elif sb is not None and 'Displacement' in name:
-                        sb.Title = 'Displacement (m)'
+                        sb.Title = 'Displacement magnitude (m)'
                 except Exception:
                     pass
                 colored = True
-                print(f"  FEA colored by {field_type} '{name}'")
+                print(f"  FEA colored by {field_type} '{name}' (von Mises/deformation view).")
                 break
             except Exception:
                 continue
@@ -364,14 +442,48 @@ def main():
         pass
 
     print("[view_study_paraview] Scene ready.")
-    print("  - Use the time controls to animate CRM and FEA together (shared timesteps where available).")
-    print("  - Particles are colored by the selected flag; excavator is the rigid drum surface.")
+    print("  - Particles: separate source rendered as 3D spheres (toggle/scale in Pipeline Browser if needed).")
+    print("  - Excavator: separate rigid surface source with its own render settings.")
     if fea_pvd and not args.no_fea:
-        print("  - FEA shows von Mises (color) and deformation (Warp By Vector). "
-              "Adjust the warp 'Scale Factor' in Properties to exaggerate displacement.")
-    print("  - If particles obscure the drum, toggle visibility/opacity in the Pipeline Browser.")
+        print("  - FEA: colored by von Mises stress and warped by displacement by default. "
+              "Adjust warp 'Scale Factor' to exaggerate deformation.")
+    else:
+        print("  - FEA: no stress frames found/loaded. Enable --export-vtk in one-way FEA and re-run export_study_vtk.py.")
+    print("  - Use time controls to animate; if particles obscure geometry, adjust opacity/visibility per source.")
+
+    # pvpython exits as soon as this script returns unless an interactive render
+    # loop is started.  The full ParaView GUI (paraview --script=...) stays open
+    # by itself, so only do this for pvpython.
+    if not args.no_interact and "pvpython" in Path(sys.executable).name.lower():
+        print("[view_study_paraview] Opening interactive render window; close it to exit.")
+        try:
+            from paraview.simple import Interact
+            Interact(view)
+        except Exception as exc:
+            print(f"[view_study_paraview] Could not start interactive loop: {exc}")
+            print("  Use the full GUI instead: QT_QPA_PLATFORM=xcb PYCHRONO_EXPORT_DIR=<dir> paraview --script=view_study_paraview.py")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main() or 0)
+    in_paraview_gui = ("--script=" in " ".join(sys.argv)
+                       or "paraview" in Path(sys.executable).name.lower()
+                       or "vtkpython" in Path(sys.executable).name.lower())
+    if in_paraview_gui:
+        # Running Render()/Glyph setup while ParaView is still starting can
+        # segfault on some builds.  Defer until the Qt event loop is up.
+        def _setup_scene():
+            try:
+                main()
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+
+        globals()["_delayed_viewer_setup"] = _setup_scene
+        try:
+            from PySide6.QtCore import QTimer  # type: ignore
+            QTimer.singleShot(1000, _setup_scene)
+        except Exception:
+            _setup_scene()
+    else:
+        sys.exit(main() or 0)

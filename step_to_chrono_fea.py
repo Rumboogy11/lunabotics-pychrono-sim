@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
 """Convert a STEP CAD model into a Chrono-ready tetrahedral FEA mesh.
 
 This converter uses OpenCASCADE to read and tessellate the STEP solid, MeshFix to
@@ -61,6 +61,8 @@ import pyvista as pv
 import tetgen
 import trimesh
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+from OCP.BRepTools import BRepTools
+from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
 from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
@@ -153,7 +155,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--surface-target-faces",
         type=int,
         default=8000,
-        help="decimate the repaired surface to about this many triangles (0 disables; default: 8000)",
+        help="minimum decimation target; the converter increases it until the surface stays "
+             "watertight and preserves volume (0 disables; default: 8000)",
+    )
+    p.add_argument(
+        "--surface-max-faces",
+        type=int,
+        default=256000,
+        help="upper bound for the watertight decimation retry (default: 256000)",
     )
     p.add_argument(
         "--max-tet-volume",
@@ -288,6 +297,19 @@ def fuse_solids(shape, *, min_volume_m3: float = 0.0, unit_scale: float = 1.0):
         fused = fixer.Shape()
     if not BRepCheck_Analyzer(fused).IsValid():
         raise RuntimeError("could not fuse the STEP assembly into a valid solid")
+
+    # A Boolean fuse leaves splitter edges where solids touch.  If those edges
+    # reach the STL writer, the surface has coincident internal faces: MeshFix
+    # then seals the wrong shell and inflates the volume by several hundred
+    # percent.  Unify coplanar/cylindrical faces into real CAD faces first.
+    unify = ShapeUpgrade_UnifySameDomain(fused, True, False, False)
+    unify.Build()
+    unified = unify.Shape()
+    if BRepCheck_Analyzer(unified).IsValid():
+        fused = unified
+    # The STEP reader and earlier OCC operations may leave stale triangulations
+    # that ignore later deflection settings; remove them before meshing.
+    BRepTools.Clean_s(fused)
     return fused, kept
 
 
@@ -397,6 +419,40 @@ def decimate_surface(
     if not surface.is_watertight:
         raise RuntimeError("surface decimation broke watertightness")
     return points, faces, before
+
+
+def decimate_to_watertight(
+    points: np.ndarray,
+    faces: np.ndarray,
+    target_faces: int,
+    max_faces: int,
+) -> tuple[np.ndarray, np.ndarray, int, int]:
+    """Decimate as far as possible while keeping a watertight surface.
+
+    Quadric decimation is topology-agnostic: an overly aggressive reduction
+    opens holes or creates non-manifold edges in complex screw assemblies.
+    MeshFix can close those holes, but on fused shells it often fills the wrong
+    side and inflates the volume by hundreds of percent.  Retrying with a
+    progressively larger target finds the coarsest topology-safe surface
+    without changing the geometry the tet mesher sees.
+    """
+    points = np.asarray(points, dtype=float)
+    faces = np.asarray(faces, dtype=np.int32)
+    max_faces = max(max_faces, target_faces)
+    target = target_faces
+    while True:
+        reduced_points, reduced_faces, before = decimate_surface(
+            points, faces, target, repair_result=False
+        )
+        surface = trimesh.Trimesh(reduced_points, reduced_faces, process=False)
+        if surface.is_watertight:
+            return reduced_points, reduced_faces, before, target
+        if target >= max_faces:
+            raise RuntimeError(
+                f"surface decimation is not watertight even at {target} faces; "
+                "increase --surface-max-faces or --surface-target-faces"
+            )
+        target = min(target * 2, max_faces)
 
 
 def write_node_set(handle, name: str, ids: list[int], per_line: int = 10) -> None:
@@ -555,11 +611,14 @@ def main() -> int:
     raw_surface = trimesh.Trimesh(vertices=raw_points, faces=raw_faces, process=True)
     raw_watertight = bool(raw_surface.is_watertight)
     meshfix_used = False
+    surface_target_used = args.surface_target_faces
 
     if args.repair_after_decimation and args.skip_decimation:
         raise SystemExit("--repair-after-decimation and --skip-decimation are mutually exclusive")
 
     if args.repair_after_decimation:
+        # Legacy route, kept for compatibility.  It can inflate the volume on
+        # fused assemblies; prefer the default topology-preserving route below.
         clean_points, clean_faces, faces_before_decimation = decimate_surface(
             raw_points, raw_faces, args.surface_target_faces, repair_result=False
         )
@@ -578,56 +637,37 @@ def main() -> int:
             meshfix_used = True
         repaired_points, repaired_faces = clean_points, clean_faces
         surface_pipeline = "OpenCASCADE STL -> quadric decimation -> MeshFix -> TetGen"
-    elif args.skip_meshfix and raw_watertight:
+    elif not raw_watertight:
+        raise RuntimeError(
+            "the unified OCC surface is not watertight; refine --surface-deflection "
+            "or use --repair-after-decimation (legacy, may inflate volume)"
+        )
+    else:
         clean_points = np.asarray(raw_surface.vertices, dtype=float)
         clean_faces = np.asarray(raw_surface.faces, dtype=np.int32)
-        print("Skipping MeshFix: raw OCC surface is already watertight", file=sys.stderr)
         if args.skip_decimation:
             repaired_points, repaired_faces = clean_points, clean_faces
             faces_before_decimation = len(clean_faces)
         else:
-            repaired_points, repaired_faces, faces_before_decimation = decimate_surface(
-                clean_points, clean_faces, args.surface_target_faces
+            (
+                repaired_points,
+                repaired_faces,
+                faces_before_decimation,
+                surface_target_used,
+            ) = decimate_to_watertight(
+                clean_points,
+                clean_faces,
+                args.surface_target_faces,
+                args.surface_max_faces,
             )
-        surface_pipeline = "OpenCASCADE STL -> subdivision -> TetGen (MeshFix skipped)"
-    else:
-        clean = repair_surface(raw_points, raw_faces)
-        clean_points = np.asarray(clean.points, dtype=float)
-        clean_faces = clean.faces.reshape(-1, 4)[:, 1:].astype(np.int32)
-        meshfix_used = True
-        if args.skip_decimation:
-            repaired_points, repaired_faces = clean_points, clean_faces
-            faces_before_decimation = len(clean_faces)
-        else:
-            repaired_points, repaired_faces, faces_before_decimation = decimate_surface(
-                clean_points, clean_faces, args.surface_target_faces
-            )
-        surface_pipeline = "OpenCASCADE STL -> MeshFix -> quadric decimation -> TetGen"
+            if surface_target_used != args.surface_target_faces:
+                print(
+                    f"Raised surface target from {args.surface_target_faces} to "
+                    f"{surface_target_used} faces to keep the surface watertight",
+                    file=sys.stderr,
+                )
+        surface_pipeline = "OpenCASCADE STL -> topology-preserving decimation -> TetGen"
     mark("surface repair/decimation")
-
-    # OCC leaves a few very long triangles on planar end faces.  Adaptive
-    # longest-edge bisection fixes those without inflating already fine curved
-    # regions, and unlike VTK's subdivision it preserves mesh indices.
-    max_surface_edge_cad = args.mesh_size / args.unit_scale
-    surface_points, surface_faces = trimesh.remesh.subdivide_to_size(
-        repaired_points, repaired_faces, max_edge=max_surface_edge_cad, max_iter=20
-    )
-    if not trimesh.Trimesh(surface_points, surface_faces, process=False).is_watertight:
-        raise RuntimeError("surface subdivision broke watertightness")
-
-    # Rotate the surface into the FEA local frame, where the drum axis is +Z
-    # regardless of the STEP source axis.  Keep TetGen in raw CAD units (below)
-    # so its switches and the validated mesh are unchanged; only the exported
-    # CRM contact surface is scaled into metres, matching the .node mesh and
-    # the metadata bbox.
-    surface_points = np.asarray(surface_points, dtype=float) @ source_to_local.T
-    mark("surface subdivision/axis rotation")
-
-    # Replace the raw OCC STL with the actual repaired/decimated surface used
-    # for tetrahedralization and CRM contact.  This STL (and the OBJ made from
-    # it by stl_to_obj.py) is consumed directly by the CRM in metres.
-    surface_points_m = surface_points * args.unit_scale
-    trimesh.Trimesh(surface_points_m, surface_faces, process=False).export(stl_path)
 
     if args.tetgen_switches:
         switches = args.tetgen_switches
@@ -637,11 +677,70 @@ def main() -> int:
             f"pq{args.tet_quality:g}/{args.min_dihedral:g}a{max_volume_cad:.10g}YQ"
         )
 
-    tet = tetgen.TetGen(surface_points, surface_faces)
-    nodes_cad, tets, _attributes, _markers = tet.tetrahedralize(switches=switches)
+    # Quadric decimation can leave a watertight surface that still has tiny
+    # folded/self-intersecting triangles.  TetGen is the authoritative check:
+    # retry with progressively finer targets until it accepts the surface.
+    surface_target_current = surface_target_used
+    while True:
+        if (
+            not args.skip_decimation
+            and not args.repair_after_decimation
+            and surface_target_current != surface_target_used
+        ):
+            (
+                repaired_points,
+                repaired_faces,
+                faces_before_decimation,
+                surface_target_used,
+            ) = decimate_to_watertight(
+                clean_points,
+                clean_faces,
+                surface_target_current,
+                args.surface_max_faces,
+            )
+            print(
+                f"Retrying surface with {surface_target_used} faces after TetGen "
+                "rejected self-intersections",
+                file=sys.stderr,
+            )
+
+        # OCC leaves a few very long triangles on planar end faces.  Adaptive
+        # longest-edge bisection fixes those without inflating already fine
+        # curved regions, and unlike VTK's subdivision it preserves indices.
+        max_surface_edge_cad = args.mesh_size / args.unit_scale
+        surface_points, surface_faces = trimesh.remesh.subdivide_to_size(
+            repaired_points, repaired_faces, max_edge=max_surface_edge_cad, max_iter=20
+        )
+        if not trimesh.Trimesh(surface_points, surface_faces, process=False).is_watertight:
+            raise RuntimeError("surface subdivision broke watertightness")
+
+        # Rotate into the FEA local frame (+Z drum axis).  Keep TetGen in raw CAD
+        # units so its switches match the validated pipeline; only the exported
+        # CRM contact STL is scaled into metres.
+        surface_points = np.asarray(surface_points, dtype=float) @ source_to_local.T
+        surface_points_m = surface_points * args.unit_scale
+        trimesh.Trimesh(surface_points_m, surface_faces, process=False).export(stl_path)
+
+        tet = tetgen.TetGen(surface_points, surface_faces)
+        try:
+            nodes_cad, tets, _attributes, _markers = tet.tetrahedralize(switches=switches)
+        except RuntimeError as exc:
+            retryable = (
+                "self-intersect" in str(exc).lower()
+                and not args.skip_decimation
+                and not args.repair_after_decimation
+                and not args.skip_meshfix
+            )
+            next_target = min(max(surface_target_used * 2, args.surface_target_faces * 2),
+                              args.surface_max_faces)
+            if not retryable or next_target <= surface_target_used:
+                raise
+            surface_target_current = next_target
+            continue
+        break
+    mark("surface subdivision/axis rotation and TetGen volume meshing")
     if nodes_cad.shape[0] == 0 or tets.shape[0] == 0:
         raise RuntimeError("TetGen produced an empty volume mesh")
-    mark("TetGen volume meshing")
 
     points = np.asarray(nodes_cad, dtype=float) * args.unit_scale
     points = points @ rotation.T + translation
@@ -696,7 +795,8 @@ def main() -> int:
         "surface_deflection_m": surface_deflection,
         "angular_deflection_rad": args.angular_deflection,
         "max_surface_edge_m": args.mesh_size,
-        "surface_target_faces": args.surface_target_faces,
+        "surface_target_faces_requested": args.surface_target_faces,
+        "surface_target_faces_used": surface_target_used,
         "surface_faces_before_decimation": int(faces_before_decimation),
         "surface_points": int(len(surface_points)),
         "surface_faces": int(len(surface_faces)),
