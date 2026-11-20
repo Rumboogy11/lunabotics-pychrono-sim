@@ -114,8 +114,11 @@ PARAM_INFO: dict[str, str] = {
     "spacing": "Initial SPH particle spacing. Smaller = more particles, higher resolution, slower simulation; ~0.002 m is the default (2x finer than the old 4 mm setting).",
     "d0_multiplier": "Smoothing-length factor h = multiplier * spacing. 1.0 is the standard choice.",
     "crm_dt": "Explicit CRM timestep, or 'auto' for a spacing-dependent stable value. Unsafe explicit dt is rejected unless explicitly allowed.",
-    "crm_fps": "How often CRM summary/particle/load frames are written. Higher cadence means more frames and larger outputs.",
+    "crm_fps": "How often CRM summary frames are written. Particle and soil-wrench files use their own cadences.",
     "fea_fps": "Independent FEA summary/export cadence. Lower values speed up replay; FEA dynamics still follow FEA dt.",
+    "loads_fps": "Soil-wrench CSV sampling rate for one-way FEA. The FEA driver interpolates by time, so 20 Hz is usually enough; lower values make the CRM solver faster and soil_loads.csv much smaller.",
+    "particle_fps": "How often particle CSV frames are written for ParaView. Capped by CRM output FPS. Lower values sharply reduce CRM disk I/O; 5 Hz is usually enough for visualization.",
+    "particle_writers": "Background processes that write per-frame particle CSV files while the CRM solver continues. Increase only if disk writes remain a bottleneck.",
     "fea_dt": "Structural integrator timestep for one-way FEA, independent of CRM dt. Default is 0.002 s.",
     "bed_height": "Depth of the soil bed. The drum starts at bed_height + radius above the ground.",
     "active_box": "Drum-centred active SPH domain X,Y,Z in metres (full sizes; X along drum axis, Y lateral, Z vertical). "
@@ -132,7 +135,7 @@ PARAM_INFO: dict[str, str] = {
     "raw_stress_every": "Scan tetrahedra for peak stress every Nth recorded frame; higher is cheaper.",
     "export_workers": "Number of processes used to write ParaView frame files in parallel.",
     # Output & export
-    "save_particles": "Write per-frame CRM particle positions as CSV. Needed for ParaView particle spheres; uses disk space.",
+    "save_particles": "Write CRM particle positions as CSV at the particle output FPS. Needed for ParaView particle spheres; uses disk space.",
     "fea_export_vtk": "Write fea/vtk/frame_*.vtu and fea.pvd so ParaView can show von Mises stress and deformation. Required for 3D stress/deformation views.",
     "fea_vtk_stride": "Export every Nth recorded FEA frame to VTU. Use >1 to reduce disk/time for long runs.",
     "export_vtk": "Create separate ParaView series (crm_particles.pvd, excavator.pvd, optional fea.pvd) plus combined.pvd and a manifest after the run.",
@@ -193,6 +196,9 @@ def shipped_defaults() -> dict[str, object]:
         "crm_dt": "auto",
         "crm_fps": "20",
         "fea_fps": "20",
+        "loads_fps": "20",
+        "particle_fps": "5",
+        "particle_writers": "4",
         "fea_dt": "0.002",
         "bed_height": "0.06",
         "active_box": "0.631333,0.687407,0.86637",
@@ -251,6 +257,9 @@ DEFAULT_GROUPS: list[tuple[str, list[tuple[str, str, dict]]]] = [
         ("CRM dt (s or 'auto')", "crm_dt", {}),
         ("CRM output FPS", "crm_fps", {}),
         ("FEA output FPS", "fea_fps", {}),
+        ("Soil loads FPS", "loads_fps", {}),
+        ("Particle output FPS", "particle_fps", {}),
+        ("Particle writer processes", "particle_writers", {}),
         ("FEA dt (s)", "fea_dt", {}),
         ("Bed height (m)", "bed_height", {}),
         ("Active box X,Y,Z (m)", "active_box", {}),
@@ -861,6 +870,9 @@ class StudyGUI:
             crm_dt = float(crm_dt_raw)
         crm_fps = float(self._g("crm_fps"))
         fea_fps = float(self._g("fea_fps"))
+        loads_fps = float(self._g("loads_fps") or 20)
+        particle_fps = float(self._g("particle_fps") or 5)
+        particle_writers = max(1, int(float(self._g("particle_writers") or 4)))
         fea_dt = float(self._g("fea_dt"))
         bed_height = float(self._g("bed_height"))
         active_box = self._parse_active_box(self._g("active_box"))
@@ -908,6 +920,9 @@ class StudyGUI:
             "auto_crm_dt": wiz.suggested_sph_dt(spacing, d0_multiplier),
             "crm_fps": crm_fps,
             "fea_fps": fea_fps,
+            "loads_fps": loads_fps,
+            "particle_fps": particle_fps,
+            "particle_writers": particle_writers,
             "bed_height": bed_height,
             "active_box": active_box,
             "settle_time": settle_time,

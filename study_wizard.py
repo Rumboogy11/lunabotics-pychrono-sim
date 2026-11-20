@@ -336,6 +336,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fps", type=float, default=None, help="CRM output cadence in Hz (default: 20)")
     p.add_argument("--fea-fps", type=float, default=None, help="FEA output cadence in Hz (default: same as CRM)")
     p.add_argument("--crm-fps", type=float, default=None, help="alias for --fps (CRM output cadence in Hz)")
+    p.add_argument("--loads-fps", type=float, default=None,
+                   help="soil-wrench CSV cadence in Hz (default: 20; one-way FEA interpolates by time)")
+    p.add_argument("--particle-fps", type=float, default=None,
+                   help="particle CSV cadence in Hz (default: 5; capped by --fps)")
+    p.add_argument("--particle-writers", type=int, default=None,
+                   help="background processes for CRM particle CSV writes (default: 4)")
     p.add_argument("--bed-height", type=float, default=None, help="initial soil bed height in m")
     p.add_argument("--active-box", default=None, help="SPH domain size X,Y,Z in metres")
     p.add_argument("--settle-time", type=float, default=None, help="settle time before spin/descent")
@@ -824,7 +830,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
     elif INTERACTIVE:
         crm_fps = prompt_float(
             "CRM output cadence (Hz)", crm_fps_default, minimum=1e-3,
-            detail="How often CRM summary/particle/load frames are written (higher = larger outputs).",
+            detail="How often CRM summary frames are written. Particle and soil-wrench files use their own cadences.",
         )
     else:
         crm_fps = crm_fps_default
@@ -842,6 +848,38 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         )
     else:
         fea_fps = crm_fps
+
+    loads_fps_default = 20.0
+    if args.loads_fps is not None:
+        loads_fps = args.loads_fps
+    elif INTERACTIVE:
+        loads_fps = prompt_float(
+            "Soil-wrench CSV cadence (Hz)", loads_fps_default, minimum=1e-3,
+            detail="How often the rigid-CRM drum wrench is sampled for one-way FEA. The FEA driver "
+                   "linearly interpolates between samples, so 20 Hz is usually sufficient and keeps "
+                   "soil_loads.csv small.",
+        )
+    else:
+        loads_fps = loads_fps_default
+
+    particle_fps_default = 5.0
+    if args.particle_fps is not None:
+        particle_fps = args.particle_fps
+    elif INTERACTIVE:
+        particle_fps = prompt_float(
+            "Particle CSV cadence (Hz)", particle_fps_default, minimum=1e-3,
+            detail="How often per-frame particle positions are written for ParaView. This is capped by "
+                   "the CRM output cadence; 5 Hz greatly reduces disk I/O while keeping visualization useful.",
+        )
+    else:
+        particle_fps = particle_fps_default
+
+    particle_writers = args.particle_writers if args.particle_writers is not None else prompt_int(
+        "Particle CSV writer processes", 4, minimum=1,
+        detail="Background processes that write per-frame CRM particle CSV files while the SPH solver "
+               "continues. Increase only if disk writes remain visible in GPU/CPU profiling.",
+    )
+
     bed_height = args.bed_height if args.bed_height is not None else prompt_float(
         "Initial bed height (m)", float(geo["bed_height"]), minimum=1e-3,
         detail="Depth of the soil bed; drum starts at bed_height + radius above the ground.",
@@ -1013,7 +1051,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             f"CRM mesh:     {crm_obj}",
             f"FEA mesh:     {fea_node} / {fea_ele}",
             f"Duration:     CRM {duration:g} s, FEA {fea_duration:g} s",
-            f"Cadence:      CRM {crm_fps:g} Hz, FEA {fea_fps:g} Hz",
+            f"Cadence:      CRM {crm_fps:g} Hz, FEA {fea_fps:g} Hz, loads {loads_fps:g} Hz, particles {particle_fps:g} Hz",
             f"Drum:         R={drum_radius:g} m, half-length={drum_half_length:g} m, "
             f"z0≈{bed_height + drum_radius:g} m",
             f"SPH:          spacing={spacing:g} m, dt={dt_text}",
@@ -1062,6 +1100,9 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "auto_crm_dt": auto_dt,
         "crm_fps": crm_fps,
         "fea_fps": fea_fps,
+        "loads_fps": loads_fps,
+        "particle_fps": particle_fps,
+        "particle_writers": particle_writers,
         "bed_height": bed_height,
         "active_box": active_box,
         "settle_time": settle_time,
@@ -1106,6 +1147,9 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         "--duration", f"{cfg['duration']:g}",
         "--spacing", f"{cfg['spacing']:g}",
         "--fps", f"{cfg['crm_fps']:g}",
+        "--loads-fps", f"{cfg['loads_fps']:g}",
+        "--particle-fps", f"{cfg['particle_fps']:g}",
+        "--particle-writers", f"{cfg['particle_writers']:d}",
         "--bed-height", f"{cfg['bed_height']:g}",
         "--active-box", ",".join(f"{v:g}" for v in cfg["active_box"]),
         "--settle-time", f"{cfg['settle_time']:g}",

@@ -56,10 +56,14 @@ import argparse
 import csv
 import json
 import math
+import multiprocessing
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -82,7 +86,10 @@ class CrmRunParams:
     spacing: float = 0.002               # SPH particle spacing [m] (smaller = finer resolution/more particles)
     dt: float = 4.0e-5                   # CRM/FSI step [s] at the default 2 mm spacing
     duration: float = MOTION_DEFAULT.t_max
-    fps: float = 20.0                    # metric/particle output cadence
+    fps: float = 20.0                    # metric output cadence
+    loads_fps: float = 20.0              # soil-wrench CSV cadence (one-way FEA interpolates by time)
+    particle_fps: float = 5.0            # particle CSV cadence (ParaView particle frames)
+    particle_writers: int = 4            # background processes for per-frame particle CSV writes
     settle_time: float = MOTION_DEFAULT.settle_time
     descent_speed: float = MOTION_DEFAULT.lower_speed
     omega: float = MOTION_DEFAULT.drum_omega
@@ -103,11 +110,13 @@ class CrmRunParams:
     proximity_steps: int = 4             # steps between neighbor-list updates
 
     def __post_init__(self) -> None:
-        for name in ("spacing", "dt", "duration", "fps", "descent_speed",
+        for name in ("spacing", "dt", "duration", "fps", "loads_fps", "particle_fps", "descent_speed",
                      "bed_height", "drum_radius", "drum_half_length", "inner_radius",
                      "max_velocity", "d0_multiplier", "free_surface_threshold"):
             if getattr(self, name) <= 0.0:
                 raise ValueError(f"{name} must be positive")
+        if self.particle_writers < 1:
+            raise ValueError("particle_writers must be at least 1")
         if self.omega == 0.0:
             raise ValueError("omega must be nonzero")
         if self.spin_axis.upper() not in {"X", "Y", "Z"}:
@@ -178,6 +187,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "(normally rejected to prevent GPU boundary blowups)")
     p.add_argument("--fps", type=float, default=None,
                    help="metric output cadence in Hz (default: 20)")
+    p.add_argument("--particle-fps", type=float, default=None,
+                   help="particle CSV cadence in Hz (default: 5; capped by --fps)")
+    p.add_argument("--loads-fps", type=float, default=None,
+                   help="soil-wrench CSV cadence in Hz (default: 20; one-way FEA interpolates by time)")
     p.add_argument("--spacing", type=float, default=None,
                    help="SPH particle spacing in metres (default: 0.002; smaller = finer particles/more resolution)")
     p.add_argument("--settle-time", type=float, default=None,
@@ -235,8 +248,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-output", action="store_true", help="run without writing files")
     p.add_argument("--save-particles", action="store_true",
                    help="write per-frame SPH particle CSV (large)")
+    p.add_argument("--particle-writers", type=int, default=None,
+                   help="background processes for particle CSV writes (default: 4)")
     p.add_argument("--loads-file", type=Path, default=None,
-                   help="write the per-step soil force/torque wrench on the drum to this CSV "
+                   help="write the soil force/torque wrench to this CSV at --loads-fps cadence "
                         "(used by the one-way CRM -> FEA driver)")
     p.add_argument("--print-soil", action="store_true",
                    help="print the independent soil parameter block and exit")
@@ -324,6 +339,9 @@ def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -
         "duration": args.duration,
         "dt": args.dt,
         "fps": args.fps,
+        "loads_fps": getattr(args, "loads_fps", None),
+        "particle_fps": getattr(args, "particle_fps", None),
+        "particle_writers": getattr(args, "particle_writers", None),
         "spacing": args.spacing,
         "settle_time": args.settle_time,
         "descent_speed": args.descent_speed,
@@ -541,6 +559,50 @@ def particle_positions(fluid, fsi, terrain=None):
     )
 
 
+def particle_positions_numpy(fluid, fsi, terrain=None) -> np.ndarray:
+    """Return fluid-marker positions as an ``(N, 3)`` float array.
+
+    ``GetParticlePositionsNumpy()`` avoids creating hundreds of thousands of
+    Python ``ChVector3d`` objects per frame.  It exposes all markers, so slice
+    to the fluid prefix exactly as :func:`particle_positions` does.
+    """
+    count = None
+    if hasattr(fluid, "GetNumFluidMarkers"):
+        try:
+            count = int(fluid.GetNumFluidMarkers())
+        except (TypeError, ValueError):
+            count = None
+    if count is None and terrain is not None and hasattr(terrain, "GetNumSPHParticles"):
+        count = int(terrain.GetNumSPHParticles())
+
+    if hasattr(fluid, "GetParticlePositionsNumpy"):
+        try:
+            positions = np.asarray(fluid.GetParticlePositionsNumpy(), dtype=np.float64)
+            if positions.ndim == 1 and positions.size % 3 == 0:
+                positions = positions.reshape(-1, 3)
+            if positions.ndim != 2 or positions.shape[1] != 3:
+                raise ValueError(f"unexpected position array shape {positions.shape}")
+            return positions[:count] if count is not None else positions
+        except (TypeError, ValueError, RuntimeError):
+            pass
+
+    # Fallback for builds without the NumPy binding.
+    return np.asarray([vec_parts(p) for p in particle_positions(fluid, fsi, terrain)], dtype=np.float64)
+
+
+def quat_rotation_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
+    """Rotation matrix for a quaternion in (w, x, y, z) order."""
+    w, x, y, z = q
+    # q * v * conjugate(q), matching the scalar quat_rotate helper.  When q is
+    # not exactly unit length the raw numerator preserves its exact behaviour,
+    # including the small scale factor, so metrics stay numerically identical.
+    return np.array([
+        [w * w + x * x - y * y - z * z, 2.0 * (x * y - w * z), 2.0 * (x * z + w * y)],
+        [2.0 * (x * y + w * z), w * w - x * x + y * y - z * z, 2.0 * (y * z - w * x)],
+        [2.0 * (x * z - w * y), 2.0 * (y * z + w * x), w * w - x * x - y * y + z * z],
+    ], dtype=np.float64)
+
+
 def get_particle_mass(fluid, soil: CrmSoilParams, spacing: float) -> tuple[float, str]:
     if hasattr(fluid, "GetParticleMass"):
         try:
@@ -604,43 +666,55 @@ def create_drum(chrono, system, terrain, motion, mesh: Path):
     return drum
 
 
-def compute_metrics(positions, drum, run: CrmRunParams, motion,
+def compute_metrics(positions: np.ndarray, drum, run: CrmRunParams, motion,
                     soil: CrmSoilParams, particle_mass: float,
                     capacity_volume: float, surface_z: float,
                     with_flags: bool = False):
-    origin = vec_parts(drum.GetPos())
-    q_inv = quat_conj(quat_parts(drum.GetRot()))
+    pos = np.asarray(positions, dtype=np.float64)
+    if pos.ndim == 1 and pos.size % 3 == 0:
+        pos = pos.reshape(-1, 3)
+    if pos.ndim != 2 or pos.shape[1] != 3:
+        raise ValueError(f"unexpected position array shape {pos.shape}")
+
+    origin = np.asarray(vec_parts(drum.GetPos()), dtype=np.float64)
+    rotation = quat_rotation_matrix(quat_conj(quat_parts(drum.GetRot())))
+    local = (pos - origin) @ rotation.T
+
+    lx = local[:, 0]
+    ly = local[:, 1]
+    lz = np.abs(local[:, 2])
+    radial2 = lx * lx + ly * ly
 
     r_inner2 = run.inner_radius**2
     r_outer2 = (motion.drum_radius + 0.5 * run.spacing) ** 2
     half_len = motion.drum_half_length
     lift_tol = 0.5 * run.spacing
 
-    inside = lifted = excavated = 0
-    flags = [] if with_flags else None
-    for point in positions:
-        wx, wy, wz = vec_parts(point)
-        lx, ly, lz = quat_rotate(q_inv, (wx - origin[0], wy - origin[1], wz - origin[2]))
-        radial2 = lx * lx + ly * ly
-        axial = abs(lz)
-        is_inside = radial2 < r_inner2 and axial <= half_len
-        is_lifted = wz > surface_z + lift_tol
-        is_excavated = radial2 <= r_outer2 and axial <= half_len + 0.5 * run.spacing and is_lifted
-        inside += int(is_inside)
-        lifted += int(is_lifted)
-        excavated += int(is_excavated)
-        if flags is not None:
-            flags.append((int(is_inside), int(is_excavated)))
+    inside = (radial2 < r_inner2) & (lz <= half_len)
+    lifted = pos[:, 2] > surface_z + lift_tol
+    excavated = (
+        (radial2 <= r_outer2)
+        & (lz <= half_len + 0.5 * run.spacing)
+        & lifted
+    )
+
+    inside_count = int(np.count_nonzero(inside))
+    lifted_count = int(np.count_nonzero(lifted))
+    excavated_count = int(np.count_nonzero(excavated))
+    flags = (
+        np.column_stack((inside.astype(np.uint8), excavated.astype(np.uint8)))
+        if with_flags else None
+    )
 
     capacity_mass = soil.density * capacity_volume
-    retained_mass = inside * particle_mass
-    excavated_mass = excavated * particle_mass
+    retained_mass = inside_count * particle_mass
+    excavated_mass = excavated_count * particle_mass
     metrics = {
-        "sph_particles": len(positions),
-        "inside_drum": inside,
-        "lifted": lifted,
-        "excavated": excavated,
-        "fill_ratio_count": inside / max(1.0, capacity_volume / run.spacing**3),
+        "sph_particles": len(pos),
+        "inside_drum": inside_count,
+        "lifted": lifted_count,
+        "excavated": excavated_count,
+        "fill_ratio_count": inside_count / max(1.0, capacity_volume / run.spacing**3),
         "fill_ratio_mass": retained_mass / capacity_mass,
         "excavated_mass_kg": excavated_mass,
         "capacity_m3": capacity_volume,
@@ -650,13 +724,26 @@ def compute_metrics(positions, drum, run: CrmRunParams, motion,
     return metrics, flags
 
 
-def write_particle_csv(path: Path, positions, flags) -> None:
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["X", "Y", "Z", "inside_drum", "excavated"])
-        for point, (inside, excavated) in zip(positions, flags):
-            x, y, z = vec_parts(point)
-            writer.writerow([f"{x:.9g}", f"{y:.9g}", f"{z:.9g}", inside, excavated])
+def write_particle_csv(path: Path, positions: np.ndarray, flags: np.ndarray) -> None:
+    pos = np.asarray(positions, dtype=np.float64)
+    flg = np.asarray(flags, dtype=np.uint8)
+    if pos.ndim != 2 or pos.shape[1] != 3:
+        raise ValueError(f"unexpected position array shape {pos.shape}")
+    if flg.ndim != 2 or flg.shape != (len(pos), 2):
+        raise ValueError(f"unexpected flag array shape {flg.shape}")
+
+    data = np.empty((len(pos), 5), dtype=np.float64)
+    data[:, :3] = pos
+    data[:, 3] = flg[:, 0]
+    data[:, 4] = flg[:, 1]
+    np.savetxt(
+        path,
+        data,
+        delimiter=",",
+        fmt=["%.9g", "%.9g", "%.9g", "%d", "%d"],
+        header="X,Y,Z,inside_drum,excavated",
+        comments="",
+    )
 
 
 def write_config(path: Path, soil: CrmSoilParams, run: CrmRunParams,
@@ -807,13 +894,29 @@ def main() -> int:
         loads_file = loads_path.open("w", newline="", encoding="utf-8")
         loads_writer = csv.DictWriter(loads_file, fieldnames=LOAD_FIELDS)
         loads_writer.writeheader()
-        print(f"Soil wrench: {loads_path}", flush=True)
+        print(f"Soil wrench: {loads_path} @ {run.loads_fps:g} Hz", flush=True)
 
-    def write_loads(t: float) -> None:
+    particle_executor = None
+    pending_particle_writes: list = []
+    max_pending_writes = 2 * run.particle_writers
+    if args.save_particles and not args.no_output:
+        # CSV formatting is CPU-bound, so use processes rather than threads.
+        # Spawn avoids inheriting the live CUDA context into writer children.
+        particle_executor = ProcessPoolExecutor(
+            max_workers=run.particle_writers,
+            mp_context=multiprocessing.get_context("spawn"),
+        )
+
+    last_load_time = -1.0
+
+    def write_loads(t: float, force=None, torque=None) -> None:
+        nonlocal last_load_time
         if loads_writer is None:
             return
-        force = vec_parts(terrain.GetFsiBodyForce(drum)) if hasattr(terrain, "GetFsiBodyForce") else (0.0, 0.0, 0.0)
-        torque = vec_parts(terrain.GetFsiBodyTorque(drum)) if hasattr(terrain, "GetFsiBodyTorque") else (0.0, 0.0, 0.0)
+        if force is None:
+            force = vec_parts(terrain.GetFsiBodyForce(drum)) if hasattr(terrain, "GetFsiBodyForce") else (0.0, 0.0, 0.0)
+        if torque is None:
+            torque = vec_parts(terrain.GetFsiBodyTorque(drum)) if hasattr(terrain, "GetFsiBodyTorque") else (0.0, 0.0, 0.0)
         loads_writer.writerow({
             "time_s": f"{t:.9g}",
             "drum_z_m": f"{vec_parts(drum.GetPos())[2]:.9g}",
@@ -824,6 +927,7 @@ def main() -> int:
             "torque_y_nm": f"{torque[1]:.9g}",
             "torque_z_nm": f"{torque[2]:.9g}",
         })
+        last_load_time = t
 
     peak_fill = 0.0
     work_j = 0.0
@@ -831,11 +935,16 @@ def main() -> int:
     frame = 0
     wall_start = time.perf_counter()
     next_progress = 0.0
+    next_particle_output = 0.0
 
     def record(t: float, fluid_power: float, fluid_torque_x: float) -> None:
-        nonlocal frame, peak_fill, last_row
-        positions = particle_positions(fluid, fsi, terrain)
-        with_flags = bool(args.save_particles and not args.no_output)
+        nonlocal frame, peak_fill, last_row, next_particle_output
+        positions = particle_positions_numpy(fluid, fsi, terrain)
+        particle_due = (
+            bool(args.save_particles and not args.no_output)
+            and (t >= next_particle_output - 1.0e-12 or t >= run.duration - 1.0e-12)
+        )
+        with_flags = particle_due
         metrics, flags = compute_metrics(
             positions, drum, run, motion, soil, particle_mass,
             capacity_volume, surface_z, with_flags=with_flags,
@@ -866,8 +975,19 @@ def main() -> int:
         if writer is not None:
             writer.writerow(row)
             state_file.flush()
-        if flags is not None:
-            write_particle_csv(out_dir / f"particles_{frame:06d}.csv", positions, flags)
+        if particle_due and flags is not None:
+            target = out_dir / f"particles_{frame:06d}.csv"
+            payload = (positions.copy(), flags.copy())
+            if particle_executor is not None:
+                pending_particle_writes.append(
+                    particle_executor.submit(write_particle_csv, target, *payload)
+                )
+                while len(pending_particle_writes) >= max_pending_writes:
+                    pending_particle_writes.pop(0).result()
+            else:
+                write_particle_csv(target, *payload)
+            while next_particle_output <= t + 1.0e-12:
+                next_particle_output += 1.0 / run.particle_fps
         last_row = row
         frame += 1
         print(
@@ -883,6 +1003,7 @@ def main() -> int:
     record(0.0, 0.0, 0.0)
     write_loads(0.0)
     next_output = 1.0 / run.fps
+    next_load_output = 1.0 / run.loads_fps
 
     t = 0.0
     try:
@@ -899,10 +1020,8 @@ def main() -> int:
                 else ((0.0, run.omega, 0.0) if run.spin_axis.upper() == "Y"
                       else (0.0, 0.0, run.omega))
             )
-            if hasattr(terrain, "GetFsiBodyTorque"):
-                tx, ty, tz = vec_parts(terrain.GetFsiBodyTorque(drum))
-            else:
-                tx, ty, tz = 0.0, 0.0, 0.0
+            torque = vec_parts(terrain.GetFsiBodyTorque(drum)) if hasattr(terrain, "GetFsiBodyTorque") else (0.0, 0.0, 0.0)
+            tx, ty, tz = torque
             fluid_dot = tx * omega_vec[0] + ty * omega_vec[1] + tz * omega_vec[2]
             # FSI torque is the force of soil on the drum; positive input power
             # is the torque applied by the drive against that reaction.
@@ -910,7 +1029,11 @@ def main() -> int:
             work_j += fluid_power * h
             last_torque_x = tx
             last_power = fluid_power
-            write_loads(t)
+
+            if t >= next_load_output - 1.0e-12 or t >= run.duration - 1.0e-12:
+                force = vec_parts(terrain.GetFsiBodyForce(drum)) if hasattr(terrain, "GetFsiBodyForce") else (0.0, 0.0, 0.0)
+                write_loads(t, force, torque)
+                next_load_output += 1.0 / run.loads_fps
 
             if t >= next_output - 1.0e-12 or t >= run.duration - 1.0e-12:
                 record(t, fluid_power, last_torque_x)
@@ -919,7 +1042,16 @@ def main() -> int:
             if t >= next_progress:
                 print(f"  t={t:7.3f}s / {run.duration:g}s", flush=True)
                 next_progress += 1.0
+
+        if loads_writer is not None and last_load_time < t - 1.0e-12:
+            force = vec_parts(terrain.GetFsiBodyForce(drum)) if hasattr(terrain, "GetFsiBodyForce") else (0.0, 0.0, 0.0)
+            torque = vec_parts(terrain.GetFsiBodyTorque(drum)) if hasattr(terrain, "GetFsiBodyTorque") else (0.0, 0.0, 0.0)
+            write_loads(t, force, torque)
     finally:
+        if particle_executor is not None:
+            for future in pending_particle_writes:
+                future.result()
+            particle_executor.shutdown(wait=True)
         if state_file is not None:
             state_file.close()
         if loads_file is not None:

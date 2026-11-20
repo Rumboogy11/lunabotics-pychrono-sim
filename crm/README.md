@@ -108,7 +108,10 @@ write reproducible `study_config.json`/`commands.sh`, run both one-way stages, a
 | `--dt S` | CRM/FSI timestep (spacing-dependent default) |
 | `--allow-unsafe-dt` | bypass explicit timestep stability check (not recommended) |
 | `--spacing D` | SPH particle spacing (default 0.002 m) |
-| `--fps F` | metric/particle output cadence (default 20 Hz) |
+| `--fps F` | metric output cadence (default 20 Hz) |
+| `--loads-fps F` | soil-wrench CSV cadence (default 20 Hz; one-way FEA interpolates between samples) |
+| `--particle-fps F` | particle CSV cadence for ParaView (default 5 Hz; capped by `--fps`) |
+| `--particle-writers N` | background processes for per-frame particle CSV writes (default 4) |
 | `--settle-time T` | delay before spin/descent (default 0.001 s) |
 | `--descent-speed V` | drum descent speed (default 0.0015 m/s) |
 | `--omega W` | spin rate in rad/s (signed/nonzero supported) |
@@ -123,7 +126,7 @@ write reproducible `study_config.json`/`commands.sh`, run both one-way stages, a
 | `--active-box X,Y,Z` | active SPH full size (default: padded bed + 2 drum diameters laterally; bed + initial excavator height + 2 diameters + padding vertically) |
 | `--mesh {coarse,medium}` | shipped OBJ selection |
 | `--mesh-file PATH` | custom OBJ geometry |
-| `--loads-file PATH` | write per-step soil wrench for one-way FEA replay |
+| `--loads-file PATH` | write soil wrench for one-way FEA replay at `--loads-fps` cadence |
 | `--save-particles` | write per-frame SPH particle CSV (large) |
 | `--export-vtk`, `--vtk-dir`, `--vtk-stride` | export ParaView PVD/VTP/VTU outputs |
 | `--no-output` | benchmark without writing files |
@@ -132,6 +135,8 @@ Notes:
 - Default timestep scales with spacing (e.g. ~4e-5 s at 2 mm). Explicitly oversized `--dt` values are rejected unless `--allow-unsafe-dt` is set.
 - The soil bed is padded around the drum and the default active SPH box extends two full excavator diameters beyond the padded bed laterally, and from below the bed floor to bed height + initial excavator height + two diameters + padding above the drum centre. Chrono deactivates particles outside the active box (zeroing their velocity), so an undersized box makes flung particles freeze in mid-air.
 - Use the full-detail OBJ for production; legacy simplified meshes may close holes.
+- Summary, soil-wrench, and particle cadences are independent. The one-way FEA driver interpolates the wrench by time, and ParaView can render a lower-rate particle series, so reducing those two cadences speeds up CRM without changing solver physics.
+- Particle CSV frames are formatted in background processes; set `--particle-writers` higher if disk writes remain a bottleneck.
 
 ## Outputs
 
@@ -139,7 +144,7 @@ Typical rigid CRM run directory (`--output-dir ...`):
 
 - `config.json` — soil, numerics, mesh, and capacity settings
 - `summary.csv` — per-frame metrics (pose, counts, fill ratios, torque/work/specific energy)
-- `soil_loads.csv` — per-step soil wrench when `--loads-file` is used
+- `soil_loads.csv` — time-interpolated soil wrench at `--loads-fps` cadence when `--loads-file` is used
 - `particles_*.csv` — per-frame particle positions/flags when `--save-particles` is used
 - `paraview/` — PVD/VTP/VTU exports when `--export-vtk` is used
 
