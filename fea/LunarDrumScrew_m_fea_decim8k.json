@@ -1,11 +1,11 @@
 {
-  "source_step": "/mnt/P3/Programs/Linux/pychrono/geometry/LunarDrumScrew_m.step",
+  "source_step": "geometry/LunarDrumScrew_m.step",
   "pipeline": "OpenCASCADE STL -> MeshFix -> TetGen",
   "outputs": {
-    "abaqus": "/tmp/opencode/feamesh8k.inp",
-    "tetgen_node": "/tmp/opencode/feamesh8k.node",
-    "tetgen_ele": "/tmp/opencode/feamesh8k.ele",
-    "surface_stl": "/tmp/opencode/feamesh8k_surface.stl"
+    "abaqus": "fea/LunarDrumScrew_m_fea_decim8k.inp",
+    "tetgen_node": "fea/LunarDrumScrew_m_fea_decim8k.node",
+    "tetgen_ele": "fea/LunarDrumScrew_m_fea_decim8k.ele",
+    "surface_stl": "fea/LunarDrumScrew_m_fea_decim8k_surface.stl"
   },
   "units": "metres",
   "unit_scale": 0.001,

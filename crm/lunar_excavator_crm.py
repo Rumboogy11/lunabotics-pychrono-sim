@@ -1,4 +1,4 @@
-#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
+#!/usr/bin/env python3
 """Lunar bucket-drum excavator -- primary Chrono::CRM design driver.
 
 This is the geometry-optimization model for the project.  It treats lunar

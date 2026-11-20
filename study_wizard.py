@@ -1,4 +1,4 @@
-#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
+#!/usr/bin/env python3
 """Interactive wrapper for a complete CRM -> one-way FEA excavator study.
 
 It asks for geometry, run time, bed/numerics, and solver settings, writes a

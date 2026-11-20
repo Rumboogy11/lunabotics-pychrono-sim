@@ -1,4 +1,4 @@
-#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
+#!/usr/bin/env python3
 """Convert STL meshes to Wavefront OBJ.
 
 Chrono mesh loaders commonly consume OBJ files. The shipped excavator STL files

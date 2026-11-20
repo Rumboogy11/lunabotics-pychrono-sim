@@ -1,4 +1,4 @@
-#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
+#!/usr/bin/env python3
 """Combined report runner: rigid CRM soil response plus FEA drum diagnostic.
 
 This orchestrator runs the production rigid-body CRM driver and the

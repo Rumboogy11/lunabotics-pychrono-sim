@@ -1,4 +1,4 @@
-#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
+#!/usr/bin/env python3
 """Independent soil estimates for the Chrono::CRM excavator model.
 
 These values are best-estimate starting points for a loose lunar-regolith

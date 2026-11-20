@@ -1,4 +1,4 @@
-#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
+#!/usr/bin/env python3
 """Shared excavator geometry and kinematic defaults.
 
 This module provides the baseline drum dimensions and motion/pose helpers used by

@@ -1,6 +1,6 @@
 {
-  "study_dir": "/mnt/P3/Programs/Linux/pychrono",
-  "out_dir": "/mnt/P3/Programs/Linux/pychrono/paraview",
+  "study_dir": ".",
+  "out_dir": "paraview",
   "spin_axis": "X",
   "stride": 1,
   "workers": 1,

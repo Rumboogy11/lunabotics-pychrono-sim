@@ -1,4 +1,4 @@
-#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
+#!/usr/bin/env python3
 """One-way CRM -> FEA lunar excavator structural driver.
 
 This variant avoids the unstable two-way SPH/flex-BCE coupling in

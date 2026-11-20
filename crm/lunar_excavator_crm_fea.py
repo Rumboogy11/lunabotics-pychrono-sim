@@ -1,4 +1,4 @@
-#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
+#!/usr/bin/env python3
 """Lunar bucket-drum excavator -- spindle-driven FEA structural check.
 
 This variant couples the generated solid PLA tetrahedral mesh to the same

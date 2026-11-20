@@ -1,4 +1,4 @@
-#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
+#!/usr/bin/env python3
 """Tkinter GUI consolidating PyChrono excavator study scripts.
 
 Provides an editable, multi-step study builder for the CRM -> one-way FEA

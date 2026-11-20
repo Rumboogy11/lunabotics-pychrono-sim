@@ -1,4 +1,4 @@
-#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
+#!/usr/bin/env python3
 """Convert a STEP CAD model into a Chrono-ready tetrahedral FEA mesh.
 
 This converter uses OpenCASCADE to read and tessellate the STEP solid, MeshFix to

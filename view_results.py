@@ -1,4 +1,4 @@
-#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
+#!/usr/bin/env python3
 """Summarise and plot a completed CRM -> one-way FEA study.
 
 The wizard calls this automatically after a successful run to save

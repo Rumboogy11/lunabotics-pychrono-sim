@@ -1,4 +1,4 @@
-#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
+#!/usr/bin/env python3
 """Export a CRM/one-way-FEA study to ParaView-friendly VTK time series.
 
 This script converts existing study outputs into files that ParaView can load

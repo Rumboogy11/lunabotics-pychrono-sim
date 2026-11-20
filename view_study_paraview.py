@@ -1,4 +1,4 @@
-#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
+#!/usr/bin/env python3
 """ParaView visualization script for a CRM/FEA study exported by export_study_vtk.py.
 
 Recommended full ParaView GUI (pass the export dir via environment variable):

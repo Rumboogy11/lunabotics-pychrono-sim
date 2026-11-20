@@ -1,4 +1,4 @@
-#!/usr/bin/env -S /mnt/P3/Programs/Linux/pychrono/chrono-env/bin/python
+#!/usr/bin/env python3
 """Render the original STEP CAD and its converted FEA surface side by side.
 
 The STEP converter (:mod:`step_to_chrono_fea`) rotates the drum axis onto the
@@ -218,7 +218,16 @@ def main() -> int:
     if surface_path is None:
         recorded = meta.get("outputs", {}).get("surface_stl")
         if recorded:
-            surface_path = Path(recorded)
+            recorded_path = Path(recorded)
+            if recorded_path.is_absolute():
+                surface_path = recorded_path
+            else:
+                # Sidecar paths are relative to the repository root, but also
+                # accept paths relative to the sidecar itself (older exports).
+                candidates = [ROOT / recorded_path]
+                if fea_node is not None:
+                    candidates.insert(0, fea_node.parent / recorded_path)
+                surface_path = next((p for p in candidates if p.is_file()), candidates[-1])
     if surface_path is None:
         surface_path = from_config("crm_obj")
     if surface_path is None and fea_node is not None:
