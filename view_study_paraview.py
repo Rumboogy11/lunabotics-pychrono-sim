@@ -6,16 +6,22 @@ Recommended full ParaView GUI (pass the export dir via environment variable):
 
 pvpython render window (stays open until the render window is closed):
     pvpython /path/to/view_study_paraview.py /path/to/study/paraview
+    # add the validated FEA stress/deformation overlay when available:
+    pvpython /path/to/view_study_paraview.py /path/to/study/paraview --with-fea
 
-It loads, when available (as separate pipeline sources so each can have its own
-render settings):
+By default this loads the *non-FEA* CRM animation, as separate pipeline sources
+so each can have its own render settings:
   - crm_particles.pvd : particle point cloud over time, rendered as 3D spheres
         sized from the study's SPH spacing/radius and colored by state.
   - excavator.pvd     : rigid excavator/drum surface over time.
-  - fea.pvd/fea/vtk/fea.pvd : one-way FEA mesh over time, colored by von Mises
-        stress (von_mises_MPa) and warped by Displacement when available.
+The equivalent combined collection is crm_animation.pvd (also written as the
+backwards-compatible combined.pvd); neither contains FEA data.
 
-All sources share study time steps where possible so they can animate together.
+FEA is opt-in via --with-fea/--fea-only and is loaded only when its PVD is a
+valid, complete time series according to export_manifest.json (or, without a
+manifest, after local validation).  A one-frame/t=0 FEA PVD from a cancelled run
+is ignored, so it cannot obscure or freeze the excavation animation.
+
 If no argument is given, the script tries ./paraview in the current directory.
 """
 
@@ -45,7 +51,12 @@ def _parse_args(argv: list[str]):
     ap.add_argument("--particle-style", choices=("spheres", "points"), default="spheres")
     ap.add_argument("--no-particles", action="store_true")
     ap.add_argument("--no-excavator", action="store_true")
-    ap.add_argument("--no-fea", action="store_true")
+    ap.add_argument("--no-fea", action="store_true",
+                    help="never load FEA (FEA is already excluded by default)")
+    ap.add_argument("--with-fea", action="store_true",
+                    help="also overlay a validated FEA series on the non-FEA CRM animation")
+    ap.add_argument("--fea-only", action="store_true",
+                    help="load only the validated FEA series (stress/deformation)")
     ap.add_argument("--no-interact", action="store_true",
                     help="do not keep the pvpython render window open (batch setups only)")
     args, unknown = ap.parse_known_args(user_argv)
@@ -100,6 +111,80 @@ def _resolve_export_dir(path_like: str | None) -> Path | None:
     return p if p.exists() else None
 
 
+def validate_fea_pvd_file(path: Path) -> tuple[bool, str]:
+    """Local sanity check used when no export manifest is available.
+
+    The FEA writer updates fea.pvd incrementally, so a cancelled run can leave
+    a valid-looking PVD with a single t=0 frame.  Require more than one frame
+    with a positive final time and existing frame files.
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.parse(path).getroot()
+    except Exception as exc:
+        return False, f"cannot parse {path}: {exc}"
+    entries: list[tuple[float, Path]] = []
+    for ds in root.findall(".//DataSet"):
+        try:
+            t = float(ds.attrib.get("timestep", "0"))
+        except Exception:
+            t = 0.0
+        file = ds.attrib.get("file", "")
+        if not file:
+            continue
+        frame = Path(file)
+        if not frame.is_absolute():
+            frame = path.parent / frame
+        entries.append((t, frame))
+    if not entries:
+        return False, f"{path} has no DataSet entries"
+    missing = [str(f) for _, f in entries if not f.is_file() or f.stat().st_size == 0]
+    if missing:
+        return False, f"{len(missing)} FEA frame(s) missing/empty"
+    times = [t for t, _ in entries]
+    if len(entries) < 2 or max(times) <= 0.0:
+        return False, (f"incomplete FEA series ({len(entries)} frame(s), last t={max(times):g}s); "
+                       "likely a cancelled run")
+    return True, f"{len(entries)} frames to {max(times):g}s"
+
+
+def find_valid_fea_pvd(export_dir: Path, manifest: dict) -> tuple[Path | None, str]:
+    """Locate a validated FEA series, never falling back to arbitrary rglob hits."""
+    series = manifest.get("series") if isinstance(manifest.get("series"), dict) else {}
+    if manifest.get("fea_valid") is False:
+        return None, (f"manifest marks FEA export invalid: {manifest.get('fea_status', 'incomplete')}")
+    candidates: list[Path] = []
+    for key in ("fea", "fea_source"):
+        value = series.get(key)
+        if value:
+            candidates.append(Path(str(value)))
+    candidates.extend([
+        export_dir / "fea.pvd",
+        export_dir.parent / "fea" / "vtk" / "fea.pvd",
+    ])
+    checked: set[Path] = set()
+    notes: list[str] = []
+    for cand in candidates:
+        c = cand if cand.is_absolute() else (export_dir / cand)
+        try:
+            c = c.resolve()
+        except Exception:
+            pass
+        if c in checked:
+            continue
+        checked.add(c)
+        if not c.is_file():
+            continue
+        valid, reason = validate_fea_pvd_file(c)
+        if valid:
+            return c, reason
+        notes.append(f"{c}: {reason}")
+    if notes:
+        return None, "; ".join(notes)
+    return None, "no fea.pvd found in the export or study FEA directory"
+
+
 def main():
     args = _parse_args(sys.argv)
     export_dir = _resolve_export_dir(args.export_dir or "paraview")
@@ -115,7 +200,7 @@ def main():
     try:
         from paraview.simple import (  # type: ignore
             PVDReader, Show, Hide, ColorBy, GetDisplayProperties, GetActiveViewOrCreate,
-            GetColorTransferFunction, GetOpacityTransferFunction, ResetCamera,
+            GetColorTransferFunction, GetOpacityTransferFunction, GetScalarBar, ResetCamera,
             Render, SetActiveSource, WarpByVector, Glyph, Sphere, _DisableFirstRenderCameraReset,
             GetAnimationScene, UpdatePipeline,
         )
@@ -141,6 +226,18 @@ def main():
     print(f"[view_study_paraview] export dir: {export_dir}")
     print(f"[view_study_paraview] manifest: {manifest or '(none)'}")
 
+    want_fea = (args.with_fea or args.fea_only) and not args.no_fea
+    want_crm = not args.fea_only
+    if args.fea_only:
+        active_series = "FEA only (validated series)"
+    elif want_fea:
+        active_series = "CRM animation (non-FEA) + validated FEA overlay"
+    else:
+        active_series = "CRM animation (non-FEA; FEA excluded)"
+    print(f"[view_study_paraview] active series: {active_series}")
+    print("  PVD files: crm_particles.pvd + excavator.pvd = crm_animation.pvd (aka combined.pvd); "
+          "fea.pvd/with_fea.pvd only when FEA export is valid")
+
     # disable auto camera reset on first show so multiple sources compose
     try:
         _DisableFirstRenderCameraReset()
@@ -158,7 +255,7 @@ def main():
 
     # --- CRM particles ---
     particles_pvd = find_pvd(export_dir, "crm_particles.pvd")
-    if particles_pvd and not args.no_particles:
+    if particles_pvd and not args.no_particles and want_crm:
         print(f"  loading particles: {particles_pvd}")
         particles = PVDReader(FileName=str(particles_pvd))
         particles.PointArrays = ['inside_drum', 'excavated']
@@ -272,7 +369,7 @@ def main():
 
     # --- Excavator/drum ---
     exc_pvd = find_pvd(export_dir, "excavator.pvd")
-    if exc_pvd and not args.no_excavator:
+    if exc_pvd and not args.no_excavator and want_crm:
         print(f"  loading excavator: {exc_pvd}")
         excav = PVDReader(FileName=str(exc_pvd))
         try:
@@ -292,37 +389,13 @@ def main():
         SetActiveSource(excav)
         sources_shown.append(('excavator', excav))
 
-    # --- FEA (stress + deformation) ---
+    # --- FEA (stress + deformation), opt-in and validated ---
     fea_pvd = None
-    manifest_fea = manifest.get("series", {}).get("fea") if isinstance(manifest.get("series"), dict) else None
-    candidates = []
-    if manifest_fea:
-        candidates.append(Path(str(manifest_fea)))
-    candidates.extend([
-        export_dir / "fea.pvd",
-        export_dir / "fea" / "fea.pvd",
-        export_dir.parent / "fea" / "vtk" / "fea.pvd",
-        export_dir.parent / "vtk" / "fea.pvd",
-    ])
-    for cand in candidates:
-        try:
-            c = cand if cand.is_absolute() else (export_dir / cand)
-            c = c.resolve()
-        except Exception:
-            c = cand
-        if c.is_file():
-            fea_pvd = c
-            break
-    if fea_pvd is None:
-        for cand in export_dir.rglob("fea.pvd"):
-            fea_pvd = cand
-            break
-        if fea_pvd is None and export_dir.parent.is_dir():
-            for cand in export_dir.parent.rglob("fea.pvd"):
-                fea_pvd = cand
-                break
-    if fea_pvd and not args.no_fea:
-        print(f"  loading FEA: {fea_pvd}")
+    fea_status = ""
+    if want_fea:
+        fea_pvd, fea_status = find_valid_fea_pvd(export_dir, manifest)
+    if fea_pvd is not None:
+        print(f"  loading FEA ({fea_status}): {fea_pvd}")
         fea = PVDReader(FileName=str(fea_pvd))
         try:
             UpdatePipeline(proxy=fea)
@@ -414,9 +487,12 @@ def main():
                 pass
         SetActiveSource(disp_source)
         sources_shown.append(('fea', disp_source))
+    elif want_fea:
+        print(f"  FEA: not loaded ({fea_status}). To view 3D stress/deformation, rerun one-way FEA "
+              "to completion with --export-vtk, then re-run export_study_vtk.py.")
     elif not args.no_fea:
-        print("  FEA: no fea.pvd found. To view 3D stress/deformation, rerun one-way FEA with --export-vtk "
-              "(and --vtk-stride/--vtk-fps as desired), then re-export or point this script at fea/vtk/fea.pvd.")
+        print("  FEA: excluded from the default non-FEA series. Use --with-fea to overlay a "
+              "validated FEA export (requires a complete FEA VTK run).")
 
     if not sources_shown:
         print("[view_study_paraview] nothing loaded. Expected crm_particles.pvd/excavator.pvd/fea.pvd in", export_dir)
@@ -442,13 +518,16 @@ def main():
         pass
 
     print("[view_study_paraview] Scene ready.")
-    print("  - Particles: separate source rendered as 3D spheres (toggle/scale in Pipeline Browser if needed).")
-    print("  - Excavator: separate rigid surface source with its own render settings.")
-    if fea_pvd and not args.no_fea:
-        print("  - FEA: colored by von Mises stress and warped by displacement by default. "
+    print(f"  - Active series: {active_series}")
+    print("  - Particles: non-FEA source rendered as 3D spheres (toggle/scale in Pipeline Browser if needed).")
+    print("  - Excavator: non-FEA rigid surface source with its own render settings; poses come from CRM summary.")
+    if fea_pvd is not None:
+        print("  - FEA: validated overlay, colored by von Mises stress and warped by displacement by default. "
               "Adjust warp 'Scale Factor' to exaggerate deformation.")
+    elif want_fea:
+        print("  - FEA: no valid series loaded; the non-FEA animation remains available without FEA.")
     else:
-        print("  - FEA: no stress frames found/loaded. Enable --export-vtk in one-way FEA and re-run export_study_vtk.py.")
+        print("  - FEA: excluded by default. Use --with-fea after a complete FEA VTK run and re-export.")
     print("  - Use time controls to animate; if particles obscure geometry, adjust opacity/visibility per source.")
 
     # pvpython exits as soon as this script returns unless an interactive render

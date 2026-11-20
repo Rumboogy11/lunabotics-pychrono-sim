@@ -44,6 +44,13 @@ Example
     ./chrono-env/bin/python step_to_chrono_fea.py geometry/NewDrum.step \\
         --out-prefix fea/NewDrum_fea --unit-scale 0.001 \\
         --mesh-size 0.012 --axis Y --hub-radius 0.035 --tetgen-switches pYQ
+
+    # Experimental: preserve exterior screw faces and simplify only the hub region.
+    ./chrono-env/bin/python step_to_chrono_fea.py "geometry/spikey/Assembly 1.step" \\
+        --out-prefix fea/PartAware_fea --unit-scale 0.001 \\
+        --mesh-size 0.02 --surface-target-faces 80000 --min-solid-volume 1e-05 \\
+        --hub-radius 0.0357669 --axis Y --tetgen-switches pYQ \\
+        --part-aware-simplify --part-aware-radius 0.05 --part-aware-reduction 0.75
 """
 
 from __future__ import annotations
@@ -63,19 +70,28 @@ import trimesh
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
 from OCP.BRepTools import BRepTools
 from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
+from OCP.BRep import BRep_Tool
+from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
+from OCP.Bnd import Bnd_Box
 from OCP.GProp import GProp_GProps
 from OCP.IFSelect import IFSelect_RetDone
 from OCP.ShapeFix import ShapeFix_Shape
 from OCP.StlAPI import StlAPI_Writer
 from OCP.STEPControl import STEPControl_Reader
-from OCP.TopAbs import TopAbs_FACE, TopAbs_SOLID
+from OCP.TopAbs import TopAbs_FACE, TopAbs_SOLID, TopAbs_VERTEX
 from OCP.TopExp import TopExp_Explorer
+from OCP.TopoDS import TopoDS
 
 AXES = {"X": 0, "Y": 1, "Z": 2}
 AXES_TO_NAME = {0: "X", 1: "Y", 2: "Z"}
+
+
+def radial_axes(axis: int) -> list[int]:
+    """Indices of the two coordinate axes perpendicular to ``axis``."""
+    return [i for i in range(3) if i != axis]
 
 
 def parse_vec3(text: str) -> tuple[float, float, float]:
@@ -227,6 +243,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="drop assembly solids smaller than this volume in m^3 before fusion; "
              "useful for removing tiny fasteners (default: 0)",
     )
+
+    p.add_argument(
+        "--part-aware-simplify",
+        action="store_true",
+        help="experimental part-aware path: keep exterior/large surface faces at the validated "
+             "fine fidelity and decimate only hub/interior faces within --part-aware-radius. "
+             "Off by default; does not affect production meshes.",
+    )
+    p.add_argument(
+        "--part-aware-radius",
+        type=float,
+        default=0.05,
+        help="maximum radial distance from the source drum axis (metres) for a face to be "
+             "eligible for part-aware interior decimation; faces touching this radius are "
+             "kept as a fixed boundary (default: 0.05)",
+    )
+    p.add_argument(
+        "--part-aware-reduction",
+        type=float,
+        default=0.75,
+        help="fraction of eligible interior faces to remove with topology-preserving, "
+             "boundary-fixed decimation (default: 0.75)",
+    )
+    p.add_argument(
+        "--part-aware-min-faces",
+        type=int,
+        default=500,
+        help="skip part-aware simplification if fewer than this many interior faces are found "
+             "(default: 500)",
+    )
+    p.add_argument(
+        "--part-aware-solid-analysis-deflection",
+        type=float,
+        default=None,
+        help="OCC tessellation deflection in metres used only to classify CAD solids for "
+             "part-aware metadata (default: same as --surface-deflection)",
+    )
+
     p.add_argument(
         "--no-occ-parallel",
         action="store_true",
@@ -257,6 +311,77 @@ def count_topology(shape) -> tuple[int, int]:
             explorer.Next()
         counts.append(n)
     return counts[0], counts[1]
+
+
+def analyze_cad_solids(
+    shape,
+    *,
+    axis: int,
+    unit_scale: float,
+    deflection_cad: float,
+    angular_deflection: float,
+) -> list[dict]:
+    """Describe each STEP solid before fusion for part-aware diagnostics.
+
+    Only used when ``--part-aware-simplify`` is requested.  Sampling OCC
+    vertices (rather than bounding-box corners) avoids misclassifying circular
+    end rings as exterior flight geometry.
+    """
+    axes = radial_axes(axis)
+    rows: list[dict] = []
+    explorer = TopExp_Explorer(shape, TopAbs_SOLID)
+    index = 0
+    while explorer.More():
+        solid = explorer.Current()
+        props = GProp_GProps()
+        BRepGProp.VolumeProperties_s(solid, props)
+        volume = float(props.Mass()) * unit_scale**3
+        centre = props.CentreOfMass()
+        com = np.array([centre.X(), centre.Y(), centre.Z()]) * unit_scale
+
+        box = Bnd_Box()
+        BRepBndLib.Add_s(solid, box, True)
+        bmin = np.array([box.GetXMin(), box.GetYMin(), box.GetZMin()]) * unit_scale
+        bmax = np.array([box.GetXMax(), box.GetYMax(), box.GetZMax()]) * unit_scale
+
+        face_explorer = TopExp_Explorer(solid, TopAbs_FACE)
+        n_faces = 0
+        while face_explorer.More():
+            n_faces += 1
+            face_explorer.Next()
+
+        mesher = BRepMesh_IncrementalMesh(
+            solid, deflection_cad, False, angular_deflection, True
+        )
+        mesher.Perform()
+        vertex_explorer = TopExp_Explorer(solid, TopAbs_VERTEX)
+        sampled = []
+        while vertex_explorer.More():
+            point = BRep_Tool.Pnt_s(TopoDS.Vertex(vertex_explorer.Current()))
+            sampled.append((point.X() * unit_scale, point.Y() * unit_scale, point.Z() * unit_scale))
+            vertex_explorer.Next()
+        if sampled:
+            sampled = np.asarray(sampled, dtype=float)
+            radii = np.linalg.norm(sampled[:, axes], axis=1)
+            radial_min, radial_max = float(radii.min()), float(radii.max())
+        else:
+            radial_min = radial_max = float(np.linalg.norm(com[axes]))
+
+        rows.append(
+            {
+                "index": index,
+                "volume_m3": volume,
+                "faces": n_faces,
+                "com_m": com.tolist(),
+                "bbox_min_m": bmin.tolist(),
+                "bbox_max_m": bmax.tolist(),
+                "radial_min_m": radial_min,
+                "radial_max_m": radial_max,
+            }
+        )
+        index += 1
+        explorer.Next()
+    return rows
 
 
 def fuse_solids(shape, *, min_volume_m3: float = 0.0, unit_scale: float = 1.0):
@@ -319,6 +444,9 @@ def read_cad(
     fuse_assembly: bool = True,
     min_volume_m3: float = 0.0,
     unit_scale: float = 1.0,
+    axis: int = AXES["Y"],
+    angular_deflection: float = 0.15,
+    solid_analysis_deflection_cad: float | None = None,
 ):
     reader = STEPControl_Reader()
     if reader.ReadFile(str(step_path)) != IFSelect_RetDone:
@@ -337,6 +465,16 @@ def read_cad(
     if solids < 1:
         raise RuntimeError("STEP file contains no 3D solids")
 
+    solid_features = None
+    if solid_analysis_deflection_cad is not None:
+        solid_features = analyze_cad_solids(
+            shape,
+            axis=axis,
+            unit_scale=unit_scale,
+            deflection_cad=solid_analysis_deflection_cad,
+            angular_deflection=angular_deflection,
+        )
+
     kept = solids
     if fuse_assembly:
         shape, kept = fuse_solids(
@@ -345,7 +483,7 @@ def read_cad(
 
     props = GProp_GProps()
     BRepGProp.VolumeProperties_s(shape, props)
-    return shape, solids, faces, float(props.Mass()), kept
+    return shape, solids, faces, float(props.Mass()), kept, solid_features
 
 
 def write_surface_stl(shape, stl_path: Path, deflection_cad: float, angular_deflection: float) -> None:
@@ -455,6 +593,190 @@ def decimate_to_watertight(
         target = min(target * 2, max_faces)
 
 
+def simplify_interior_region(
+    points: np.ndarray,
+    faces: np.ndarray,
+    *,
+    axis: int,
+    radius_cad: float,
+    unit_scale: float,
+    reduction: float,
+    min_faces: int,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Decimate only the hub/interior patch of a watertight surface.
+
+    Faces with *all* vertices inside ``radius_cad`` are eligible.  Their shared
+    boundary with the rest of the surface is extracted as an open patch and
+    simplified with ``vtkDecimatePro`` configured to preserve topology and never
+    delete boundary vertices.  The protected (exterior/flight) faces are copied
+    verbatim, so their geometry is bit-for-bit identical to the validated fine
+    surface.  retries lower the requested reduction if a watertight result
+    cannot be produced.
+    """
+    points = np.asarray(points, dtype=float)
+    faces = np.asarray(faces, dtype=np.int32)
+    axes = radial_axes(axis)
+    radii = np.linalg.norm(points[:, axes], axis=1)
+    interior_mask = (radii[faces] <= radius_cad).all(axis=1)
+    interior_faces = faces[interior_mask]
+    protected_faces = faces[~interior_mask]
+
+    meta = {
+        "enabled": True,
+        "applied": False,
+        "reason": "",
+        "radius_m": radius_cad * unit_scale,
+        "radius_cad_units": radius_cad,
+        "reduction_requested": reduction,
+        "faces_eligible": int(len(interior_faces)),
+        "faces_protected": int(len(protected_faces)),
+        "min_faces_required": int(min_faces),
+    }
+    if len(interior_faces) < min_faces:
+        meta["reason"] = (
+            f"only {len(interior_faces)} interior faces found (< {min_faces}); "
+            "left the surface unchanged"
+        )
+        return points, faces, meta
+    if len(protected_faces) == 0:
+        meta["reason"] = "no protected exterior faces found; left the surface unchanged"
+        return points, faces, meta
+
+    patch_vertices = np.unique(interior_faces)
+    protected_vertices = np.unique(protected_faces)
+    boundary_vertices = np.intersect1d(patch_vertices, protected_vertices, assume_unique=True)
+    local_index = np.full(len(points), -1, dtype=np.int64)
+    local_index[patch_vertices] = np.arange(len(patch_vertices), dtype=np.int64)
+    patch_faces = local_index[interior_faces]
+    patch_points = points[patch_vertices]
+
+    parent = np.arange(len(patch_points), dtype=np.int64)
+
+    def find_root(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = int(parent[node])
+        return node
+
+    for tri in patch_faces:
+        for a, b in ((tri[0], tri[1]), (tri[1], tri[2])):
+            root_a, root_b = find_root(int(a)), find_root(int(b))
+            if root_a != root_b:
+                parent[root_b] = root_a
+    patch_components = len({find_root(int(i)) for i in local_index[patch_vertices]})
+
+    def coordinate_key(point: np.ndarray) -> tuple[float, ...]:
+        return tuple(np.round(point, 9))
+
+    original_coords = {coordinate_key(point): i for i, point in enumerate(points)}
+    boundary_keys = {coordinate_key(points[i]) for i in boundary_vertices}
+
+    current_reduction = reduction
+    attempts: list[dict] = []
+    last_error = ""
+    for attempt in range(4):
+        target_faces = max(4, int(round(len(patch_faces) * (1.0 - current_reduction))))
+        patch = pv.PolyData(
+            patch_points,
+            np.column_stack(
+                [np.full(len(patch_faces), 3, dtype=np.int64), patch_faces.astype(np.int64)]
+            ).ravel(),
+        )
+        try:
+            reduced = patch.decimate_pro(
+                reduction=1.0 - target_faces / len(patch_faces),
+                feature_angle=45.0,
+                split_angle=75.0,
+                splitting=False,
+                preserve_topology=True,
+                boundary_vertex_deletion=False,
+            )
+            reduced_points = np.asarray(reduced.points, dtype=float)
+            reduced_faces = reduced.faces.reshape(-1, 4)[:, 1:].astype(np.int32)
+        except Exception as exc:  # pragma: no cover - defensive against VTK edge cases
+            last_error = f"decimation failed: {exc}"
+            current_reduction *= 0.5
+            continue
+
+        remapped = np.empty(len(reduced_points), dtype=np.int64)
+        appended: list[np.ndarray] = []
+        appended_keys: dict[tuple[float, ...], int] = {}
+        for j, point in enumerate(reduced_points):
+            key = coordinate_key(point)
+            original = original_coords.get(key)
+            if original is not None:
+                remapped[j] = original
+                continue
+            appended_index = appended_keys.get(key)
+            if appended_index is None:
+                appended_index = len(points) + len(appended)
+                appended_keys[key] = appended_index
+                appended.append(point)
+            remapped[j] = appended_index
+
+        remaining_boundary = boundary_keys - {
+            coordinate_key(point) for point in reduced_points
+        }
+        candidate_faces = np.vstack([protected_faces, remapped[reduced_faces]])
+        degenerate = np.any(
+            (candidate_faces[:, 0] == candidate_faces[:, 1])
+            | (candidate_faces[:, 1] == candidate_faces[:, 2])
+            | (candidate_faces[:, 2] == candidate_faces[:, 0])
+        )
+        watertight = False
+        if not degenerate and not remaining_boundary:
+            candidate_points = (
+                np.vstack([points, np.asarray(appended, dtype=float)])
+                if appended
+                else points.copy()
+            )
+            watertight = bool(
+                trimesh.Trimesh(candidate_points, candidate_faces, process=False).is_watertight
+            )
+        attempts.append(
+            {
+                "attempt": attempt + 1,
+                "reduction": current_reduction,
+                "faces_after": int(len(reduced_faces)),
+                "boundary_vertices_missing": len(remaining_boundary),
+                "watertight": watertight,
+            }
+        )
+        if watertight:
+            surface_before = trimesh.Trimesh(points, faces, process=False)
+            surface_after = trimesh.Trimesh(candidate_points, candidate_faces, process=False)
+            meta.update(
+                {
+                    "applied": True,
+                    "reason": (
+                        f"interior faces within {radius_cad * unit_scale:g} m of the drum axis "
+                        "decimated with fixed boundary and topology preservation; exterior "
+                        "faces copied unchanged"
+                    ),
+                    "reduction_achieved": 1.0 - len(reduced_faces) / len(patch_faces),
+                    "reduction_used": current_reduction,
+                    "attempts": attempts,
+                    "interior_patches": patch_components,
+                    "boundary_vertices": len(boundary_vertices),
+                    "faces_before": int(len(faces)),
+                    "faces_after": int(len(candidate_faces)),
+                    "surface_volume_before_m3": abs(float(surface_before.volume)) * unit_scale**3,
+                    "surface_volume_after_m3": abs(float(surface_after.volume)) * unit_scale**3,
+                    "exterior_faces_unchanged": True,
+                }
+            )
+            return candidate_points, candidate_faces, meta
+        last_error = (
+            f"watertight={watertight}, missing boundary vertices={len(remaining_boundary)}, "
+            f"degenerate={degenerate}"
+        )
+        current_reduction *= 0.5
+
+    meta["reason"] = f"part-aware simplification skipped: {last_error}"
+    meta["attempts"] = attempts
+    return points, faces, meta
+
+
 def write_node_set(handle, name: str, ids: list[int], per_line: int = 10) -> None:
     handle.write(f"*NSET, NSET={name}\n")
     for i in range(0, len(ids), per_line):
@@ -551,6 +873,19 @@ def main() -> int:
         raise SystemExit("--mesh-size must be positive")
     if args.hub_radius < 0.0:
         raise SystemExit("--hub-radius must be non-negative")
+    if args.part_aware_radius <= 0.0:
+        raise SystemExit("--part-aware-radius must be positive")
+    if not 0.0 <= args.part_aware_reduction < 1.0:
+        raise SystemExit("--part-aware-reduction must be in [0, 1)")
+    if args.part_aware_min_faces < 0:
+        raise SystemExit("--part-aware-min-faces must be non-negative")
+    if args.part_aware_solid_analysis_deflection is not None and args.part_aware_solid_analysis_deflection <= 0.0:
+        raise SystemExit("--part-aware-solid-analysis-deflection must be positive")
+    if args.part_aware_simplify and args.repair_after_decimation:
+        raise SystemExit(
+            "--part-aware-simplify is not compatible with the legacy "
+            "--repair-after-decimation route"
+        )
 
     prefix = (args.out_prefix or (Path("fea") / f"{step_path.stem}_fea")).resolve()
     prefix.parent.mkdir(parents=True, exist_ok=True)
@@ -588,11 +923,21 @@ def main() -> int:
     if max_tet_volume <= 0.0:
         raise SystemExit("--max-tet-volume must be positive")
 
-    shape, n_solids, n_faces, cad_volume_cad, kept_solids = read_cad(
+    solid_analysis_deflection = (
+        args.part_aware_solid_analysis_deflection
+        if args.part_aware_solid_analysis_deflection is not None
+        else surface_deflection
+    )
+    shape, n_solids, n_faces, cad_volume_cad, kept_solids, solid_features = read_cad(
         step_path,
         fuse_assembly=not args.no_fuse_assembly,
         min_volume_m3=args.min_solid_volume,
         unit_scale=args.unit_scale,
+        axis=args.axis,
+        angular_deflection=args.angular_deflection,
+        solid_analysis_deflection_cad=(
+            solid_analysis_deflection / args.unit_scale if args.part_aware_simplify else None
+        ),
     )
     cad_volume = cad_volume_cad * args.unit_scale**3
     mark("read/fuse CAD")
@@ -667,6 +1012,41 @@ def main() -> int:
                     file=sys.stderr,
                 )
         surface_pipeline = "OpenCASCADE STL -> topology-preserving decimation -> TetGen"
+
+    part_aware_meta = {
+        "enabled": bool(args.part_aware_simplify),
+        "applied": False,
+        "reason": "optional part-aware path was not requested",
+    }
+
+    def apply_part_aware(pts: np.ndarray, fcs: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict]:
+        return simplify_interior_region(
+            pts,
+            fcs,
+            axis=args.axis,
+            radius_cad=args.part_aware_radius / args.unit_scale,
+            unit_scale=args.unit_scale,
+            reduction=args.part_aware_reduction,
+            min_faces=args.part_aware_min_faces,
+        )
+
+    if args.part_aware_simplify:
+        repaired_points, repaired_faces, part_aware_meta = apply_part_aware(
+            repaired_points, repaired_faces
+        )
+        surface_pipeline = surface_pipeline.replace(
+            " -> TetGen", " -> part-aware interior decimation -> TetGen"
+        )
+        print(
+            "[part-aware] "
+            f"eligible faces={part_aware_meta['faces_eligible']} "
+            f"applied={part_aware_meta['applied']} "
+            f"faces={part_aware_meta.get('faces_before', len(repaired_faces))}->"
+            f"{part_aware_meta.get('faces_after', len(repaired_faces))}",
+            file=sys.stderr,
+        )
+        if not part_aware_meta["applied"]:
+            print(f"[part-aware] skipped: {part_aware_meta['reason']}", file=sys.stderr)
     mark("surface repair/decimation")
 
     if args.tetgen_switches:
@@ -698,6 +1078,10 @@ def main() -> int:
                 surface_target_current,
                 args.surface_max_faces,
             )
+            if args.part_aware_simplify:
+                repaired_points, repaired_faces, part_aware_meta = apply_part_aware(
+                    repaired_points, repaired_faces
+                )
             print(
                 f"Retrying surface with {surface_target_used} faces after TetGen "
                 "rejected self-intersections",
@@ -719,6 +1103,23 @@ def main() -> int:
         # CRM contact STL is scaled into metres.
         surface_points = np.asarray(surface_points, dtype=float) @ source_to_local.T
         surface_points_m = surface_points * args.unit_scale
+        if args.part_aware_simplify:
+            # Interior decimation can leave near-coincident vertices whose
+            # float64 coordinates make TetGen's subface recovery fail.  Snap to
+            # the same float32 metre precision used by the exported STL and
+            # merge duplicates before handing the surface to TetGen.  Exterior
+            # coordinates move by at most ~1e-5 m, far below the 1 mm CAD
+            # deflection used for tessellation.
+            snapped = trimesh.Trimesh(
+                surface_points_m.astype(np.float32).astype(float),
+                surface_faces,
+                process=True,
+            )
+            if not snapped.is_watertight:
+                raise RuntimeError("part-aware surface snapped to STL precision is not watertight")
+            surface_points_m = np.asarray(snapped.vertices, dtype=float)
+            surface_faces = np.asarray(snapped.faces, dtype=np.int32)
+            surface_points = surface_points_m / args.unit_scale
         trimesh.Trimesh(surface_points_m, surface_faces, process=False).export(stl_path)
 
         tet = tetgen.TetGen(surface_points, surface_faces)
@@ -751,9 +1152,9 @@ def main() -> int:
     surface_nodes_0 = np.unique(np.asarray(tet.trifaces, dtype=np.int32))
     surface_ids = (surface_nodes_0 + 1).tolist()
 
-    radial_axes = [0, 1]
+    hub_radial_axes = [0, 1]
     axial = points[:, 2]
-    radial = np.linalg.norm(points[:, radial_axes], axis=1)
+    radial = np.linalg.norm(points[:, hub_radial_axes], axis=1)
     hub_mask = radial <= args.hub_radius
     if args.hub_axial_min is not None:
         hub_mask &= axial >= args.hub_axial_min
@@ -821,6 +1222,19 @@ def main() -> int:
         "volume_relative_error": volume_error,
         "edge_quality": quality,
     }
+    if args.part_aware_simplify:
+        metadata.update(
+            {
+                "part_aware": part_aware_meta,
+                "part_aware_classified_interior_solids": [
+                    feature
+                    for feature in (solid_features or [])
+                    if feature["volume_m3"] >= args.min_solid_volume
+                    and feature["radial_max_m"] <= args.part_aware_radius
+                ],
+                "part_aware_solid_analysis_deflection_m": solid_analysis_deflection,
+            }
+        )
     meta_path = prefix.with_suffix(".json")
     with meta_path.open("w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)

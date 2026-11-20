@@ -304,6 +304,51 @@ def max_stable_sph_dt(spacing: float, d0_multiplier: float = 1.0) -> float:
     return 1.25e-4 * (spacing / 0.004) * d0_multiplier
 
 
+def fit_computational_domain(run: CrmRunParams, motion) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """World-axis deactivation bounds for the SPH computational domain.
+
+    This is distinct from ``fit_active_box``: Chrono's active box is expressed
+    in the FSI body frame and follows the rotating drum, while the computational
+    domain is a fixed world AABB used for the neighbor grid and the "zombie"
+    boundary that zeroes particle velocity.  Its default is derived from the
+    initial marker AABB (bed surface plus three BCE layers), which puts a hard
+    ceiling just above the bed and freezes excavated soil in mid-air.
+
+    Size the world box from the bed walls and the highest drum trajectory, with
+    two rotor diameters of vertical headroom and six spacings of lateral
+    clearance beyond the padded bed.  The bed BCE walls remain the physical
+    reflective boundary; this box only has to contain every moving marker.
+    """
+    half_x, half_y = bed_half_extents(
+        run.drum_radius, run.drum_half_length, run.spin_axis, run.bed_padding
+    )
+    # Chrono places three BCE layers outside each reflective bed wall and then
+    # grows the default domain by another three spacings.  Keep at least that
+    # margin so no boundary marker is clipped by the neighbor-search grid.
+    wall_margin = max(6.0 * run.spacing, 0.1 * run.drum_radius)
+    lateral_x = half_x + wall_margin
+    lateral_y = half_y + wall_margin
+    z_min = motion.floor_z - wall_margin
+    # The crest is highest at t=0.  Add the ballistic rise associated with the
+    # SPH EOS reference velocity plus two rotor diameters of headroom for
+    # faster numerical ejecta.  Chrono gives any marker at the ceiling a zombie
+    # flag, zeroes its velocity, and removes it from the active set; an
+    # undersized world domain therefore freezes a flat layer at that height
+    # instead of letting the soil fall back.
+    crest_z = motion.drum_center_z0 + run.drum_radius
+    ballistic_rise = run.max_velocity**2 / (2.0 * abs(float(MOTION_DEFAULT.gravity)))
+    z_max = crest_z + 4.0 * run.drum_radius + ballistic_rise + wall_margin
+    return ((-lateral_x, -lateral_y, z_min), (lateral_x, lateral_y, z_max))
+
+
+def computational_domain_aabb(chrono, bounds: tuple[tuple[float, float, float], tuple[float, float, float]]):
+    (xmin, ymin, zmin), (xmax, ymax, zmax) = bounds
+    return chrono.ChAABB(
+        chrono.ChVector3d(xmin, ymin, zmin),
+        chrono.ChVector3d(xmax, ymax, zmax),
+    )
+
+
 def fit_active_box(run: CrmRunParams) -> tuple[float, float, float]:
     """Size the SPH active box with generous clearance around the excavator.
 
@@ -748,12 +793,17 @@ def write_particle_csv(path: Path, positions: np.ndarray, flags: np.ndarray) -> 
 
 def write_config(path: Path, soil: CrmSoilParams, run: CrmRunParams,
                  mesh: Path, motion, capacity_volume: float,
-                 particle_mass: float, particle_mass_source: str) -> None:
+                 particle_mass: float, particle_mass_source: str,
+                 computational_domain: tuple[tuple[float, float, float], tuple[float, float, float]]) -> None:
     config = {
         "model": "Chrono::CRM (SPH continuum)",
         "soil": asdict(soil),
         "friction_angle_deg": soil.friction_angle_deg,
         "run": {**asdict(run), "active_box": list(run.active_box)},
+        "computational_domain": {
+            "min_m": list(computational_domain[0]),
+            "max_m": list(computational_domain[1]),
+        },
         "geometry": {
             "mesh": str(mesh),
             "drum_radius_m": motion.drum_radius,
@@ -797,6 +847,7 @@ def main() -> int:
         drum_radius=run.drum_radius,
         drum_half_length=run.drum_half_length,
     )
+    comp_domain = fit_computational_domain(run, motion)
     capacity_volume = (
         run.capacity_volume
         if run.capacity_volume is not None
@@ -820,9 +871,9 @@ def main() -> int:
                 f"{motion.z_target:.4f} m, bed surface z={surface_z:.4f} m",
                 f"soil bed: {2.0 * motion.bed_x_half:.4g} x {2.0 * motion.bed_y_half:.4g} m "
                 f"(padding {run.bed_padding:g} R), height={motion.bed_height:.4g} m",
-                f"active SPH box: {run.active_box}, capacity={capacity_volume:.6g} m^3 "
-                f"({capacity_volume * soil.density:.4f} kg) "
-                "[deactivation boundary outside the reflective bed walls]",
+                f"active SPH box: {run.active_box} (body frame, follows drum)",
+                f"world computational domain: min={comp_domain[0]}, max={comp_domain[1]}",
+                f"capacity={capacity_volume:.6g} m^3 ({capacity_volume * soil.density:.4f} kg)",
             ]
         ),
         flush=True,
@@ -845,6 +896,7 @@ def main() -> int:
     terrain = veh.CRMTerrain(system, run.spacing)
     terrain.SetVerbose(False)
     terrain.SetGravitationalAcceleration(chrono.ChVector3d(0.0, 0.0, MOTION_DEFAULT.gravity))
+    terrain.SetComputationalDomain(computational_domain_aabb(chrono, comp_domain), fsi.BC_NONE)
     terrain.SetStepSizeCFD(run.dt)
     if hasattr(terrain, "SetStepsizeMBD"):
         terrain.SetStepsizeMBD(run.dt)
@@ -867,11 +919,19 @@ def main() -> int:
     terrain.Initialize()
 
     fluid = get_fluid_system(terrain, fsi)
+    actual_domain = fluid.GetComputationalDomain()
+    # Record the domain Chrono actually installed, not just the requested one;
+    # this catches any future binding/API change that silently ignores it.
+    comp_domain = (vec_parts(actual_domain.min), vec_parts(actual_domain.max))
     particle_mass, mass_source = get_particle_mass(fluid, soil, run.spacing)
     print(
         f"SPH particles: {terrain.GetNumSPHParticles()}, "
         f"boundary BCE: {terrain.GetNumBoundaryBCEMarkers()}, "
         f"particle mass: {particle_mass:.6g} kg ({mass_source})",
+        flush=True,
+    )
+    print(
+        f"SPH computational domain after Initialize: min={comp_domain[0]}, max={comp_domain[1]}",
         flush=True,
     )
 
@@ -880,7 +940,7 @@ def main() -> int:
     if not args.no_output:
         write_config(
             out_dir / "config.json", soil, run, mesh, motion,
-            capacity_volume, particle_mass, mass_source,
+            capacity_volume, particle_mass, mass_source, comp_domain,
         )
         state_file = (out_dir / "summary.csv").open("w", newline="", encoding="utf-8")
         writer = csv.DictWriter(state_file, fieldnames=METRIC_FIELDS)

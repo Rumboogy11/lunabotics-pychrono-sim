@@ -639,7 +639,6 @@ def main() -> int:
     last_row = {}
     frame = 0
     wall_start = time.perf_counter()
-    next_progress = 0.0
     axis = np.array(fea_driver.spin_axis_tuple(motion), dtype=float)
     raw_stress = 0.0
 
@@ -721,6 +720,9 @@ def main() -> int:
 
     force_world, torque_world = loads.at(0.0)
     record(0.0, force_world, torque_world, 0.0)
+    # Progress uses the same simulated-time cadence as recorded output.
+    print(f"  t={0.0:7.3f}s / {run.duration:g}s", flush=True)
+    next_progress = 1.0 / run.fps
     next_output = 1.0 / run.fps
 
     t = 0.0
@@ -749,9 +751,9 @@ def main() -> int:
                 record(t, report_force, report_torque, motor_speed,
                        is_final=(t >= run.duration - 1.0e-12))
                 next_output += 1.0 / run.fps
-            if t >= next_progress:
+            if t >= next_progress - 1.0e-12:
                 print(f"  t={t:7.3f}s / {run.duration:g}s", flush=True)
-                next_progress += 1.0
+                next_progress += 1.0 / run.fps
     finally:
         if state_file is not None:
             state_file.close()

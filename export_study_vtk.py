@@ -2,7 +2,9 @@
 """Export a CRM/one-way-FEA study to ParaView-friendly VTK time series.
 
 This script converts existing study outputs into files that ParaView can load
-as time series:
+as time series. Every export regenerates the frames from the current CRM data;
+existing frames are never reused, so cancelled/older runs cannot leave a static
+or stale animation behind.
 
   <out>/crm_particles.pvd + crm_particles/frame_*.vtp
       SPH/CRM particle positions per output frame (from crm/particles_*.csv),
@@ -13,23 +15,28 @@ as time series:
       (from crm/summary.csv + mesh surface + config), so it can be shown
       together with the particles.
 
-  <out>/combined.pvd
-      A ParaView DataSet collection referencing both series so they open in the
-      same view with a shared time axis.
+  <out>/crm_animation.pvd
+      Canonical *non-FEA* series: CRM particles + rigid excavator poses only.
+      <out>/combined.pvd is written with the same content for backwards
+      compatibility. Neither file ever includes FEA data.
 
-If the one-way FEA driver was run with VTK export enabled, FEA frames live in
+If the one-way FEA driver produced a *complete* VTK export, frames live in
   <fea>/vtk/frame_*.vtu  and  <fea>/vtk/fea.pvd
 with point data (Displacement, DisplacementMagnitude) and cell data
-(von_mises_pa). This script will include fea/vtk/fea.pvd in combined.pvd when
-present.
+(von_mises_pa, von_mises_MPa). A validated copy is written to <out>/fea.pvd and
+the optional overlay <out>/with_fea.pvd adds FEA to the CRM animation. An
+incomplete/one-frame FEA PVD (e.g. from a cancelled run) is ignored and never
+mixed into the non-FEA series.
 
 Typical use::
 
     ./chrono-env/bin/python export_study_vtk.py \
         --study-dir Output_study_20261119_144040
 
-    # then in ParaView (recommended):
+    # then in ParaView (recommended, non-FEA by default):
     pvpython /path/to/view_study_paraview.py Output_study_20261119_144040/paraview
+    # add a validated FEA stress overlay when available:
+    pvpython /path/to/view_study_paraview.py Output_study_20261119_144040/paraview --with-fea
     # or ParaView GUI:
     # PYCHRONO_EXPORT_DIR=Output_study_20261119_144040/paraview paraview --script=/path/to/view_study_paraview.py
 
@@ -298,38 +305,41 @@ def write_pvd(entries: list[tuple[float, str]], path: Path) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def write_combined_pvd(parts: list[tuple[str, Path]], path: Path) -> None:
-    # Collection of collections/datasets: reference pvd files by nesting datasets is not
-    # standard, but ParaView can load a PVD that points to other datasets? Instead, write
-    # a MultiBlock .vtm is different; simplest portable way: write a PVD that includes
-    # multiple parts per timestep if aligned. Here CRM particles and excavator share
-    # timesteps, so emit one DataSet per part per timestep by reading their entries.
-    # Easier: create a PVD collection where each timestep has multiple DataSet entries
-    # with different part indices/names via 'part' - ParaView treats parts separately but
-    # same timestep; we can also just write separate entries.
-    # We'll merge aligned series (particles+excavator) by timestep.
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # load entries from each pvd
-    def parse_pvd(p: Path):
-        if not p.is_file():
-            return []
-        import xml.etree.ElementTree as ET
+def parse_pvd_entries(path: Path) -> list[tuple[float, Path]]:
+    """Return (timestep, resolved dataset path) entries from a PVD collection."""
+    if not path.is_file():
+        return []
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.parse(path).getroot()
+    except Exception:
+        return []
+    out: list[tuple[float, Path]] = []
+    for ds in root.findall('.//DataSet'):
         try:
-            root = ET.parse(p).getroot()
+            t = float(ds.attrib.get('timestep', '0'))
         except Exception:
-            return []
-        out = []
-        for ds in root.findall('.//DataSet'):
-            try:
-                t = float(ds.attrib.get('timestep', '0'))
-            except Exception:
-                t = 0.0
-            f = ds.attrib.get('file', '')
-            out.append((t, str((p.parent / f).resolve())))
-        return out
-    series = [(name, parse_pvd(p)) for name, p in parts if p.is_file()]
-    if not series:
-        return
+            t = 0.0
+        file = ds.attrib.get('file', '')
+        if not file:
+            continue
+        p = Path(file)
+        if not p.is_absolute():
+            p = path.parent / p
+        out.append((t, p.resolve()))
+    return out
+
+
+def write_combined_pvd(parts: list[tuple[str, Path]], path: Path) -> None:
+    """Write one PVD containing several named series, preserving timesteps.
+
+    PVD does not support nesting collections portably, so each source series is
+    flattened into DataSet entries with a distinct ``group`` (series name) and
+    ``part`` index.  An empty collection is written when there are no parts so
+    that stale PVD content from a previous export is never left behind.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    series = [(name, parse_pvd_entries(p)) for name, p in parts if p.is_file()]
     lines = [
         '<?xml version="1.0"?>',
         '<VTKFile type="Collection" version="0.1" byte_order="LittleEndian">',
@@ -338,21 +348,91 @@ def write_combined_pvd(parts: list[tuple[str, Path]], path: Path) -> None:
     for part_idx, (name, entries) in enumerate(series):
         for t, file in entries:
             try:
-                rel = os.path.relpath(file, start=path.parent)
+                rel = os.path.relpath(file, start=path.parent).replace(os.sep, "/")
             except Exception:
-                rel = file
-            # include name in group for clarity
+                rel = str(file)
             lines.append(f'    <DataSet timestep="{t:.9g}" group="{name}" part="{part_idx}" file="{rel}"/>')
     lines += ['  </Collection>', '</VTKFile>', '']
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def prune_frame_files(frames_dir: Path, keep: set[str], suffix: str = ".vtp") -> None:
+    """Remove generated frames that are no longer referenced by a PVD."""
+    if not frames_dir.is_dir():
+        return
+    for path in frames_dir.glob(f"frame_*{suffix}"):
+        if path.name not in keep:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def remove_if_exists(path: Path) -> None:
+    try:
+        if path.is_file() or path.is_symlink():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def expected_fea_duration(study_cfg: dict[str, Any], fea_dir: Path) -> float | None:
+    """Best-effort expected FEA duration, preferring the FEA run config."""
+    candidates: list[Any] = []
+    fea_cfg_path = fea_dir / "config.json"
+    if fea_cfg_path.is_file():
+        try:
+            fea_cfg = read_json(fea_cfg_path)
+            run_cfg = fea_cfg.get("run") or {}
+            candidates.extend([run_cfg.get("duration"), fea_cfg.get("duration"),
+                               fea_cfg.get("loads_duration_s")])
+        except Exception:
+            pass
+    candidates.extend([study_cfg.get("fea_duration"), study_cfg.get("duration")])
+    for value in candidates:
+        try:
+            duration = float(value)
+            if math.isfinite(duration) and duration > 0.0:
+                return duration
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def validate_fea_pvd(fea_pvd: Path, study_cfg: dict[str, Any], fea_dir: Path) -> tuple[bool, str, list[tuple[float, Path]]]:
+    """Check that an FEA PVD looks like a completed, usable time series.
+
+    The one-way FEA writer updates fea.pvd after every frame, so a cancelled run
+    can leave a syntactically valid PVD with only the t=0 frame.  Such a file is
+    treated as invalid and excluded from every exported series.
+    """
+    if not fea_pvd.is_file():
+        return False, "fea.pvd not found", []
+    entries = parse_pvd_entries(fea_pvd)
+    if not entries:
+        return False, "fea.pvd contains no DataSet entries", []
+    missing = [str(p) for _, p in entries if not p.is_file() or p.stat().st_size == 0]
+    if missing:
+        return False, f"fea.pvd references {len(missing)} missing/empty frame(s)", []
+    times = [t for t, _ in entries]
+    last_t = max(times)
+    if len(entries) < 2 or last_t <= 0.0:
+        return False, (f"incomplete FEA export ({len(entries)} frame(s), last t={last_t:g}s); "
+                       "likely a cancelled run"), []
+    if any(b < a - 1.0e-9 for a, b in zip(times, times[1:])):
+        return False, "fea.pvd timesteps are not monotonic", []
+    duration = expected_fea_duration(study_cfg, fea_dir)
+    if duration is not None and last_t < 0.9 * duration:
+        return False, (f"incomplete FEA export (last t={last_t:g}s of expected "
+                       f"{duration:g}s); likely a cancelled run"), []
+    return True, f"{len(entries)} frames to {last_t:g}s", entries
 
 
 def _read_particle_frame(args):
     idx, path_str, time_s, radius, out_dir_str = args
     path = Path(path_str)
     out_path = Path(out_dir_str) / f"frame_{idx:06d}.vtp"
-    if out_path.exists():
-        return (time_s, str(out_path), 0)
+    # Always rewrite: a frame from an earlier export may reflect older CSV data.
     cols = read_numeric_csv(path, ("X", "Y", "Z", "inside_drum", "excavated"))
     n = len(cols["X"])
     if not n:
@@ -410,11 +490,14 @@ def export_crm_particles(crm_dir: Path, out_dir: Path, stride: int = 1,
             result = _read_particle_frame(job)
             if result:
                 entries.append(result[:2])
+    prune_frame_files(frames_dir, {Path(f).name for _, f in entries})
     pvd = out_dir / "crm_particles.pvd"
     if entries:
         write_pvd(entries, pvd)
-        print(f"  particles: {len(entries)} frames -> {pvd}")
+        print(f"  particles: regenerated {len(entries)} frames -> {pvd}")
         return pvd
+    # Keep a stale PVD from an earlier export from pointing at pruned frames.
+    remove_if_exists(pvd)
     print("  particles: no frames exported")
     return None
 
@@ -422,8 +505,8 @@ def export_crm_particles(crm_dir: Path, out_dir: Path, stride: int = 1,
 def _write_excavator_frame(args):
     idx, xyz, faces, time_s, out_dir_str = args
     out_path = Path(out_dir_str) / f"frame_{idx:06d}.vtp"
-    if out_path.exists():
-        return (time_s, str(out_path), 0)
+    # Force overwrite: poses come from the current CRM summary/config, so any
+    # existing frame is potentially stale (e.g. from a cancelled earlier run).
     write_polydata_vtp(xyz, faces, None, out_path)
     return (time_s, str(out_path), 1)
 
@@ -461,11 +544,13 @@ def export_excavator(crm_dir: Path, surface_path: Path, out_dir: Path,
             result = _write_excavator_frame(job)
             if result:
                 entries.append(result[:2])
+    prune_frame_files(frames_dir, {Path(f).name for _, f in entries})
     pvd = out_dir / "excavator.pvd"
     if entries:
         write_pvd(entries, pvd)
-        print(f"  excavator: {len(entries)} frames -> {pvd} (surface {surface_path.name})")
+        print(f"  excavator: regenerated {len(entries)} frames -> {pvd} (surface {surface_path.name})")
         return pvd
+    remove_if_exists(pvd)
     print("  excavator: no frames exported")
     return None
 
@@ -522,32 +607,57 @@ def main() -> int:
     else:
         print("  surface: (not found)")
 
-    parts = []
+    crm_parts: list[tuple[str, Path]] = []
     if not args.excavator_only:
         p = export_crm_particles(crm_dir, out_dir, stride=stride,
                                  particle_radius_m=particle_radius_m, workers=workers)
         if p:
-            parts.append(("crm_particles", p))
+            crm_parts.append(("crm_particles", p))
     if not args.particles_only:
         if surface:
             p = export_excavator(crm_dir, surface, out_dir, spin_axis=spin_axis,
                                  stride=stride, workers=workers)
             if p:
-                parts.append(("excavator", p))
+                crm_parts.append(("excavator", p))
         else:
             print("  skip excavator: no surface mesh found")
 
-    fea_pvd = fea_dir / "vtk" / "fea.pvd"
-    if fea_pvd.is_file():
-        parts.append(("fea", fea_pvd))
-        print(f"  fea: found {fea_pvd}")
+    # Canonical non-FEA series.  combined.pvd keeps the old filename but is no
+    # longer allowed to contain FEA data, so a cancelled FEA run cannot freeze
+    # or obscure the CRM excavation animation.
+    animation = out_dir / "crm_animation.pvd"
+    combined = out_dir / "combined.pvd"
+    if crm_parts:
+        write_combined_pvd(crm_parts, animation)
+        write_combined_pvd(crm_parts, combined)
+        print(f"  crm animation (non-FEA): {animation}")
+        print(f"  combined (alias): {combined}")
     else:
-        print(f"  fea: no VTK export found at {fea_pvd} (run one-way FEA with VTK export enabled to visualize stress/deformation)")
+        remove_if_exists(animation)
+        remove_if_exists(combined)
 
-    if parts:
-        combined = out_dir / "combined.pvd"
-        write_combined_pvd(parts, combined)
-        print(f"  combined: {combined}")
+    # FEA is opt-in and only when its PVD looks like a completed run.
+    fea_source = fea_dir / "vtk" / "fea.pvd"
+    fea_valid, fea_status, fea_entries = validate_fea_pvd(
+        fea_source, info["study_cfg"], fea_dir)
+    fea_export = out_dir / "fea.pvd"
+    with_fea = out_dir / "with_fea.pvd"
+    if fea_valid:
+        write_pvd([(t, str(p)) for t, p in fea_entries], fea_export)
+        write_combined_pvd(crm_parts + [("fea", fea_export)], with_fea)
+        print(f"  fea: {fea_status} -> {fea_export} (+ {with_fea})")
+    else:
+        # A previously valid export must not survive a later cancelled run.
+        remove_if_exists(fea_export)
+        remove_if_exists(with_fea)
+        if fea_source.is_file():
+            print(f"  fea: ignoring {fea_source} ({fea_status}); non-FEA series is unaffected")
+        else:
+            print(f"  fea: no VTK export found at {fea_source} "
+                  "(run one-way FEA with --export-vtk to visualize stress/deformation)")
+
+    def series_name(name: str) -> str | None:
+        return name if (out_dir / name).is_file() else None
 
     meta = {
         "study_dir": str(study_dir),
@@ -559,21 +669,30 @@ def main() -> int:
         "particle_spacing_m": particle_spacing,
         "particle_diameter_m": (particle_spacing if particle_spacing is not None else None),
         "particle_radius_m": particle_radius_m,
+        "default_series": "crm_animation",
         "series": {
-            "crm_particles": "crm_particles.pvd",
-            "excavator": "excavator.pvd",
-            "fea": str(fea_pvd.resolve()) if fea_pvd.is_file() else None,
+            "crm_particles": series_name("crm_particles.pvd"),
+            "excavator": series_name("excavator.pvd"),
+            "crm_animation": series_name("crm_animation.pvd"),
+            "combined": series_name("combined.pvd"),
+            "fea": series_name("fea.pvd") if fea_valid else None,
+            "with_fea": series_name("with_fea.pvd") if fea_valid else None,
+            "fea_source": str(fea_source.resolve()) if fea_source.is_file() else None,
         },
-        "has_particles": (out_dir / "crm_particles.pvd").is_file(),
-        "has_excavator": (out_dir / "excavator.pvd").is_file(),
-        "has_fea_vtk": fea_pvd.is_file(),
+        "has_particles": bool(crm_parts and crm_parts[0][0] == "crm_particles"),
+        "has_excavator": bool(crm_parts and any(name == "excavator" for name, _ in crm_parts)),
+        "has_fea_vtk": fea_source.is_file(),
+        "fea_valid": fea_valid,
+        "fea_status": fea_status,
     }
     (out_dir / "export_manifest.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     print(f"  manifest: {out_dir / 'export_manifest.json'}")
     print("Done. Open in ParaView, e.g.:")
-    print(f"  paraview {out_dir / 'combined.pvd'}")
-    print("  # recommended (separate sources, spheres, and FEA stress by default):")
+    print(f"  paraview {combined}")
+    print("  # recommended (non-FEA CRM animation; FEA excluded by default):")
     print(f"  pvpython {ROOT / 'view_study_paraview.py'} {out_dir}")
+    print(f"  # add validated FEA stress overlay when available:")
+    print(f"  pvpython {ROOT / 'view_study_paraview.py'} {out_dir} --with-fea")
     return 0
 
 

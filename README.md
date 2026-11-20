@@ -85,6 +85,8 @@ View results:
 QT_QPA_PLATFORM=xcb PYCHRONO_EXPORT_DIR=Output_<study_name>/paraview paraview --script="$PWD/view_study_paraview.py"
 ```
 
+The export writes `crm_animation.pvd` (also `combined.pvd`) with CRM particles and rigid excavator poses only; it is the default ParaView series and never includes FEA. When a one-way FEA VTK export is complete and valid, `fea.pvd` and `with_fea.pvd` are also written; load the stress overlay with `--with-fea` (or `--fea-only`). Incomplete FEA output from cancelled runs is ignored. All excavator/particle frames are regenerated on every export, so delete stale exports rather than manually editing their frames.
+
 ## Repository layout
 
 ```text
@@ -118,6 +120,7 @@ Local build/env directories (`chrono-src/`, `chrono-build/`, `chrono-install/`, 
 - **Soil model:** defaults in `crm/crm_soil.py` are independent best-estimate parameters and should be calibrated/frozen for comparisons.
 - **Timesteps:** CRM defaults are spacing-dependent; explicitly unsafe `--dt` values are rejected unless overridden.
 - **Geometry:** use full-detail meshes for production; some simplified meshes may close holes.
+- **Optional part-aware hub simplification:** `step_to_chrono_fea.py --part-aware-simplify` keeps all exterior/screw-flight faces bit-for-bit unchanged and decimates only faces inside `--part-aware-radius` (default 0.05 m). The generated JSON records eligibility, reduction, boundary preservation, and volume error. This path is off by default and does not change production mesh generation.
 - **Two-way FEA:** current flex-BCE coupling results are unstable/inconsistent; do not use for design validation.
 
 ## More documentation
