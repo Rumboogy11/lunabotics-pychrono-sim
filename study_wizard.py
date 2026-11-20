@@ -31,6 +31,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "crm"))
 
+from lunar_excavator_config import BED_PADDING_RADIUS_FRACTION, bed_half_extents
+
 try:
     from lunar_excavator_crm import CrmRunParams, fit_active_box, suggested_sph_dt
 except Exception:  # pragma: no cover - fallback keeps the wizard usable
@@ -281,6 +283,7 @@ def geometry_defaults(measured: dict[str, float | int] | None,
         "min_solid_volume": 1.0e-5 if n_solids > 1 else 0.0,
         "mesh_size": clean(mesh_size),
         "bed_height": clean(bed_height),
+        "bed_padding": BED_PADDING_RADIUS_FRACTION,
         "descent_speed": clean(descent_speed),
         "active_box": tuple(clean(v) for v in active_box),
         "spacing": clean(spacing),
@@ -290,6 +293,27 @@ def geometry_defaults(measured: dict[str, float | int] | None,
         "lowering_duration": clean(bed_height / descent_speed),
         "scale": clean(scale),
     }
+
+
+def estimate_sph_particles(*, drum_radius: float, drum_half_length: float,
+                           bed_height: float, spacing: float,
+                           spin_axis: str = "X",
+                           bed_padding: float = BED_PADDING_RADIUS_FRACTION) -> int:
+    """Approximate the initial fluid SPH markers in the padded soil bed.
+
+    Chrono builds the bed on a spacing-sized lattice inside the padded bed box,
+    so ``volume / spacing^3`` is a useful pre-run order-of-magnitude estimate.
+    The exact marker count also depends on Chrono's lattice offsets and BCE
+    layers, so this is deliberately not presented as an exact count.
+    """
+    if min(drum_radius, drum_half_length, bed_height, spacing) <= 0.0:
+        raise ValueError("Drum dimensions, bed height, and spacing must be positive")
+    if bed_padding < 0.0:
+        raise ValueError("Bed padding fraction must be non-negative")
+    half_x, half_y = bed_half_extents(
+        drum_radius, drum_half_length, spin_axis, bed_padding)
+    volume = 4.0 * half_x * half_y * bed_height
+    return max(1, int(round(volume / spacing**3)))
 
 
 def _ensure_chrono_python() -> None:
@@ -351,6 +375,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--particle-writers", type=int, default=None,
                    help="background processes for CRM particle CSV writes (default: 4)")
     p.add_argument("--bed-height", type=float, default=None, help="initial soil bed height in m")
+    p.add_argument("--bed-padding", type=float, default=None,
+                   help=f"soil padding around the drum per side as a fraction of drum radius "
+                        f"(default: {BED_PADDING_RADIUS_FRACTION:g})")
     p.add_argument("--active-box", default=None, help="SPH domain size X,Y,Z in metres")
     p.add_argument("--settle-time", type=float, default=None,
                    help="bed settle time before spin/descent (default: 0.001 s)")
@@ -915,6 +942,13 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "Initial bed height (m)", float(geo["bed_height"]), minimum=1e-3,
         detail="Depth of the soil bed; drum starts at bed_height + radius above the ground.",
     )
+    bed_padding = args.bed_padding if args.bed_padding is not None else prompt_float(
+        "Bed padding (fraction of drum radius)", float(geo["bed_padding"]), minimum=0.0,
+        detail="Extra soil around the drum footprint per side, as a fraction of the drum radius. "
+               "Increasing it moves the reflective BCE walls outward and increases particle count.",
+    )
+    if bed_padding < 0.0:
+        raise SystemExit("bed padding must be non-negative")
     geo_box = ",".join(f"{v:g}" for v in geo["active_box"])
     active_box = prompt_box(
         "Active SPH box X,Y,Z (m)", args.active_box or geo_box,
@@ -1096,9 +1130,10 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             f"Cadence:      CRM {crm_fps:g} Hz, FEA {fea_fps:g} Hz, loads {loads_fps:g} Hz, particles {particle_fps:g} Hz",
             f"Drum:         R={drum_radius:g} m, half-length={drum_half_length:g} m, "
             f"z0≈{bed_height + drum_radius:g} m",
-            f"SPH:          spacing={spacing:g} m, dt={dt_text}",
-            f"Bed:          height={bed_height:g} m, box={','.join(f'{v:g}' for v in active_box)} m, "
-            f"descent={descent_speed:g} m/s",
+            f"SPH:          spacing={spacing:g} m, dt={dt_text}, "
+            f"est. particles ~{estimate_sph_particles(drum_radius=drum_radius, drum_half_length=drum_half_length, bed_height=bed_height, spacing=spacing, spin_axis=spin_axis, bed_padding=bed_padding):,}",
+            f"Bed:          height={bed_height:g} m, padding={bed_padding:g} R, "
+            f"box={','.join(f'{v:g}' for v in active_box)} m, descent={descent_speed:g} m/s",
             f"FEA:          dt={fea_dt:g} s, solver={solver}, threads={num_threads}, fea-vtk={fea_export_vtk}",
             f"ParaView:     export={export_vtk} (frame stride {paraview_stride}, "
             f"particle render stride {paraview_particle_render_stride})",
@@ -1149,6 +1184,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "particle_fps": particle_fps,
         "particle_writers": particle_writers,
         "bed_height": bed_height,
+        "bed_padding": bed_padding,
         "active_box": active_box,
         "settle_time": settle_time,
         "descent_speed": descent_speed,
@@ -1197,6 +1233,7 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         "--particle-fps", f"{cfg['particle_fps']:g}",
         "--particle-writers", f"{cfg['particle_writers']:d}",
         "--bed-height", f"{cfg['bed_height']:g}",
+        "--bed-padding", f"{cfg.get('bed_padding', BED_PADDING_RADIUS_FRACTION):g}",
         "--active-box", ",".join(f"{v:g}" for v in cfg["active_box"]),
         "--settle-time", f"{cfg['settle_time']:g}",
         "--descent-speed", f"{cfg['descent_speed']:g}",
@@ -1240,6 +1277,7 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         "--fea-node", str(cfg["fea_node"]),
         "--fea-ele", str(cfg["fea_ele"]),
         "--bed-height", f"{cfg['bed_height']:g}",
+        "--bed-padding", f"{cfg.get('bed_padding', BED_PADDING_RADIUS_FRACTION):g}",
         "--settle-time", f"{cfg['settle_time']:g}",
         "--descent-speed", f"{cfg['descent_speed']:g}",
         "--omega", f"{abs(cfg['omega']):g}",

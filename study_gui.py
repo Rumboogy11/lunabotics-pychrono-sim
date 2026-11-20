@@ -126,6 +126,7 @@ PARAM_INFO: dict[str, str] = {
     "particle_writers": "Background processes that write per-frame particle CSV files while the CRM solver continues. Increase only if disk writes remain a bottleneck.",
     "fea_dt": "Structural integrator timestep for one-way FEA, independent of CRM dt. Default is 0.002 s.",
     "bed_height": "Depth of the soil bed. The drum starts at bed_height + radius above the ground.",
+    "bed_padding": "Extra soil around the drum footprint per side, as a fraction of drum radius. Increasing it moves the reflective BCE walls outward and raises the estimated/actual SPH particle count.",
     "active_box": "Drum-centred active SPH domain X,Y,Z in metres (full sizes; X along drum axis, Y lateral, Z vertical). "
                   "Defaults to the padded bed plus 2 excavator diameters laterally, and bed height + initial "
                   "excavator height + 2 diameters + padding vertically, so flung particles are not deactivated.",
@@ -313,6 +314,7 @@ def shipped_defaults() -> dict[str, object]:
         "particle_writers": "4",
         "fea_dt": "0.002",
         "bed_height": "0.06",
+        "bed_padding": f"{wiz.BED_PADDING_RADIUS_FRACTION:g}",
         "active_box": "0.631333,0.687407,0.86637",
         "settle_time": "0.001",
         "descent_speed": "0.0015",
@@ -377,6 +379,7 @@ DEFAULT_GROUPS: list[tuple[str, list[tuple[str, str, dict]]]] = [
         ("Particle writer processes", "particle_writers", {}),
         ("FEA dt (s)", "fea_dt", {}),
         ("Bed height (m)", "bed_height", {}),
+        ("Bed padding (fraction of radius)", "bed_padding", {}),
         ("Active box X,Y,Z (m)", "active_box", {}),
         ("Settle time (s)", "settle_time", {}),
         ("Descent speed (m/s)", "descent_speed", {}),
@@ -488,6 +491,8 @@ class StudyGUI:
         self.default_vars: dict[str, StringVar | BooleanVar] = {}
         self._build_vars()
         self._build_ui()
+        self._bind_particle_estimate()
+        self._update_particle_estimate()
         self.root.after(100, self._drain_log)
         self.root.after(100, self._drain_tools_log)
 
@@ -509,6 +514,7 @@ class StudyGUI:
             self._v(key, value, is_bool=isinstance(value, bool), target=self.default_vars)
         for key, var in self.default_vars.items():
             self._v(key, var.get(), is_bool=isinstance(var, BooleanVar))
+        self.particle_estimate_var = StringVar(value="Estimated initial SPH particles: --")
 
     def _build_ui(self):
         nb = ttk.Notebook(self.root)
@@ -681,6 +687,10 @@ class StudyGUI:
         r = self._row(p, r, "FEA output FPS", "fea_fps")
         r = self._row(p, r, "FEA dt (s)", "fea_dt")
         r = self._row(p, r, "Bed height (m)", "bed_height")
+        r = self._row(p, r, "Bed padding (fraction of radius)", "bed_padding")
+        ttk.Label(p, textvariable=self.particle_estimate_var, wraplength=560,
+                  justify=LEFT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=(0, 8))
+        r += 1
         r = self._row(p, r, "Active box X,Y,Z (m)", "active_box")
         r = self._row(p, r, "Settle time (s)", "settle_time")
         r = self._row(p, r, "Descent speed (m/s)", "descent_speed")
@@ -1496,6 +1506,33 @@ class StudyGUI:
         v = self.vars[key]
         return bool(v.get()) if isinstance(v, BooleanVar) else v.get().strip().lower() in {"1", "true", "yes", "y"}
 
+    def _bind_particle_estimate(self) -> None:
+        for key in ("drum_radius", "drum_half_length", "spin_axis",
+                    "bed_height", "bed_padding", "spacing"):
+            var = self.vars.get(key)
+            if var is not None:
+                var.trace_add("write", self._update_particle_estimate)
+
+    def _update_particle_estimate(self, *_):
+        label = getattr(self, "particle_estimate_var", None)
+        if label is None:
+            return
+        try:
+            count = wiz.estimate_sph_particles(
+                drum_radius=float(self._g("drum_radius")),
+                drum_half_length=float(self._g("drum_half_length")),
+                bed_height=float(self._g("bed_height")),
+                spacing=float(self._g("spacing")),
+                spin_axis=self._g("spin_axis") or "X",
+                bed_padding=float(self._g("bed_padding")),
+            )
+        except (ValueError, TypeError, ZeroDivisionError, OverflowError):
+            label.set("Estimated initial SPH particles: -- "
+                      "(enter positive bed height, spacing, and drum dimensions)")
+            return
+        label.set(f"Estimated initial SPH particles: ~{count:,}  "
+                  f"(padded bed volume / spacing^3; Chrono's lattice count may differ)")
+
     def _parse_active_box(self, s: str):
         parts = [p.strip() for p in s.replace(";", ",").split(",") if p.strip()]
         if len(parts) != 3:
@@ -1592,6 +1629,9 @@ class StudyGUI:
         particle_writers = max(1, int(float(self._g("particle_writers") or 4)))
         fea_dt = float(self._g("fea_dt"))
         bed_height = float(self._g("bed_height"))
+        bed_padding = float(self._g("bed_padding") or wiz.BED_PADDING_RADIUS_FRACTION)
+        if bed_padding < 0.0:
+            raise ValueError("Bed padding fraction must be non-negative")
         active_box = self._parse_active_box(self._g("active_box"))
         settle_time = float(self._g("settle_time"))
         descent_speed = float(self._g("descent_speed"))
@@ -1643,6 +1683,7 @@ class StudyGUI:
             "particle_fps": particle_fps,
             "particle_writers": particle_writers,
             "bed_height": bed_height,
+            "bed_padding": bed_padding,
             "active_box": active_box,
             "settle_time": settle_time,
             "descent_speed": descent_speed,
@@ -1838,7 +1879,7 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                   "drum_radius", "drum_half_length", "inner_radius", "capacity_volume", "duration",
                   "fea_duration", "spacing", "d0_multiplier", "artificial_viscosity",
                    "shifting_ppst_push", "crm_fps", "fea_fps", "fea_dt",
-                  "bed_height", "settle_time", "descent_speed", "omega", "num_threads",
+                  "bed_height", "bed_padding", "settle_time", "descent_speed", "omega", "num_threads",
                   "load_radius_fraction", "raw_stress_every", "export_workers",
                   "fea_vtk_stride", "paraview_stride", "paraview_particle_render_stride"]:
             setv(k, data.get(k))
@@ -1867,7 +1908,21 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             cfg = self._collect_cfg()
             steps = wiz.build_commands(cfg)
             wiz.write_reproducibility_files(cfg, steps)
-            lines = [f"Output: {cfg['output_dir']}", f"Config: {cfg['output_dir'] / 'study_config.json'}", ""]
+            estimate = wiz.estimate_sph_particles(
+                drum_radius=cfg["drum_radius"],
+                drum_half_length=cfg["drum_half_length"],
+                bed_height=cfg["bed_height"],
+                spacing=cfg["spacing"],
+                spin_axis=cfg["spin_axis"],
+                bed_padding=cfg["bed_padding"],
+            )
+            lines = [
+                f"Output: {cfg['output_dir']}",
+                f"Config: {cfg['output_dir'] / 'study_config.json'}",
+                f"Estimated initial SPH particles: ~{estimate:,} "
+                "(padded bed volume / spacing^3; approximate)",
+                "",
+            ]
             for s in steps:
                 lines.append(f"[{s['name']}]")
                 lines.append(shlex.join(s['command']))
