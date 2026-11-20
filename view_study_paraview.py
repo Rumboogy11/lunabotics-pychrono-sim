@@ -24,8 +24,9 @@ is ignored, so it cannot obscure or freeze the excavation animation.
 
 If no argument is given, the script tries ./paraview in the current directory.
 
-A camera-orbit animation is created by default.  Tune it with --orbit-speed
-(revolutions per simulation second), --orbit-radius (0 auto-fits the excavator),
+A camera-orbit animation around the vertical Z axis is created by default.
+Tune it with --orbit-speed (revolutions per simulation second),
+--orbit-radius (0 auto-fits the excavator),
 --orbit-inclination, --orbit-start-angle, and --orbit-keyframes; use
 --no-camera-orbit to disable it.
 The GUI launcher passes the same settings through PYCHRONO_ORBIT_* environment
@@ -105,7 +106,7 @@ def _parse_args(argv: list[str]):
                     help="camera revolutions per simulation second (default: 0.10)")
     ap.add_argument("--orbit-radius", type=float,
                     default=_env_float("PYCHRONO_ORBIT_RADIUS", 0.0),
-                    help="orbit radius in meters around the drum axis; 0 auto-fits the excavator bounds (default: 0)")
+                    help="orbit radius in meters around the vertical Z axis; 0 auto-fits the excavator bounds (default: 0)")
     ap.add_argument("--orbit-inclination", type=float,
                     default=_env_float("PYCHRONO_ORBIT_INCLINATION", 20.0),
                     help="camera elevation above the orbit plane in degrees (default: 20)")
@@ -243,14 +244,9 @@ def find_valid_fea_pvd(export_dir: Path, manifest: dict) -> tuple[Path | None, s
     return None, "no fea.pvd found in the export or study FEA directory"
 
 
-def _orbit_basis(spin_axis: str):
-    """Return (spin axis, in-plane u, in-plane v) for a right-handed orbit."""
-    axis = str(spin_axis or "X").strip().upper()[:1]
-    if axis == "Y":
-        return (0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)
-    if axis == "Z":
-        return (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)
-    return (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
+def _orbit_basis():
+    """Return the fixed vertical-axis orbit basis: (Z axis, X, Y)."""
+    return (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)
 
 
 def _dot(a, b):
@@ -290,8 +286,8 @@ def _fit_orbit_radius(bounds, center, axis, u, v):
     return max(2.2 * radial, 1.2 * axial, 0.25)
 
 
-def _install_camera_orbit(args, view, scene, excav_reader, times, spin_axis="X"):
-    """Add a normalized camera track orbiting the drum around its spin axis.
+def _install_camera_orbit(args, view, scene, excav_reader, times):
+    """Add a normalized camera track orbiting the drum around the vertical Z axis.
 
     The excavator is sampled once at the first timestep to fit the radius; the
     camera track itself uses fixed keyframes so playback does not repeatedly
@@ -305,7 +301,7 @@ def _install_camera_orbit(args, view, scene, excav_reader, times, spin_axis="X")
     duration = max(0.0, t1 - t0)
     camera = view.GetActiveCamera()
     pos = tuple(float(v) for v in camera.GetPosition())
-    axis, u, v = _orbit_basis(spin_axis)
+    axis, u, v = _orbit_basis()
 
     bounds, center = _bounds_at_time(
         excav_reader, t0, tuple(float(v) for v in camera.GetFocalPoint()))
@@ -355,7 +351,7 @@ def _install_camera_orbit(args, view, scene, excav_reader, times, spin_axis="X")
     camera.SetPosition(*frames[0].Position)
     camera.SetViewUp(*axis)
     return (f"{n + 1} keyframes, {speed:g} rev/s, {fit_note} radius {radius:g} m, "
-            f"inclination {inclination:g} deg, axis {str(spin_axis).upper()[:1]}")
+            f"inclination {inclination:g} deg, axis Z")
 
 
 def main():
@@ -708,9 +704,7 @@ def main():
             except Exception:
                 times = []
         try:
-            status = _install_camera_orbit(
-                args, view, scene, excav_reader, times,
-                spin_axis=str(manifest.get("spin_axis") or "X"))
+            status = _install_camera_orbit(args, view, scene, excav_reader, times)
             print(f"[view_study_paraview] camera orbit: {status}")
             print("  Press Play in the Animation/Time controls to rotate around the drum while excavation advances.")
         except Exception as exc:
