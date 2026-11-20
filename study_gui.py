@@ -148,7 +148,8 @@ PARAM_INFO: dict[str, str] = {
     "open_paraview": "Open the preconfigured 3D view in the full ParaView GUI after a successful run (pvpython render window is the fallback).",
     # Tools tab
     "tools_study_dir": "Study/output directory to inspect. Use the folder containing study_config.json or a previous Output_* run.",
-    "tools_stride": "Export every Nth CRM frame when using the Export ParaView VTK/PVD tool. Use 1 for all frames. The export uses the 'ParaView export workers' setting for parallel frame writes; the geometry comparison uses 'FEA threads' for OCC.",
+    "tools_stride": "Export every Nth CRM frame when using the Export ParaView VTK/PVD tool. Use 1 for all frames. All exported series stay time-aligned.",
+    "tools_workers": "Number of worker processes used by the Export ParaView VTK/PVD tool. Match it to available CPU cores; 4 is a good starting point.",
 }
 
 PARAM_INFO.update({
@@ -743,6 +744,13 @@ class StudyGUI:
         ttk.Entry(p, textvariable=self.tools_stride, width=8).grid(row=r, column=1, sticky=W)
         ttk.Button(p, text="Info", width=6,
                    command=lambda: self._show_info("Quick export stride", PARAM_INFO["tools_stride"])).grid(
+                       row=r, column=3, sticky=W, padx=6)
+        r += 1
+        ttk.Label(p, text="Export workers (parallel frame writes)").grid(row=r, column=0, sticky=W, padx=8, pady=4)
+        self.tools_workers = StringVar(value=self._g("export_workers") or "4")
+        ttk.Entry(p, textvariable=self.tools_workers, width=8).grid(row=r, column=1, sticky=W)
+        ttk.Button(p, text="Info", width=6,
+                   command=lambda: self._show_info("Export workers", PARAM_INFO["tools_workers"])).grid(
                        row=r, column=3, sticky=W, padx=6)
         r += 1
         logf = ttk.Frame(p)
@@ -1615,10 +1623,15 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             self.tools_log.insert(END, msg + "\n")
             self.tools_log.see(END)
 
-    def _run_tool_cmd(self, cmd, cwd=None):
+    def _run_tool_cmd(self, cmd, cwd=None, stream: bool = False):
         self._tool_log("$ " + shlex.join(cmd))
         try:
             p = subprocess.Popen(cmd, cwd=cwd or ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            if stream:
+                # Keep the GUI responsive while a long export streams progress.
+                threading.Thread(target=self._watch_tool_process,
+                                 args=(p, "export"), daemon=True).start()
+                return 0
             out, _ = p.communicate(timeout=600)
             if out:
                 self.tools_log.insert(END, out[-8000:] + ("\n" if not out.endswith("\n") else ""))
@@ -1632,11 +1645,12 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
     def _tool_export(self):
         d = Path(self.tools_study_dir.get()).expanduser()
         stride = max(1, int(float(self.tools_stride.get() or 1)))
-        workers = max(1, int(float(self._g("export_workers") or 4)))
+        workers = max(1, int(float(self.tools_workers.get() or 4)))
         cmd = [py_exec(), str(ROOT / "export_study_vtk.py"), "--study-dir", str(d),
                "--stride", str(stride), "--workers", str(workers)]
-        self._tool_log(f"# exporting {workers} frame worker process(es)")
-        self._run_tool_cmd(cmd)
+        self._tool_log(f"# exporting {workers} frame worker process(es) "
+                       "(point-cloud particle frames, columnar CSV parsing)")
+        self._run_tool_cmd(cmd, stream=True)
 
     def _watch_tool_process(self, proc: subprocess.Popen, label: str):
         """Stream a long-lived tool's output into the tools log."""

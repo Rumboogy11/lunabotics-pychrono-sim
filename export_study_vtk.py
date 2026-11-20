@@ -98,7 +98,12 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
 
 
 def read_numeric_csv(path: Path, columns: tuple[str, ...]) -> dict[str, np.ndarray]:
-    """Read selected numeric columns with one NumPy pass instead of Python dicts."""
+    """Read selected numeric columns with a C-backed NumPy pass.
+
+    NumPy's loader is much faster than converting every field in Python.  Keep
+    the original parser as a fallback for ragged/non-numeric rows so a partially
+    written CSV does not abort an export.
+    """
     result = {name: np.empty(0, dtype=float) for name in columns}
     with path.open("r", encoding="utf-8") as handle:
         header = handle.readline().rstrip("\r\n").split(",")
@@ -108,6 +113,15 @@ def read_numeric_csv(path: Path, columns: tuple[str, ...]) -> dict[str, np.ndarr
                 indices.append(header.index(name))
             except ValueError:
                 indices.append(-1)
+        if indices and all(i >= 0 for i in indices):
+            try:
+                values = np.loadtxt(path, delimiter=",", skiprows=1,
+                                    usecols=tuple(indices), dtype=float, ndmin=2)
+                for offset, name in enumerate(columns):
+                    result[name] = values[:, offset] if values.size else np.empty(0, dtype=float)
+                return result
+            except ValueError:
+                pass  # malformed/partial row: use the tolerant parser below
         rows = []
         for line in handle:
             if not line.strip():
@@ -255,15 +269,18 @@ def _vtk_cell_array(n_per_cell: int, indices: np.ndarray | None, n_points: int):
 
 def write_polydata_vtp(points: np.ndarray, faces: np.ndarray | None,
                         point_data: dict[str, np.ndarray] | None,
-                        path: Path) -> None:
+                        path: Path, point_cells: bool = True) -> None:
     from vtk.util.numpy_support import numpy_to_vtk
 
     poly = vtk.vtkPolyData()
     poly.SetPoints(_vtk_points(points))
     if faces is not None and len(faces):
         poly.SetPolys(_vtk_cell_array(3, faces, len(points)))
-    else:
+    elif point_cells:
         poly.SetVerts(_vtk_cell_array(1, None, len(points)))
+    # Particle frames are point clouds.  Glyph/PointGaussian display in ParaView
+    # uses the points directly, so omitting per-point vertex cells avoids
+    # writing (and reading) two large connectivity arrays per frame.
     if point_data:
         for name, arr in point_data.items():
             a = np.asarray(arr)
@@ -445,7 +462,7 @@ def _read_particle_frame(args):
     if radius is not None and radius > 0.0:
         point_data["radius_m"] = np.full(n, float(radius), dtype=float)
         point_data["diameter_m"] = np.full(n, float(2.0 * radius), dtype=float)
-    write_polydata_vtp(pts, None, point_data, out_path)
+    write_polydata_vtp(pts, None, point_data, out_path, point_cells=False)
     return (time_s, str(out_path), 1)
 
 
@@ -502,12 +519,31 @@ def export_crm_particles(crm_dir: Path, out_dir: Path, stride: int = 1,
     return None
 
 
+# Worker-local surface data.  Sending the full transformed mesh with every job
+# was the largest remaining exporter cost for high-frame-count studies.
+_EXCAV_BASE: np.ndarray | None = None
+_EXCAV_FACES: np.ndarray | None = None
+_EXCAV_AXIS = "X"
+
+
+def _init_excavator_worker(base: np.ndarray, faces: np.ndarray, spin_axis: str) -> None:
+    global _EXCAV_BASE, _EXCAV_FACES, _EXCAV_AXIS
+    _EXCAV_BASE = base
+    _EXCAV_FACES = faces
+    _EXCAV_AXIS = spin_axis
+
+
 def _write_excavator_frame(args):
-    idx, xyz, faces, time_s, out_dir_str = args
+    idx, spin_deg, drum_z_m, time_s, out_dir_str = args
+    if _EXCAV_BASE is None or _EXCAV_FACES is None:
+        raise RuntimeError("excavator worker was not initialized")
+    Rspin = axis_angle_matrix(_EXCAV_AXIS, float(spin_deg))
+    pts = np.ascontiguousarray((Rspin @ _EXCAV_BASE.T).T)
+    pts[:, 2] += float(drum_z_m)
     out_path = Path(out_dir_str) / f"frame_{idx:06d}.vtp"
     # Force overwrite: poses come from the current CRM summary/config, so any
     # existing frame is potentially stale (e.g. from a cancelled earlier run).
-    write_polydata_vtp(xyz, faces, None, out_path)
+    write_polydata_vtp(pts, _EXCAV_FACES, None, out_path)
     return (time_s, str(out_path), 1)
 
 
@@ -525,18 +561,24 @@ def export_excavator(crm_dir: Path, surface_path: Path, out_dir: Path,
     v0 = np.ascontiguousarray((R0 @ base_pts.T).T)
     frames_dir = out_dir / "excavator"
     frames_dir.mkdir(parents=True, exist_ok=True)
+    # Only scalar pose data crossed the process boundary; each worker keeps one
+    # shared copy of the surface instead of receiving it for every frame.
+    _init_excavator_worker(v0, faces, spin_axis)
     jobs = []
     for idx in range(len(cols["time_s"])):
         if idx % stride != 0 and idx != len(cols["time_s"]) - 1:
             continue
-        Rspin = axis_angle_matrix(spin_axis, float(cols["spin_deg"][idx]))
-        pts = np.ascontiguousarray((Rspin @ v0.T).T)
-        pts[:, 2] += float(cols["drum_z_m"][idx])
-        jobs.append((idx, pts, faces, float(cols["time_s"][idx]), str(frames_dir)))
+        jobs.append((idx, float(cols["spin_deg"][idx]), float(cols["drum_z_m"][idx]),
+                     float(cols["time_s"][idx]), str(frames_dir)))
     entries = []
     if workers > 1 and len(jobs) > 1:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            for result in pool.map(_write_excavator_frame, jobs, chunksize=2):
+        chunksize = max(1, min(16, len(jobs) // (workers * 2)))
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_init_excavator_worker,
+            initargs=(v0, faces, spin_axis),
+        ) as pool:
+            for result in pool.map(_write_excavator_frame, jobs, chunksize=chunksize):
                 if result:
                     entries.append(result[:2])
     else:
