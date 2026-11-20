@@ -25,8 +25,9 @@ is ignored, so it cannot obscure or freeze the excavation animation.
 If no argument is given, the script tries ./paraview in the current directory.
 
 A camera-orbit animation is created by default.  Tune it with --orbit-speed
-(revolutions per simulation second), --orbit-radius, --orbit-inclination,
---orbit-start-angle, and --orbit-keyframes; use --no-camera-orbit to disable it.
+(revolutions per simulation second), --orbit-radius (0 auto-fits the excavator),
+--orbit-inclination, --orbit-start-angle, and --orbit-keyframes; use
+--no-camera-orbit to disable it.
 The GUI launcher passes the same settings through PYCHRONO_ORBIT_* environment
 variables.  Press Play in ParaView to run the camera orbit with the time series.
 """
@@ -104,7 +105,7 @@ def _parse_args(argv: list[str]):
                     help="camera revolutions per simulation second (default: 0.10)")
     ap.add_argument("--orbit-radius", type=float,
                     default=_env_float("PYCHRONO_ORBIT_RADIUS", 0.0),
-                    help="horizontal orbit radius in meters; 0 uses the current horizontal camera distance (default: 0)")
+                    help="orbit radius in meters around the drum axis; 0 auto-fits the excavator bounds (default: 0)")
     ap.add_argument("--orbit-inclination", type=float,
                     default=_env_float("PYCHRONO_ORBIT_INCLINATION", 20.0),
                     help="camera elevation above the orbit plane in degrees (default: 20)")
@@ -242,26 +243,60 @@ def find_valid_fea_pvd(export_dir: Path, manifest: dict) -> tuple[Path | None, s
     return None, "no fea.pvd found in the export or study FEA directory"
 
 
-def _center_at_time(reader, time_s: float, fallback: tuple[float, float, float]):
-    """Return the center of a time-varying reader's bounds at ``time_s``."""
+def _orbit_basis(spin_axis: str):
+    """Return (spin axis, in-plane u, in-plane v) for a right-handed orbit."""
+    axis = str(spin_axis or "X").strip().upper()[:1]
+    if axis == "Y":
+        return (0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)
+    if axis == "Z":
+        return (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)
+    return (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
+
+
+def _dot(a, b):
+    return sum(float(x) * float(y) for x, y in zip(a, b))
+
+
+def _bounds_at_time(reader, time_s: float, fallback_center):
+    """Read one frame's bounds and center, or return a fallback center."""
     if reader is None:
-        return fallback
+        return None, fallback_center
     try:
         from paraview.simple import UpdatePipeline  # type: ignore
 
         UpdatePipeline(time=float(time_s), proxy=reader)
-        bounds = reader.GetDataInformation().GetBounds()
-        if bounds and len(bounds) == 6:
-            return ((float(bounds[0]) + float(bounds[1])) / 2.0,
-                    (float(bounds[2]) + float(bounds[3])) / 2.0,
-                    (float(bounds[4]) + float(bounds[5])) / 2.0)
+        bounds = tuple(float(v) for v in reader.GetDataInformation().GetBounds())
+        if len(bounds) == 6:
+            center = ((bounds[0] + bounds[1]) / 2.0,
+                      (bounds[2] + bounds[3]) / 2.0,
+                      (bounds[4] + bounds[5]) / 2.0)
+            return bounds, center
     except Exception:
         pass
-    return fallback
+    return None, fallback_center
 
 
-def _install_camera_orbit(args, view, scene, excav_reader, times):
-    """Add a normalized camera track that orbits the excavator while time plays."""
+def _fit_orbit_radius(bounds, center, axis, u, v):
+    """Radius that keeps the whole excavator inside the orbit around its axis."""
+    if bounds is None:
+        return 0.6
+    corners = [(bounds[0], bounds[2], bounds[4]), (bounds[0], bounds[2], bounds[5]),
+               (bounds[0], bounds[3], bounds[4]), (bounds[0], bounds[3], bounds[5]),
+               (bounds[1], bounds[2], bounds[4]), (bounds[1], bounds[2], bounds[5]),
+               (bounds[1], bounds[3], bounds[4]), (bounds[1], bounds[3], bounds[5])]
+    offsets = [tuple(c[i] - center[i] for i in range(3)) for c in corners]
+    radial = max(max(abs(_dot(p, u)), abs(_dot(p, v))) for p in offsets)
+    axial = max(abs(_dot(p, axis)) for p in offsets)
+    return max(2.2 * radial, 1.2 * axial, 0.25)
+
+
+def _install_camera_orbit(args, view, scene, excav_reader, times, spin_axis="X"):
+    """Add a normalized camera track orbiting the drum around its spin axis.
+
+    The excavator is sampled once at the first timestep to fit the radius; the
+    camera track itself uses fixed keyframes so playback does not repeatedly
+    force the large PVD reader to reload frames.
+    """
     from paraview.simple import CameraKeyFrame, GetCameraTrack  # type: ignore
 
     if not times:
@@ -270,14 +305,20 @@ def _install_camera_orbit(args, view, scene, excav_reader, times):
     duration = max(0.0, t1 - t0)
     camera = view.GetActiveCamera()
     pos = tuple(float(v) for v in camera.GetPosition())
-    base_center = _center_at_time(excav_reader, t0,
-                                  tuple(float(v) for v in camera.GetFocalPoint()))
-    dx, dy = pos[0] - base_center[0], pos[1] - base_center[1]
-    radius = float(args.orbit_radius) if args.orbit_radius and args.orbit_radius > 0.0 else math.hypot(dx, dy)
-    if radius <= 0.0:
-        radius = math.dist(pos, base_center) or 0.5
+    axis, u, v = _orbit_basis(spin_axis)
+
+    bounds, center = _bounds_at_time(
+        excav_reader, t0, tuple(float(v) for v in camera.GetFocalPoint()))
+    if args.orbit_radius and args.orbit_radius > 0.0:
+        radius = float(args.orbit_radius)
+        fit_note = "requested"
+    else:
+        radius = _fit_orbit_radius(bounds, center, axis, u, v)
+        fit_note = "auto-fit"
+
+    off_u, off_v = _dot(pos, u) - _dot(center, u), _dot(pos, v) - _dot(center, v)
     start_angle = (float(args.orbit_start_angle) if args.orbit_start_angle is not None
-                   else math.degrees(math.atan2(dy, dx)))
+                   else math.degrees(math.atan2(off_v, off_u)) if (off_u or off_v) else 0.0)
     inclination = max(-80.0, min(80.0, float(args.orbit_inclination)))
     speed = float(args.orbit_speed)  # revolutions per simulation second
     if args.orbit_keyframes and args.orbit_keyframes > 0:
@@ -285,24 +326,23 @@ def _install_camera_orbit(args, view, scene, excav_reader, times):
     else:
         n = int(max(24, min(360, math.ceil(max(abs(speed) * duration, 1.0) * 24))))
     inc = math.radians(inclination)
-    rxy = radius * math.cos(inc)
-    zoff = radius * math.sin(inc)
+    radial = radius * math.cos(inc)
+    axial = radius * math.sin(inc)
     view_angle = float(camera.GetViewAngle())
 
     frames = []
     for i in range(n + 1):
         frac = i / n
         t = t0 + frac * duration
-        center = _center_at_time(excav_reader, t, base_center) if i else base_center
         azimuth = math.radians(start_angle + 360.0 * speed * (t - t0))
-        camera_pos = (center[0] + rxy * math.cos(azimuth),
-                      center[1] + rxy * math.sin(azimuth),
-                      center[2] + zoff)
+        ca, sa = math.cos(azimuth), math.sin(azimuth)
+        camera_pos = tuple(center[j] + radial * (ca * u[j] + sa * v[j]) + axial * axis[j]
+                           for j in range(3))
         key = CameraKeyFrame()
         key.KeyTime = frac
         key.Position = list(camera_pos)
         key.FocalPoint = list(center)
-        key.ViewUp = [0.0, 0.0, 1.0]
+        key.ViewUp = list(axis)
         key.ViewAngle = view_angle
         frames.append(key)
 
@@ -311,11 +351,11 @@ def _install_camera_orbit(args, view, scene, excav_reader, times):
     cue.TimeMode = 'Normalized'
     cue.Interpolation = 'Linear'
     cue.KeyFrames = frames
-    camera.SetFocalPoint(*base_center)
+    camera.SetFocalPoint(*center)
     camera.SetPosition(*frames[0].Position)
-    camera.SetViewUp(0.0, 0.0, 1.0)
-    return (f"{n + 1} keyframes, {speed:g} rev/s, radius {radius:g} m, "
-            f"inclination {inclination:g} deg")
+    camera.SetViewUp(*axis)
+    return (f"{n + 1} keyframes, {speed:g} rev/s, {fit_note} radius {radius:g} m, "
+            f"inclination {inclination:g} deg, axis {str(spin_axis).upper()[:1]}")
 
 
 def main():
@@ -419,6 +459,13 @@ def main():
             try:
                 sphere = Sphere()
                 sphere.Radius = particle_radius
+                # Small default glyphs do not need high tessellation; fewer
+                # triangles make large particle frames much cheaper to draw.
+                for attr, value in (("ThetaResolution", 6), ("PhiResolution", 4)):
+                    try:
+                        setattr(sphere, attr, value)
+                    except Exception:
+                        pass
                 glyph = Glyph(Input=particles, GlyphType=sphere)
                 glyph.GlyphMode = 'All Points'
                 for attr, value in (('ScaleMode', 'data_scaling_off'), ('ScaleFactor', 1.0)):
@@ -661,7 +708,9 @@ def main():
             except Exception:
                 times = []
         try:
-            status = _install_camera_orbit(args, view, scene, excav_reader, times)
+            status = _install_camera_orbit(
+                args, view, scene, excav_reader, times,
+                spin_axis=str(manifest.get("spin_axis") or "X"))
             print(f"[view_study_paraview] camera orbit: {status}")
             print("  Press Play in the Animation/Time controls to rotate around the drum while excavation advances.")
         except Exception as exc:
