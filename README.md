@@ -89,6 +89,8 @@ The export writes `crm_animation.pvd` (also `combined.pvd`) with CRM particles a
 
 Both tools are parallel by default when launched from the GUI. `export_study_vtk.py --workers N` writes frames in `N` processes (the GUI uses its "ParaView export workers" setting); a 47-file study drops from ~20 s to ~7 s with `--workers 4`, with byte-identical output. `view_geometry.py` enables OpenCASCADE's parallel meshing and an all-at-once Boolean fuse of the STEP assembly (~6× faster than the serial fuse, identical CAD volume/bounding box); `--threads N` limits OCC/OMP workers (the GUI passes its "FEA threads" setting). Use `--no-parallel` on `view_geometry.py` for a slow serial diagnostic path.
 
+Launch the consolidated GUI with `./run_study_gui.sh`. Its **Settings** tab adjusts text size, startup window size, text color, and dark mode; changes can be applied to the current session and saved to the workspace-local `study_gui_settings.json` for the next launch.
+
 ## Repository layout
 
 ```text

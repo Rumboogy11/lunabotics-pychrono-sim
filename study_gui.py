@@ -67,13 +67,15 @@ _maybe_reexec_for_display()
 
 import json
 import queue
+import re
 import shlex
 import threading
 import time
 from datetime import datetime
 import tkinter as tk
 from tkinter import BOTH, END, HORIZONTAL, LEFT, RIGHT, VERTICAL, W, X, Y
-from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox
+from tkinter import BooleanVar, StringVar, Tk, colorchooser, filedialog, messagebox
+from tkinter import font as tkfont
 from tkinter import ttk
 
 ROOT = Path(__file__).resolve().parent
@@ -169,6 +171,84 @@ PARAM_INFO.update({
 })
 
 DEFAULT_FILE = ROOT / "study_gui_defaults.json"
+
+# Appearance/startup preferences live in their own file so they never get
+# mixed into the study-parameter defaults written by the Defaults tab.
+SETTINGS_FILE = ROOT / "study_gui_settings.json"
+HEADER_FONT = "StudyHeaderFont"
+SECTION_FONT = "StudySectionFont"
+LIGHT_TEXT = "#000000"
+DARK_TEXT = "#F2F2F2"
+
+SHIPPED_SETTINGS: dict[str, object] = {
+    "font_size": 10,
+    "window_width": 1100,
+    "window_height": 1080,
+    "text_color": LIGHT_TEXT,
+    "dark_mode": False,
+}
+
+SETTINGS_INFO: dict[str, str] = {
+    "font_size": "Base text size (7-24). Applies to labels, entries, buttons, and log panels immediately.",
+    "window_width": "Window width in pixels used the next time the GUI starts (640-3840).",
+    "window_height": "Window height in pixels used the next time the GUI starts (480-2160).",
+    "text_color": "Foreground text color as #RRGGBB. Pick... opens the system color dialog.",
+    "dark_mode": "Use a dark interface palette. If the text color is still the default, it switches to a light shade automatically.",
+}
+
+
+def _valid_color(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", value.strip()) is not None
+
+
+def _setting_int(value: object, label: str, low: int, high: int, default: int, strict: bool = False) -> int:
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        if strict:
+            raise ValueError(f"{label} must be a whole number.")
+        return default
+    if number < low or number > high:
+        if strict:
+            raise ValueError(f"{label} must be between {low} and {high}.")
+        return max(low, min(high, number))
+    return number
+
+
+def load_ui_settings() -> dict[str, object]:
+    """Load appearance preferences, falling back to shipped values per key."""
+    values = dict(SHIPPED_SETTINGS)
+    if not SETTINGS_FILE.is_file():
+        return values
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return values
+    if not isinstance(data, dict):
+        return values
+    values["font_size"] = _setting_int(
+        data.get("font_size"), "Text size", 7, 24, int(SHIPPED_SETTINGS["font_size"]))
+    values["window_width"] = _setting_int(
+        data.get("window_width"), "Window width", 640, 3840, int(SHIPPED_SETTINGS["window_width"]))
+    values["window_height"] = _setting_int(
+        data.get("window_height"), "Window height", 480, 2160, int(SHIPPED_SETTINGS["window_height"]))
+    if _valid_color(data.get("text_color")):
+        values["text_color"] = str(data["text_color"]).strip()
+    values["dark_mode"] = bool(data.get("dark_mode", False))
+    return values
+
+
+def write_ui_settings(values: dict[str, object]) -> None:
+    """Persist only validated appearance preferences."""
+    clean = {
+        "font_size": _setting_int(values.get("font_size"), "Text size", 7, 24, int(SHIPPED_SETTINGS["font_size"])),
+        "window_width": _setting_int(values.get("window_width"), "Window width", 640, 3840, int(SHIPPED_SETTINGS["window_width"])),
+        "window_height": _setting_int(values.get("window_height"), "Window height", 480, 2160, int(SHIPPED_SETTINGS["window_height"])),
+        "text_color": (str(values["text_color"]).strip() if _valid_color(values.get("text_color"))
+                       else str(SHIPPED_SETTINGS["text_color"])),
+        "dark_mode": bool(values.get("dark_mode", False)),
+    }
+    SETTINGS_FILE.write_text(json.dumps(clean, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def shipped_defaults() -> dict[str, object]:
@@ -365,8 +445,11 @@ class StudyGUI:
     def __init__(self, root: Tk):
         self.root = root
         root.title("PyChrono Excavator Study GUI")
-        root.geometry("1100x1080")
-        #root.minsize(1100, 820)
+        self.settings = load_ui_settings()
+        self._base_theme = ttk.Style().theme_use()
+        self.settings_vars: dict[str, StringVar | BooleanVar] = {}
+        self.text_widgets: list[tk.Text] = []
+        self._apply_ui_settings(self.settings)
         self.proc: subprocess.Popen | None = None
         self.log_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self.tools_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
@@ -402,12 +485,16 @@ class StudyGUI:
         self.study_tab = ttk.Frame(nb)
         self.defaults_tab = ttk.Frame(nb)
         self.tools_tab = ttk.Frame(nb)
+        self.settings_tab = ttk.Frame(nb)
         nb.add(self.study_tab, text="Study Wizard")
         nb.add(self.defaults_tab, text="Defaults")
         nb.add(self.tools_tab, text="Tools / View Results")
+        nb.add(self.settings_tab, text="Settings")
         self._build_study_tab()
         self._build_defaults_tab()
         self._build_tools_tab()
+        self._build_settings_tab()
+        self._apply_ui_settings(self.settings)
 
     def _build_study_tab(self):
         top = ttk.Frame(self.study_tab)
@@ -472,20 +559,20 @@ class StudyGUI:
         p = self._add_page("1. Study")
         r = 0
         ttk.Label(p, text="Study identity and output location. You can navigate back and edit any step before running.",
-                  font=("TkDefaultFont", 10, "bold")).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8); r += 1
+                  font=HEADER_FONT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8); r += 1
         r = self._row(p, r, "Study name", "study_name", help_text="Used for default output folder naming.")
         r = self._row(p, r, "Output directory", "output_dir", width=60, browse="dir", help_text="All configs, logs, meshes, and results go here.")
         r = self._row(p, r, "Geometry source", "geometry", combo=["supplied", "step", "files"], help_text="supplied=built-in meshes, step=convert CAD, files=existing meshes.")
         r = self._row(p, r, "Auto-scale from CAD/mesh", "auto_geometry", check=True, help_text="Derive bed/spacing/box defaults from drum size when possible.")
         ttk.Separator(p).grid(row=r, column=0, columnspan=4, sticky="ew", pady=8); r += 1
-        ttk.Label(p, text="Tip: use 'Apply CAD/mesh defaults' after choosing geometry to refresh suggested dimensions.",
-                  foreground="#444").grid(row=r, column=0, columnspan=4, sticky=W, padx=6)
+        ttk.Label(p, text="Tip: use 'Apply CAD/mesh defaults' after choosing geometry to refresh suggested dimensions."
+                  ).grid(row=r, column=0, columnspan=4, sticky=W, padx=6)
 
     def _page_geometry(self):
         p = self._add_page("2. Geometry")
         r = 0
         ttk.Label(p, text="Geometry and mesh inputs (used according to geometry source).",
-                  font=("TkDefaultFont", 10, "bold")).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8); r += 1
+                  font=HEADER_FONT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8); r += 1
         r = self._row(p, r, "STEP file", "step_file", width=60, browse="file", help_text="CAD input for geometry=step.")
         r = self._row(p, r, "CRM surface OBJ", "crm_obj", width=60, browse="file", help_text="Rigid CRM contact surface (geometry=files/supplied).")
         r = self._row(p, r, "FEA .node", "fea_node", width=60, browse="file")
@@ -507,7 +594,7 @@ class StudyGUI:
         p = self._add_page("3. Run & Domain")
         r = 0
         ttk.Label(p, text="Simulation timing, motion, SPH/domain, and solver settings.",
-                  font=("TkDefaultFont", 10, "bold")).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8); r += 1
+                  font=HEADER_FONT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8); r += 1
         r = self._row(p, r, "CRM duration (s)", "duration")
         r = self._row(p, r, "FEA duration (s)", "fea_duration")
         r = self._row(p, r, "SPH spacing (m)", "spacing", help_text="Smaller = higher resolution/more particles.")
@@ -532,12 +619,12 @@ class StudyGUI:
         p = self._add_page("4. Soil & Material")
         r = 0
         ttk.Label(p, text="Soil and PLA drum material parameters.",
-                  font=("TkDefaultFont", 10, "bold")).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8); r += 1
-        ttk.Label(p, text="Soil (CRM)", font=("TkDefaultFont", 9, "bold")).grid(row=r, column=0, sticky=W, padx=6, pady=4); r += 1
+                  font=HEADER_FONT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8); r += 1
+        ttk.Label(p, text="Soil (CRM)", font=SECTION_FONT).grid(row=r, column=0, sticky=W, padx=6, pady=4); r += 1
         for k, (label, _lim) in wiz.SOIL_FIELDS.items():
             r = self._row(p, r, label, f"soil_{k}")
         ttk.Separator(p).grid(row=r, column=0, columnspan=4, sticky="ew", pady=8); r += 1
-        ttk.Label(p, text="FEA drum material (PLA defaults)", font=("TkDefaultFont", 9, "bold")).grid(row=r, column=0, sticky=W, padx=6, pady=4); r += 1
+        ttk.Label(p, text="FEA drum material (PLA defaults)", font=SECTION_FONT).grid(row=r, column=0, sticky=W, padx=6, pady=4); r += 1
         for k, (label, _lim) in wiz.PLA_FIELDS.items():
             r = self._row(p, r, label, f"pla_{k}")
 
@@ -545,7 +632,7 @@ class StudyGUI:
         p = self._add_page("5. Output & Export")
         r = 0
         ttk.Label(p, text="Saved outputs and ParaView/VTK export (added as final wizard step when enabled).",
-                  font=("TkDefaultFont", 10, "bold")).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8); r += 1
+                  font=HEADER_FONT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8); r += 1
         r = self._row(p, r, "Save CRM particle CSV frames", "save_particles", check=True)
         r = self._row(p, r, "Export FEA stress/deformation VTU", "fea_export_vtk", check=True,
                       help_text="Required to visualize von Mises stresses in ParaView.")
@@ -558,7 +645,7 @@ class StudyGUI:
         r = self._row(p, r, "Open ParaView after run", "open_paraview", check=True)
         ttk.Label(p, text="ParaView note: run 'pvpython view_study_paraview.py <study>/paraview' for a preconfigured 3D view\n"
                           "(particles as spheres, separate excavator, FEA colored by von Mises stress).",
-                  foreground="#444", justify=LEFT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8)
+                  justify=LEFT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8)
 
     def _page_review(self):
         p = ttk.Frame(self.step_nb)
@@ -567,7 +654,7 @@ class StudyGUI:
         top = ttk.Frame(p)
         top.pack(fill=X, padx=6, pady=6)
         ttk.Label(top, text="Review generated configuration/commands. Go back to any step to change parameters.",
-                  font=("TkDefaultFont", 10, "bold")).pack(side=LEFT)
+                  font=HEADER_FONT).pack(side=LEFT)
         ttk.Button(top, text="Refresh preview", command=self._refresh_preview).pack(side=RIGHT)
         paned = ttk.Panedwindow(p, orient=VERTICAL)
         paned.pack(fill=BOTH, expand=True, padx=6, pady=4)
@@ -587,6 +674,7 @@ class StudyGUI:
         f = ttk.Frame(parent)
         f.pack(fill=BOTH, expand=True)
         txt = tk.Text(f, height=height, wrap="none")
+        self.text_widgets.append(txt)
         vs = ttk.Scrollbar(f, orient=VERTICAL, command=txt.yview)
         hs = ttk.Scrollbar(f, orient=HORIZONTAL, command=txt.xview)
         txt.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
@@ -615,7 +703,7 @@ class StudyGUI:
         p = outer.inner
         r = 0
         ttk.Label(p, text="Run/view tools for an existing study directory.",
-                  font=("TkDefaultFont", 10, "bold")).grid(row=r, column=0, columnspan=4, sticky=W, padx=8, pady=10); r += 1
+                  font=HEADER_FONT).grid(row=r, column=0, columnspan=4, sticky=W, padx=8, pady=10); r += 1
         self.tools_study_dir = StringVar(value=str(ROOT))
         ttk.Label(p, text="Study/output directory").grid(row=r, column=0, sticky=W, padx=8, pady=4)
         ttk.Entry(p, textvariable=self.tools_study_dir, width=70).grid(row=r, column=1, sticky=W, padx=4)
@@ -637,7 +725,7 @@ class StudyGUI:
             ttk.Button(p, text=text, command=cmd, width=54).grid(row=r, column=0, columnspan=2, sticky=W, padx=8, pady=4); r += 1
 
         ttk.Separator(p).grid(row=r, column=0, columnspan=4, sticky="ew", pady=8); r += 1
-        ttk.Label(p, text="ParaView notes:", font=("TkDefaultFont", 9, "bold")).grid(row=r, column=0, sticky=W, padx=8); r += 1
+        ttk.Label(p, text="ParaView notes:", font=SECTION_FONT).grid(row=r, column=0, sticky=W, padx=8); r += 1
         notes = (
             "• The 'Open ParaView 3D view' button launches the full ParaView GUI and keeps it open.\n"
             "• It forces QT_QPA_PLATFORM=xcb (X11/XWayland) because ParaView 6.2 can abort on Wayland.\n"
@@ -647,7 +735,7 @@ class StudyGUI:
             "• Particles are rendered as 3D spheres (glyphs sized from export). Excavator is a separate source.\n"
             "• FEA stress/deformation requires FEA VTK export; viewer colors by von Mises and warps by displacement by default."
         )
-        ttk.Label(p, text=notes, justify=LEFT, foreground="#333").grid(row=r, column=0, columnspan=4, sticky=W, padx=8, pady=4); r += 1
+        ttk.Label(p, text=notes, justify=LEFT).grid(row=r, column=0, columnspan=4, sticky=W, padx=8, pady=4); r += 1
 
         ttk.Separator(p).grid(row=r, column=0, columnspan=4, sticky="ew", pady=8); r += 1
         ttk.Label(p, text="Quick export stride (every N CRM frames)").grid(row=r, column=0, sticky=W, padx=8, pady=4)
@@ -662,6 +750,7 @@ class StudyGUI:
         p.rowconfigure(r, weight=1)
         p.columnconfigure(1, weight=1)
         self.tools_log = tk.Text(logf, height=14, wrap="none")
+        self.text_widgets.append(self.tools_log)
         vs = ttk.Scrollbar(logf, orient=VERTICAL, command=self.tools_log.yview)
         hs = ttk.Scrollbar(logf, orient=HORIZONTAL, command=self.tools_log.xview)
         self.tools_log.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
@@ -683,10 +772,10 @@ class StudyGUI:
         p = outer.inner
         r = 0
         ttk.Label(p, text="Persistent starting values for new studies.",
-                  font=("TkDefaultFont", 10, "bold")).grid(row=r, column=0, columnspan=4, sticky=W, padx=8, pady=8)
+                  font=HEADER_FONT).grid(row=r, column=0, columnspan=4, sticky=W, padx=8, pady=8)
         r += 1
-        ttk.Label(p, text=f"Saved in {DEFAULT_FILE}. Study name and output directory are generated for each run.",
-                  foreground="#555").grid(row=r, column=0, columnspan=4, sticky=W, padx=8)
+        ttk.Label(p, text=f"Saved in {DEFAULT_FILE}. Study name and output directory are generated for each run."
+                  ).grid(row=r, column=0, columnspan=4, sticky=W, padx=8)
         r += 1
         bar = ttk.Frame(p)
         bar.grid(row=r, column=0, columnspan=4, sticky=W, padx=8, pady=8)
@@ -701,7 +790,7 @@ class StudyGUI:
         ttk.Separator(p).grid(row=r, column=0, columnspan=4, sticky="ew", pady=4)
         r += 1
         for section, fields in DEFAULT_GROUPS:
-            ttk.Label(p, text=section, font=("TkDefaultFont", 9, "bold")).grid(
+            ttk.Label(p, text=section, font=SECTION_FONT).grid(
                 row=r, column=0, columnspan=4, sticky=W, padx=8, pady=(8, 4))
             r += 1
             for label, key, kwargs in fields:
@@ -780,6 +869,245 @@ class StudyGUI:
             self.status_var.set("Defaults reset to shipped values. Use 'Apply to current study' if desired.")
         except Exception as e:
             messagebox.showerror("Defaults", str(e))
+
+    # ---- appearance settings ----
+    def _build_settings_tab(self):
+        outer = ScrollFrame(self.settings_tab)
+        outer.pack(fill=BOTH, expand=True)
+        p = outer.inner
+        r = 0
+        ttk.Label(p, text="Appearance and startup preferences (kept separate from study defaults).",
+                  font=HEADER_FONT).grid(row=r, column=0, columnspan=5, sticky=W, padx=8, pady=8); r += 1
+        ttk.Label(p, text=f"Saved in {SETTINGS_FILE}.",
+                  font=SECTION_FONT).grid(row=r, column=0, columnspan=5, sticky=W, padx=8); r += 1
+
+        values = self.settings
+        self.settings_vars = {
+            "font_size": StringVar(value=str(values["font_size"])),
+            "window_width": StringVar(value=str(values["window_width"])),
+            "window_height": StringVar(value=str(values["window_height"])),
+            "text_color": StringVar(value=str(values["text_color"])),
+            "dark_mode": BooleanVar(value=bool(values["dark_mode"])),
+        }
+        r = self._settings_row(p, r, "Text size", "font_size", kind="size")
+        r = self._settings_row(p, r, "Window width (px)", "window_width")
+        r = self._settings_row(p, r, "Window height (px)", "window_height")
+        r = self._settings_row(p, r, "Text color", "text_color", kind="color")
+        r = self._settings_row(p, r, "Dark mode", "dark_mode", kind="check")
+        ttk.Separator(p).grid(row=r, column=0, columnspan=5, sticky="ew", pady=8); r += 1
+        bar = ttk.Frame(p)
+        bar.grid(row=r, column=0, columnspan=5, sticky=W, padx=8, pady=6); r += 1
+        for text, cmd in (
+            ("Apply now", self._apply_settings_now),
+            ("Save settings", self._save_settings),
+            ("Reset to defaults", self._reset_settings),
+        ):
+            ttk.Button(bar, text=text, command=cmd).pack(side=LEFT, padx=(0, 6))
+        ttk.Label(
+            p,
+            text="Apply now changes this session only; Save settings also keeps the values for the next launch. "
+                 "Text size affects the whole GUI, including the log panels.",
+            justify=LEFT,
+        ).grid(row=r, column=0, columnspan=5, sticky=W, padx=8, pady=(2, 8)); r += 1
+        self._refresh_color_preview()
+
+    def _settings_row(self, parent, r, label, key, kind="entry"):
+        ttk.Label(parent, text=label).grid(row=r, column=0, sticky=W, padx=8, pady=4)
+        var = self.settings_vars[key]
+        if kind == "check":
+            ttk.Checkbutton(parent, variable=var,
+                            command=self._on_dark_mode_toggle).grid(row=r, column=1, sticky=W, padx=4)
+        elif kind == "size" and hasattr(ttk, "Spinbox"):
+            ttk.Spinbox(parent, from_=7, to=24, width=8,
+                        textvariable=var).grid(row=r, column=1, sticky=W, padx=4)
+        else:
+            ttk.Entry(parent, textvariable=var, width=12).grid(row=r, column=1, sticky=W, padx=4)
+        if kind == "color":
+            self.color_preview = ttk.Label(parent, text="", width=12, relief="sunken")
+            self.color_preview.grid(row=r, column=2, sticky=W, padx=4)
+            ttk.Button(parent, text="Pick...", width=8,
+                       command=self._pick_text_color).grid(row=r, column=3, sticky=W, padx=4)
+            var.trace_add("write", lambda *_: self._refresh_color_preview())
+        ttk.Button(parent, text="Info", width=6,
+                   command=lambda l=label, k=key: self._show_info(l, SETTINGS_INFO.get(k, ""))).grid(
+                       row=r, column=4, sticky=W, padx=6)
+        return r + 1
+
+    def _refresh_color_preview(self):
+        preview = getattr(self, "color_preview", None)
+        if preview is None:
+            return
+        color = self.settings_vars["text_color"].get().strip()
+        if not _valid_color(color):
+            preview.configure(text="invalid", background="#777777", foreground=DARK_TEXT)
+            return
+        dark = bool(self.settings_vars["dark_mode"].get())
+        preview.configure(text=color, background=color,
+                          foreground=DARK_TEXT if dark else LIGHT_TEXT)
+
+    def _pick_text_color(self):
+        chosen = colorchooser.askcolor(
+            color=self.settings_vars["text_color"].get(), title="Choose text color")
+        if chosen and chosen[1]:
+            self.settings_vars["text_color"].set(chosen[1])
+            self._refresh_color_preview()
+
+    def _on_dark_mode_toggle(self):
+        dark = bool(self.settings_vars["dark_mode"].get())
+        current = self.settings_vars["text_color"].get().strip().lower()
+        if current in {LIGHT_TEXT.lower(), DARK_TEXT.lower()}:
+            self.settings_vars["text_color"].set(DARK_TEXT if dark else LIGHT_TEXT)
+        self._refresh_color_preview()
+        self._apply_settings_now()
+
+    def _collect_settings_from_vars(self, strict: bool = False) -> dict[str, object]:
+        color = self.settings_vars["text_color"].get().strip()
+        if not _valid_color(color):
+            if strict:
+                raise ValueError("Text color must be a hex color such as #336699.")
+            color = str(self.settings.get("text_color", SHIPPED_SETTINGS["text_color"]))
+        return {
+            "font_size": _setting_int(self.settings_vars["font_size"].get(), "Text size",
+                                      7, 24, int(self.settings["font_size"]), strict=strict),
+            "window_width": _setting_int(self.settings_vars["window_width"].get(), "Window width",
+                                         640, 3840, int(self.settings["window_width"]), strict=strict),
+            "window_height": _setting_int(self.settings_vars["window_height"].get(), "Window height",
+                                          480, 2160, int(self.settings["window_height"]), strict=strict),
+            "text_color": color,
+            "dark_mode": bool(self.settings_vars["dark_mode"].get()),
+        }
+
+    def _sync_settings_vars(self, values: dict[str, object]) -> None:
+        if not self.settings_vars:
+            return
+        for key in ("font_size", "window_width", "window_height", "text_color"):
+            self.settings_vars[key].set(str(values[key]))
+        self.settings_vars["dark_mode"].set(bool(values["dark_mode"]))
+
+    def _walk_widgets(self, widget=None):
+        if widget is None:
+            widget = self.root
+        yield widget
+        try:
+            children = widget.winfo_children()
+        except tk.TclError:
+            return
+        for child in children:
+            yield from self._walk_widgets(child)
+
+    def _apply_ui_settings(self, values: dict[str, object] | None = None) -> None:
+        """Apply appearance preferences to the live Tk widgets."""
+        values = values or self.settings
+        size = _setting_int(values.get("font_size"), "Text size", 7, 24, 10)
+        width = _setting_int(values.get("window_width"), "Window width", 640, 3840, 1100)
+        height = _setting_int(values.get("window_height"), "Window height", 480, 2160, 1080)
+        color = str(values.get("text_color") or LIGHT_TEXT)
+        if not _valid_color(color):
+            color = str(SHIPPED_SETTINGS["text_color"])
+        dark = bool(values.get("dark_mode"))
+
+        self.root.geometry(f"{width}x{height}")
+
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+            try:
+                tkfont.nametofont(name).configure(size=size)
+            except tk.TclError:
+                pass
+        for name, font_size in ((HEADER_FONT, size), (SECTION_FONT, max(7, size - 1))):
+            try:
+                font = tkfont.nametofont(name)
+            except tk.TclError:
+                font = tkfont.Font(name=name, exists=False, family="TkDefaultFont",
+                                   size=font_size, weight="bold")
+            font.configure(family="TkDefaultFont", size=font_size, weight="bold")
+
+        style = ttk.Style()
+        theme = "clam" if dark and "clam" in style.theme_names() else self._base_theme
+        if theme in style.theme_names() and style.theme_use() != theme:
+            style.theme_use(theme)
+
+        bg = "#1E1E1E" if dark else "#FFFFFF"
+        frame = "#252526" if dark else "#F4F4F4"
+        field = "#2D2D30" if dark else "#FFFFFF"
+        button = "#3A3F4B" if dark else "#E6E6E6"
+        try:
+            style.configure(".", background=bg, foreground=color, font=("TkDefaultFont", size))
+            for cls in ("TFrame", "TLabelframe", "TLabelframe.Label", "TLabel",
+                        "TButton", "TCheckbutton", "TRadiobutton", "TScale"):
+                style.configure(cls, background=bg, foreground=color)
+            style.configure("TButton", background=button, foreground=color)
+            style.configure("TNotebook", background=frame)
+            style.configure("TNotebook.Tab", background=frame, foreground=color, padding=(8, 4))
+            style.map("TNotebook.Tab", background=[("selected", field)],
+                      foreground=[("selected", color)])
+            for cls in ("TEntry", "TCombobox", "TSpinbox"):
+                style.configure(cls, fieldbackground=field, foreground=color,
+                                insertcolor=color, arrowcolor=color)
+        except tk.TclError:
+            pass  # Some platform themes do not allow every style option.
+
+        self.root.configure(background=bg)
+        for widget in self._walk_widgets():
+            try:
+                wclass = widget.winfo_class()
+                if wclass == "Text":
+                    widget.configure(background=field, foreground=color,
+                                     insertbackground=color, font=("TkFixedFont", size))
+                elif wclass == "Canvas":
+                    widget.configure(background=bg)
+            except tk.TclError:
+                continue
+
+    def _apply_settings_now(self):
+        try:
+            values = self._collect_settings_from_vars(strict=True)
+        except ValueError as e:
+            messagebox.showerror("Settings", str(e))
+            return
+        self.settings = values
+        self._sync_settings_vars(values)
+        self._apply_ui_settings(values)
+        self._refresh_color_preview()
+        self.status_var.set("Appearance settings applied (not saved yet).")
+
+    def _save_settings(self):
+        if not self._apply_settings_from_ui():
+            return
+        try:
+            write_ui_settings(self.settings)
+            self.status_var.set(f"Saved GUI appearance settings to {SETTINGS_FILE}")
+            messagebox.showinfo("Settings", f"Saved GUI appearance settings to:\n{SETTINGS_FILE}")
+        except Exception as e:
+            messagebox.showerror("Settings", str(e))
+
+    def _apply_settings_from_ui(self) -> bool:
+        try:
+            values = self._collect_settings_from_vars(strict=True)
+        except ValueError as e:
+            messagebox.showerror("Settings", str(e))
+            return False
+        self.settings = values
+        self._sync_settings_vars(values)
+        self._apply_ui_settings(values)
+        self._refresh_color_preview()
+        return True
+
+    def _reset_settings(self):
+        if not messagebox.askyesno(
+            "Settings",
+            "Reset text size, window size, text color, and dark mode to shipped defaults?",
+        ):
+            return
+        values = dict(SHIPPED_SETTINGS)
+        self.settings = values
+        self._sync_settings_vars(values)
+        self._apply_ui_settings(values)
+        self._refresh_color_preview()
+        try:
+            write_ui_settings(values)
+            self.status_var.set("Appearance settings reset to shipped defaults.")
+        except Exception as e:
+            messagebox.showerror("Settings", str(e))
 
     # ---- config/build helpers ----
     def _g(self, key: str) -> str:

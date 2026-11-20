@@ -13,6 +13,7 @@ geometry_checks/
 
 # User-edited GUI defaults (workspace-local, regenerated from shipped values).
 study_gui_defaults.json
+study_gui_settings.json
 
 # Python bytecode and caches.
 __pycache__/
