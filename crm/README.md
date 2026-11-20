@@ -108,6 +108,8 @@ write reproducible `study_config.json`/`commands.sh`, run both one-way stages, a
 | `--dt S` | CRM/FSI timestep (spacing-dependent default) |
 | `--allow-unsafe-dt` | bypass explicit timestep stability check (not recommended) |
 | `--spacing D` | SPH particle spacing (default 0.002 m) |
+| `--artificial-viscosity V` | artificial bilateral SPH viscosity (default 0.5; raise to damp first-bite ejecta) |
+| `--shifting-ppst-push V` | PPST shifting push strength (default 3.0; lower reduces outward particle drift) |
 | `--fps F` | metric output cadence (default 20 Hz) |
 | `--loads-fps F` | soil-wrench CSV cadence (default 20 Hz; one-way FEA interpolates between samples) |
 | `--particle-fps F` | particle CSV cadence for ParaView (default 5 Hz; capped by `--fps`) |
@@ -133,6 +135,7 @@ write reproducible `study_config.json`/`commands.sh`, run both one-way stages, a
 
 Notes:
 - Default timestep scales with spacing (e.g. ~4e-5 s at 2 mm). Explicitly oversized `--dt` values are rejected unless `--allow-unsafe-dt` is set.
+- `artificial_viscosity`, `shifting_ppst_push`, and `settle_time` are editable under **Run & Domain** in `study_gui.py` and are recorded in `study_config.json`; the first two are passed only to rigid CRM, while `settle_time` is also passed to one-way FEA so the replay pose stays aligned. Raising viscosity or lowering PPST push can damp the first-contact soil eruption, but neither is a timestep fix.
 - The soil bed is padded around the drum and the default active SPH box extends two full excavator diameters beyond the padded bed laterally, and from below the bed floor to bed height + initial excavator height + two diameters + padding above the drum centre. Chrono deactivates particles outside this **body-frame** box (zeroing their velocity), so an undersized box makes flung particles freeze in mid-air. The driver also sets a separate fixed **world-frame** computational domain from the padded bed plus six spacings laterally/below the floor and the initial rotor crest plus two rotor diameters and the ballistic rise associated with the SPH EOS reference velocity. Chrono's default world domain is derived from the initial marker AABB (bed surface plus three BCE layers), which puts a hard ceiling just above the bed and freezes excavated soil in a flat layer; the explicit domain is recorded in `config.json` and printed after `Initialize()`.
 - Use the full-detail OBJ for production; legacy simplified meshes may close holes.
 - Summary, soil-wrench, and particle cadences are independent. The one-way FEA driver interpolates the wrench by time, and ParaView can render a lower-rate particle series, so reducing those two cadences speeds up CRM without changing solver physics.

@@ -333,6 +333,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--crm-dt", default=None,
                    help="CRM timestep in s, or 'auto' for spacing-dependent default")
     p.add_argument("--d0-multiplier", type=float, default=None, help="SPH kernel length multiplier")
+    p.add_argument("--artificial-viscosity", type=float, default=None,
+                    help="artificial bilateral SPH viscosity (default: 0.5)")
+    p.add_argument("--shifting-ppst-push", type=float, default=None,
+                    help="PPST shifting push strength (default: 3.0)")
     p.add_argument("--fps", type=float, default=None, help="CRM output cadence in Hz (default: 20)")
     p.add_argument("--fea-fps", type=float, default=None, help="FEA output cadence in Hz (default: same as CRM)")
     p.add_argument("--crm-fps", type=float, default=None, help="alias for --fps (CRM output cadence in Hz)")
@@ -344,7 +348,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="background processes for CRM particle CSV writes (default: 4)")
     p.add_argument("--bed-height", type=float, default=None, help="initial soil bed height in m")
     p.add_argument("--active-box", default=None, help="SPH domain size X,Y,Z in metres")
-    p.add_argument("--settle-time", type=float, default=None, help="settle time before spin/descent")
+    p.add_argument("--settle-time", type=float, default=None,
+                   help="bed settle time before spin/descent (default: 0.001 s)")
     p.add_argument("--descent-speed", type=float, default=None, help="drum descent speed in m/s")
     p.add_argument("--omega", type=float, default=None, help="drum spin rate magnitude in rad/s")
     p.add_argument("--reverse-spin", action=argparse.BooleanOptionalAction, default=None,
@@ -805,6 +810,24 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "SPH kernel multiplier h/spacing", 1.0, minimum=0.5,
         detail="Smoothing-length factor h = multiplier * spacing (1.0 is the standard choice).",
     )
+    artificial_viscosity = (
+        args.artificial_viscosity
+        if args.artificial_viscosity is not None
+        else prompt_float(
+            "Artificial viscosity", 0.5, minimum=0.0,
+            detail="Artificial bilateral SPH viscosity. Higher values damp pressure-wave ejecta "
+                   "at first contact but can reduce excavator response.",
+        )
+    )
+    shifting_ppst_push = (
+        args.shifting_ppst_push
+        if args.shifting_ppst_push is not None
+        else prompt_float(
+            "PPST shifting push", 3.0, minimum=0.0,
+            detail="PPST particle-shifting push strength. Lower values reduce outward particle "
+                   "drift; 0 disables the push term.",
+        )
+    )
     auto_dt = suggested_sph_dt(spacing, d0_multiplier)
     if args.crm_dt is None:
         use_auto = prompt_bool(
@@ -892,7 +915,8 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
     )
     settle_time = args.settle_time if args.settle_time is not None else prompt_float(
         "Settle time (s)", 0.001, minimum=0.0,
-        detail="Time to let the bed settle before excavation motion begins.",
+        detail="Time to let the bed settle before excavation motion begins. Longer settling can "
+               "reduce the first-bite pressure transient that flings soil upward.",
     )
     descent_speed = args.descent_speed if args.descent_speed is not None else prompt_float(
         "Descent speed (m/s)", float(geo["descent_speed"]), minimum=0.0,
@@ -1096,6 +1120,8 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "fea_duration": fea_duration,
         "spacing": spacing,
         "d0_multiplier": d0_multiplier,
+        "artificial_viscosity": artificial_viscosity,
+        "shifting_ppst_push": shifting_ppst_push,
         "crm_dt": crm_dt,
         "auto_crm_dt": auto_dt,
         "crm_fps": crm_fps,
@@ -1161,6 +1187,8 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         "--drum-half-length", f"{cfg['drum_half_length']:g}",
         "--inner-radius", f"{cfg['inner_radius']:g}",
         "--d0-multiplier", f"{cfg['d0_multiplier']:g}",
+        "--artificial-viscosity", f"{cfg.get('artificial_viscosity', 0.5):g}",
+        "--shifting-ppst-push", f"{cfg.get('shifting_ppst_push', 3.0):g}",
         "--mesh-file", str(cfg["crm_obj"]),
         "--loads-file", str(loads),
         "--output-dir", str(crm_dir),

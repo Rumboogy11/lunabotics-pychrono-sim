@@ -113,6 +113,8 @@ PARAM_INFO: dict[str, str] = {
     "fea_duration": "One-way FEA replay length; cannot exceed the CRM load-history duration. FEA replays rigid CRM soil-wrench CSVs, not SPH contact.",
     "spacing": "Initial SPH particle spacing. Smaller = more particles, higher resolution, slower simulation; ~0.002 m is the default (2x finer than the old 4 mm setting).",
     "d0_multiplier": "Smoothing-length factor h = multiplier * spacing. 1.0 is the standard choice.",
+    "artificial_viscosity": "Artificial bilateral SPH viscosity. Raise above 0.5 to damp pressure-wave soil ejection at the first drum bite; lower values preserve more dynamic response.",
+    "shifting_ppst_push": "PPST particle-shifting push strength. Lower than 3.0 reduces outward particle drift; 0 disables the push term.",
     "crm_dt": "Explicit CRM timestep, or 'auto' for a spacing-dependent stable value. Unsafe explicit dt is rejected unless explicitly allowed.",
     "crm_fps": "How often CRM summary frames are written. Particle and soil-wrench files use their own cadences.",
     "fea_fps": "Independent FEA summary/export cadence. Lower values speed up replay; FEA dynamics still follow FEA dt.",
@@ -124,7 +126,7 @@ PARAM_INFO: dict[str, str] = {
     "active_box": "Drum-centred active SPH domain X,Y,Z in metres (full sizes; X along drum axis, Y lateral, Z vertical). "
                   "Defaults to the padded bed plus 2 excavator diameters laterally, and bed height + initial "
                   "excavator height + 2 diameters + padding vertically, so flung particles are not deactivated.",
-    "settle_time": "Time to let the bed settle before excavation motion begins.",
+    "settle_time": "Time to let the bed settle before excavation motion begins. Longer settling can reduce the first-bite pressure transient that flings soil upward.",
     "descent_speed": "Vertical lowering speed of the drum into the bed. 0 keeps it at constant height.",
     "omega": "Drum angular speed magnitude about the spin axis (~3.14 rad/s = 30 rpm). Sign is controlled by Reverse spin.",
     "reverse_spin": "Flip rotation direction if the CAD excavator spins the wrong way. Signed omega is written as negative.",
@@ -193,6 +195,8 @@ def shipped_defaults() -> dict[str, object]:
         "fea_duration": "20",
         "spacing": "0.002",
         "d0_multiplier": "1.0",
+        "artificial_viscosity": "0.5",
+        "shifting_ppst_push": "3.0",
         "crm_dt": "auto",
         "crm_fps": "20",
         "fea_fps": "20",
@@ -254,6 +258,8 @@ DEFAULT_GROUPS: list[tuple[str, list[tuple[str, str, dict]]]] = [
         ("FEA duration (s)", "fea_duration", {}),
         ("SPH spacing (m)", "spacing", {}),
         ("SPH d0 multiplier", "d0_multiplier", {}),
+        ("Artificial viscosity", "artificial_viscosity", {}),
+        ("PPST shifting push", "shifting_ppst_push", {}),
         ("CRM dt (s or 'auto')", "crm_dt", {}),
         ("CRM output FPS", "crm_fps", {}),
         ("FEA output FPS", "fea_fps", {}),
@@ -506,6 +512,8 @@ class StudyGUI:
         r = self._row(p, r, "FEA duration (s)", "fea_duration")
         r = self._row(p, r, "SPH spacing (m)", "spacing", help_text="Smaller = higher resolution/more particles.")
         r = self._row(p, r, "SPH d0 multiplier", "d0_multiplier")
+        r = self._row(p, r, "Artificial viscosity", "artificial_viscosity")
+        r = self._row(p, r, "PPST shifting push", "shifting_ppst_push")
         r = self._row(p, r, "CRM dt (s or 'auto')", "crm_dt")
         r = self._row(p, r, "CRM output FPS", "crm_fps")
         r = self._row(p, r, "FEA output FPS", "fea_fps")
@@ -863,6 +871,8 @@ class StudyGUI:
         fea_duration = float(self._g("fea_duration"))
         spacing = float(self._g("spacing"))
         d0_multiplier = float(self._g("d0_multiplier"))
+        artificial_viscosity = float(self._g("artificial_viscosity") or 0.5)
+        shifting_ppst_push = float(self._g("shifting_ppst_push") or 3.0)
         crm_dt_raw = self._g("crm_dt").strip().lower()
         if crm_dt_raw in {"", "auto"}:
             crm_dt = wiz.suggested_sph_dt(spacing, d0_multiplier)
@@ -916,6 +926,8 @@ class StudyGUI:
             "fea_duration": fea_duration,
             "spacing": spacing,
             "d0_multiplier": d0_multiplier,
+            "artificial_viscosity": artificial_viscosity,
+            "shifting_ppst_push": shifting_ppst_push,
             "crm_dt": crm_dt,
             "auto_crm_dt": wiz.suggested_sph_dt(spacing, d0_multiplier),
             "crm_fps": crm_fps,
@@ -1116,7 +1128,8 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         for k in ["unit_scale", "mesh_size", "surface_target_faces", "surface_faces", "surface_max_faces",
                   "min_solid_volume", "hub_radius",
                   "drum_radius", "drum_half_length", "inner_radius", "capacity_volume", "duration",
-                  "fea_duration", "spacing", "d0_multiplier", "crm_fps", "fea_fps", "fea_dt",
+                  "fea_duration", "spacing", "d0_multiplier", "artificial_viscosity",
+                   "shifting_ppst_push", "crm_fps", "fea_fps", "fea_dt",
                   "bed_height", "settle_time", "descent_speed", "omega", "num_threads",
                   "load_radius_fraction", "raw_stress_every", "export_workers",
                   "fea_vtk_stride", "paraview_stride"]:

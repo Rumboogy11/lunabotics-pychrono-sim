@@ -105,6 +105,8 @@ class CrmRunParams:
     active_box_y: float = 0.687407
     active_box_z: float = 0.866370  # bed + initial centre height + 2 diameters
     max_velocity: float = 1.0            # SPH max velocity for EOS stabilization
+    artificial_viscosity: float = 0.5    # artificial bilateral viscosity
+    shifting_ppst_push: float = 3.0      # PPST shifting push strength
     d0_multiplier: float = 1.0           # h = d0_multiplier * spacing
     free_surface_threshold: float = 2.4  # divergence threshold for free surface
     proximity_steps: int = 4             # steps between neighbor-list updates
@@ -123,6 +125,8 @@ class CrmRunParams:
             raise ValueError("spin axis must be X, Y, or Z")
         if self.proximity_steps < 1:
             raise ValueError("proximity_steps must be at least 1")
+        if self.artificial_viscosity < 0.0 or self.shifting_ppst_push < 0.0:
+            raise ValueError("artificial_viscosity and shifting_ppst_push must be non-negative")
         if self.bed_padding < 0.0:
             raise ValueError("bed_padding must be non-negative")
         if self.inner_radius >= self.drum_radius:
@@ -226,6 +230,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "diameters laterally; bed + initial height + 2 diameters + padding vertically)")
     p.add_argument("--max-velocity", type=float, default=None,
                    help="SPH stabilizing max velocity in m/s (default: 1.0)")
+    p.add_argument("--artificial-viscosity", type=float, default=None,
+                    help="artificial bilateral SPH viscosity (default: 0.5)")
+    p.add_argument("--shifting-ppst-push", type=float, default=None,
+                    help="PPST shifting push strength (default: 3.0)")
     p.add_argument("--d0-multiplier", type=float, default=None,
                    help="kernel length multiplier h/spacing (default: 1.0)")
     p.add_argument("--free-surface-threshold", type=float, default=None,
@@ -400,6 +408,8 @@ def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -
         "inner_radius": args.inner_radius,
         "capacity_volume": args.capacity_volume,
         "max_velocity": args.max_velocity,
+        "artificial_viscosity": getattr(args, "artificial_viscosity", None),
+        "shifting_ppst_push": getattr(args, "shifting_ppst_push", None),
         "d0_multiplier": args.d0_multiplier,
         "free_surface_threshold": args.free_surface_threshold,
         "proximity_steps": args.proximity_steps,
@@ -489,7 +499,7 @@ def configure_sph(fsi, terrain, run: CrmRunParams) -> None:
 
     params.initial_spacing = run.spacing
     params.d0_multiplier = run.d0_multiplier
-    params.artificial_viscosity = 0.5
+    params.artificial_viscosity = run.artificial_viscosity
     params.free_surface_threshold = run.free_surface_threshold
     params.use_consistent_gradient_discretization = False
     params.use_consistent_laplacian_discretization = False
@@ -498,7 +508,7 @@ def configure_sph(fsi, terrain, run: CrmRunParams) -> None:
     if hasattr(params, "num_proximity_search_steps"):
         params.num_proximity_search_steps = run.proximity_steps
     if hasattr(params, "shifting_ppst_push"):
-        params.shifting_ppst_push = 3.0
+        params.shifting_ppst_push = run.shifting_ppst_push
     if hasattr(params, "shifting_ppst_pull"):
         params.shifting_ppst_pull = 1.0
     terrain.SetSPHParameters(params)
@@ -872,6 +882,8 @@ def main() -> int:
                 f"soil bed: {2.0 * motion.bed_x_half:.4g} x {2.0 * motion.bed_y_half:.4g} m "
                 f"(padding {run.bed_padding:g} R), height={motion.bed_height:.4g} m",
                 f"active SPH box: {run.active_box} (body frame, follows drum)",
+                f"SPH tuning: artificial_viscosity={run.artificial_viscosity:g}, "
+                f"PPST push={run.shifting_ppst_push:g}, settle_time={run.settle_time:g} s",
                 f"world computational domain: min={comp_domain[0]}, max={comp_domain[1]}",
                 f"capacity={capacity_volume:.6g} m^3 ({capacity_volume * soil.density:.4f} kg)",
             ]

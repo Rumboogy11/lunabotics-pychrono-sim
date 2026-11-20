@@ -1,0 +1,26 @@
+{
+  "study_dir": "/mnt/P3/Programs/Linux/pychrono",
+  "out_dir": "/mnt/P3/Programs/Linux/pychrono/paraview",
+  "spin_axis": "X",
+  "stride": 1,
+  "workers": 1,
+  "surface": null,
+  "particle_spacing_m": null,
+  "particle_diameter_m": null,
+  "particle_radius_m": null,
+  "default_series": "crm_animation",
+  "series": {
+    "crm_particles": null,
+    "excavator": null,
+    "crm_animation": null,
+    "combined": null,
+    "fea": null,
+    "with_fea": null,
+    "fea_source": null
+  },
+  "has_particles": false,
+  "has_excavator": false,
+  "has_fea_vtk": false,
+  "fea_valid": false,
+  "fea_status": "fea.pvd not found"
+}
