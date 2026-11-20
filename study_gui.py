@@ -85,6 +85,7 @@ if str(ROOT / "crm") not in sys.path:
     sys.path.insert(0, str(ROOT / "crm"))
 
 import study_wizard as wiz  # noqa: E402
+from study_output_preview import OutputPreview  # noqa: E402
 
 
 PARAM_INFO: dict[str, str] = {
@@ -198,6 +199,7 @@ SHIPPED_SETTINGS: dict[str, object] = {
     "window_height": 1080,
     "text_color": LIGHT_TEXT,
     "dark_mode": False,
+    "show_output_preview": True,
 }
 
 SETTINGS_INFO: dict[str, str] = {
@@ -206,6 +208,7 @@ SETTINGS_INFO: dict[str, str] = {
     "window_height": "Window height in pixels used the next time the GUI starts (480-2160).",
     "text_color": "Foreground text color as #RRGGBB. Pick... opens the system color dialog.",
     "dark_mode": "Use a dark interface palette. If the text color is still the default, it switches to a light shade automatically.",
+    "show_output_preview": "Show the lightweight CRM/FEA Output Preview tab. It reads study CSVs directly and draws subsampled particle points on a Tk canvas.",
 }
 
 GENERATED_DOC_ID = "<generated>"
@@ -258,6 +261,7 @@ def load_ui_settings() -> dict[str, object]:
     if _valid_color(data.get("text_color")):
         values["text_color"] = str(data["text_color"]).strip()
     values["dark_mode"] = bool(data.get("dark_mode", False))
+    values["show_output_preview"] = bool(data.get("show_output_preview", True))
     return values
 
 
@@ -270,6 +274,7 @@ def write_ui_settings(values: dict[str, object]) -> None:
         "text_color": (str(values["text_color"]).strip() if _valid_color(values.get("text_color"))
                        else str(SHIPPED_SETTINGS["text_color"])),
         "dark_mode": bool(values.get("dark_mode", False)),
+        "show_output_preview": bool(values.get("show_output_preview", True)),
     }
     SETTINGS_FILE.write_text(json.dumps(clean, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -474,6 +479,7 @@ class StudyGUI:
         self._base_theme = ttk.Style().theme_use()
         self.settings_vars: dict[str, StringVar | BooleanVar] = {}
         self.text_widgets: list[tk.Text] = []
+        self.ui_palette: dict[str, str] = {}
         self._apply_ui_settings(self.settings)
         self.proc: subprocess.Popen | None = None
         self.log_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
@@ -507,9 +513,11 @@ class StudyGUI:
     def _build_ui(self):
         nb = ttk.Notebook(self.root)
         nb.pack(fill=BOTH, expand=True)
+        self.notebook = nb
         self.study_tab = ttk.Frame(nb)
         self.defaults_tab = ttk.Frame(nb)
         self.tools_tab = ttk.Frame(nb)
+        self.preview_tab = ttk.Frame(nb)
         self.docs_tab = ttk.Frame(nb)
         self.settings_tab = ttk.Frame(nb)
         nb.add(self.study_tab, text="Study Wizard")
@@ -522,7 +530,46 @@ class StudyGUI:
         self._build_tools_tab()
         self._build_docs_tab()
         self._build_settings_tab()
+        self.preview = OutputPreview(
+            self.preview_tab, self.root, self._initial_preview_dir(),
+            palette=lambda: self.ui_palette,
+        )
         self._apply_ui_settings(self.settings)
+
+    def _initial_preview_dir(self) -> str:
+        """Pick a useful starting directory for the output preview."""
+        tools = getattr(self, "tools_study_dir", None)
+        if tools is not None:
+            value = tools.get().strip()
+            if value and Path(value).is_dir():
+                return value
+        configured = Path(self._g("output_dir")).expanduser()
+        if configured.is_dir():
+            return str(configured)
+        try:
+            candidates = [
+                p for p in ROOT.glob("Output_*")
+                if p.is_dir() and ((p / "crm").is_dir() or (p / "fea").is_dir())
+            ]
+            if candidates:
+                return str(max(candidates, key=lambda p: p.stat().st_mtime))
+        except OSError:
+            pass
+        return str(ROOT)
+
+    def _refresh_output_preview(self) -> None:
+        preview = getattr(self, "preview", None)
+        if preview is None or not bool(self.settings.get("show_output_preview", True)):
+            return
+        preview.refresh()
+
+    def _open_output_preview(self) -> None:
+        self.settings_vars["show_output_preview"].set(True)
+        self._apply_settings_now()
+        self.notebook.select(self.preview_tab)
+        if getattr(self, "preview", None) is not None:
+            self.preview.set_directory(self._initial_preview_dir())
+            self.preview.refresh()
 
     def _build_study_tab(self):
         top = ttk.Frame(self.study_tab)
@@ -917,6 +964,7 @@ class StudyGUI:
             ("Export ParaView VTK/PVD (separate particles & excavator)", self._tool_export),
             ("Open ParaView 3D view (pvpython, spheres + FEA stress)", self._tool_paraview),
             ("Open interactive result plots", self._tool_results),
+            ("Open lightweight CRM/FEA output preview", self._open_output_preview),
             ("View geometry comparison (STEP vs converted)", self._tool_geometry),
             ("Open study folder", self._tool_open_folder),
         ]
@@ -932,7 +980,8 @@ class StudyGUI:
             "  (passing args after '--' may not work with some ParaView builds).\n"
             "• pvpython fallback: pvpython view_study_paraview.py <study>/paraview stays open until its render window is closed.\n"
             "• Particles are rendered as 3D spheres (glyphs sized from export). Excavator is a separate source.\n"
-            "• FEA stress/deformation requires FEA VTK export; viewer colors by von Mises and warps by displacement by default."
+            "• FEA stress/deformation requires FEA VTK export; viewer colors by von Mises and warps by displacement by default.\n"
+            "• The lightweight Output Preview tab reads CRM/FEA CSVs directly, subsamples particles as 2D points, and needs no VTK conversion."
         )
         ttk.Label(p, text=notes, justify=LEFT).grid(row=r, column=0, columnspan=4, sticky=W, padx=8, pady=4); r += 1
 
@@ -1123,12 +1172,15 @@ class StudyGUI:
             "window_height": StringVar(value=str(values["window_height"])),
             "text_color": StringVar(value=str(values["text_color"])),
             "dark_mode": BooleanVar(value=bool(values["dark_mode"])),
+            "show_output_preview": BooleanVar(value=bool(values["show_output_preview"])),
         }
         r = self._settings_row(p, r, "Text size", "font_size", kind="size")
         r = self._settings_row(p, r, "Window width (px)", "window_width")
         r = self._settings_row(p, r, "Window height (px)", "window_height")
         r = self._settings_row(p, r, "Text color", "text_color", kind="color")
         r = self._settings_row(p, r, "Dark mode", "dark_mode", kind="check")
+        r = self._settings_row(p, r, "Show output preview tab", "show_output_preview",
+                               kind="check", command=self._apply_settings_now)
         ttk.Separator(p).grid(row=r, column=0, columnspan=5, sticky="ew", pady=8); r += 1
         bar = ttk.Frame(p)
         bar.grid(row=r, column=0, columnspan=5, sticky=W, padx=8, pady=6); r += 1
@@ -1146,12 +1198,13 @@ class StudyGUI:
         ).grid(row=r, column=0, columnspan=5, sticky=W, padx=8, pady=(2, 8)); r += 1
         self._refresh_color_preview()
 
-    def _settings_row(self, parent, r, label, key, kind="entry"):
+    def _settings_row(self, parent, r, label, key, kind="entry", command=None):
         ttk.Label(parent, text=label).grid(row=r, column=0, sticky=W, padx=8, pady=4)
         var = self.settings_vars[key]
         if kind == "check":
+            callback = command or self._on_dark_mode_toggle
             ttk.Checkbutton(parent, variable=var,
-                            command=self._on_dark_mode_toggle).grid(row=r, column=1, sticky=W, padx=4)
+                            command=callback).grid(row=r, column=1, sticky=W, padx=4)
         elif kind == "size" and hasattr(ttk, "Spinbox"):
             ttk.Spinbox(parent, from_=7, to=24, width=8,
                         textvariable=var).grid(row=r, column=1, sticky=W, padx=4)
@@ -1210,6 +1263,7 @@ class StudyGUI:
                                           480, 2160, int(self.settings["window_height"]), strict=strict),
             "text_color": color,
             "dark_mode": bool(self.settings_vars["dark_mode"].get()),
+            "show_output_preview": bool(self.settings_vars["show_output_preview"].get()),
         }
 
     def _sync_settings_vars(self, values: dict[str, object]) -> None:
@@ -1218,6 +1272,7 @@ class StudyGUI:
         for key in ("font_size", "window_width", "window_height", "text_color"):
             self.settings_vars[key].set(str(values[key]))
         self.settings_vars["dark_mode"].set(bool(values["dark_mode"]))
+        self.settings_vars["show_output_preview"].set(bool(values["show_output_preview"]))
 
     def _walk_widgets(self, widget=None):
         if widget is None:
@@ -1271,6 +1326,10 @@ class StudyGUI:
         frame = "#252526" if dark else "#F4F4F4"
         field = "#2D2D30" if dark else "#FFFFFF"
         button = "#3A3F4B" if dark else "#E6E6E6"
+        self.ui_palette = {
+            "bg": bg, "frame": frame, "field": field,
+            "text": color, "button": button,
+        }
         try:
             style.configure(".", background=bg, foreground=color, font=("TkDefaultFont", size))
             for cls in ("TFrame", "TLabelframe", "TLabelframe.Label", "TLabel",
@@ -1302,6 +1361,30 @@ class StudyGUI:
                     widget.configure(background=bg)
             except tk.TclError:
                 continue
+
+        self._apply_preview_visibility(bool(values.get("show_output_preview", True)))
+
+    def _apply_preview_visibility(self, show: bool) -> None:
+        notebook = getattr(self, "notebook", None)
+        tab = getattr(self, "preview_tab", None)
+        if notebook is None or tab is None:
+            return
+        tabs = tuple(notebook.tabs())
+        managed = str(tab) in tabs
+        visible = managed and notebook.tab(tab, "state") != "hidden"
+        if show and not visible:
+            index = notebook.index(self.docs_tab)
+            notebook.insert(index, tab, text="Output Preview")
+            notebook.tab(tab, state="normal")
+            preview = getattr(self, "preview", None)
+            if preview is not None:
+                preview.set_visible(True)
+                self.root.after(0, preview.refresh)
+        elif not show and visible:
+            preview = getattr(self, "preview", None)
+            if preview is not None:
+                preview.set_visible(False)
+            notebook.hide(tab)
 
     def _apply_settings_now(self):
         try:
@@ -1760,6 +1843,11 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             cfg = self._collect_cfg()
             steps = wiz.build_commands(cfg)
             wiz.write_reproducibility_files(cfg, steps)
+            run_dir = str(Path(self._g("output_dir")).expanduser().resolve())
+            if hasattr(self, "tools_study_dir"):
+                self.tools_study_dir.set(run_dir)
+            if hasattr(self, "preview"):
+                self.preview.set_directory(run_dir)
             self._set_text(self.log_text, "")
             self.status_var.set("Running study...")
             self.step_nb.select(len(self.pages) - 1)
@@ -1792,6 +1880,7 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                     self.log_queue.put(("done", f"failed:{step['name']}"))
                     return
                 self.log_queue.put(("line", f"[{step['name']}] complete\n"))
+                self.log_queue.put(("step_done", step["name"]))
             # post results (capture summary text)
             self.log_queue.put(("line", f"\nTotal wall time: {time.perf_counter()-started:.1f} s\n"))
             self.log_queue.put(("done", "ok"))
@@ -1815,6 +1904,8 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                 if kind == "line":
                     self.log_text.insert(END, str(payload))
                     self.log_text.see(END)
+                elif kind == "step_done":
+                    self._refresh_output_preview()
                 elif kind == "done":
                     status = str(payload)
                     self.proc = None
@@ -1832,6 +1923,7 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                                     f"paraview --script={ROOT/'view_study_paraview.py'}\n",
                                 )
                             self.log_text.see(END)
+                            self._refresh_output_preview()
                         except Exception:
                             pass
                     else:
