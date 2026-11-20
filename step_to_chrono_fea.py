@@ -38,18 +38,19 @@ Example
     ./chrono-env/bin/python step_to_chrono_fea.py geometry/LunarDrumScrew_m.step \\
         --out-prefix fea/LunarDrumScrew_m_fea_decim8k --unit-scale 0.001 \\
         --mesh-size 0.012 --surface-target-faces 8000 \\
-        --hub-radius 0.0015 --axis Z --tetgen-switches pYQ
+        --hub-radius 0.0015 --axis Z
 
     # New model: source drum axis is Y and is rotated to local Z on export.
     ./chrono-env/bin/python step_to_chrono_fea.py geometry/NewDrum.step \\
         --out-prefix fea/NewDrum_fea --unit-scale 0.001 \\
-        --mesh-size 0.012 --axis Y --hub-radius 0.035 --tetgen-switches pYQ
+        --mesh-size 0.012 --axis Y --hub-radius 0.035
 
     # Experimental: preserve exterior screw faces and simplify only the hub region.
+    # Keep the target modest; the converter retries automatically if needed.
     ./chrono-env/bin/python step_to_chrono_fea.py "geometry/spikey/Assembly 1.step" \\
         --out-prefix fea/PartAware_fea --unit-scale 0.001 \\
-        --mesh-size 0.02 --surface-target-faces 80000 --min-solid-volume 1e-05 \\
-        --hub-radius 0.0357669 --axis Y --tetgen-switches pYQ \\
+        --mesh-size 0.02 --surface-target-faces 8000 --min-solid-volume 1e-05 \\
+        --hub-radius 0.0357669 --axis Y \\
         --part-aware-simplify --part-aware-radius 0.05 --part-aware-reduction 0.75
 """
 
@@ -174,8 +175,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--surface-target-faces",
         type=int,
         default=8000,
-        help="minimum decimation target; the converter increases it until the surface stays "
-             "watertight and preserves volume (0 disables; default: 8000)",
+        help="starting decimation target; the converter increases it until the surface stays "
+             "watertight and preserves volume. Start modest: very large targets can create "
+             "sliver tetrahedra (0 disables; default: 8000)",
     )
     p.add_argument(
         "--surface-max-faces",
@@ -1173,23 +1175,23 @@ def main() -> int:
         # CRM contact STL is scaled into metres.
         surface_points = np.asarray(surface_points, dtype=float) @ source_to_local.T
         surface_points_m = surface_points * args.unit_scale
-        if args.part_aware_simplify:
-            # Interior decimation can leave near-coincident vertices whose
-            # float64 coordinates make TetGen's subface recovery fail.  Snap to
-            # the same float32 metre precision used by the exported STL and
-            # merge duplicates before handing the surface to TetGen.  Exterior
-            # coordinates move by at most ~1e-5 m, far below the 1 mm CAD
-            # deflection used for tessellation.
-            snapped = trimesh.Trimesh(
-                surface_points_m.astype(np.float32).astype(float),
-                surface_faces,
-                process=True,
-            )
-            if not snapped.is_watertight:
-                raise RuntimeError("part-aware surface snapped to STL precision is not watertight")
-            surface_points_m = np.asarray(snapped.vertices, dtype=float)
-            surface_faces = np.asarray(snapped.faces, dtype=np.int32)
-            surface_points = surface_points_m / args.unit_scale
+        # Decimation can leave near-coincident vertices differing by only one
+        # float32 ULP (~8 nm at this drum scale).  TetGen preserves those
+        # one-ULP edges as sliver tetrahedra, so merge them on a 0.1 um grid
+        # and repair any topology the merge collapses.
+        merged = trimesh.Trimesh(
+            np.round(surface_points_m, decimals=7),
+            surface_faces,
+            process=True,
+        )
+        if merged.is_watertight:
+            surface_points_m = np.asarray(merged.vertices, dtype=float)
+            surface_faces = np.asarray(merged.faces, dtype=np.int32)
+        else:
+            repaired = repair_surface(np.asarray(merged.vertices, dtype=float), merged.faces)
+            surface_points_m = np.asarray(repaired.points, dtype=float)
+            surface_faces = repaired.faces.reshape(-1, 4)[:, 1:].astype(np.int32)
+        surface_points = surface_points_m / args.unit_scale
         trimesh.Trimesh(surface_points_m, surface_faces, process=False).export(stl_path)
 
         tet = tetgen.TetGen(surface_points, surface_faces)
@@ -1241,6 +1243,15 @@ def main() -> int:
     volume = mesh_volume(points, tets)
     volume_error = abs(volume - cad_volume) / max(cad_volume, 1.0e-30)
     quality = edge_quality(points, tets)
+    # Sliver tets with nanometre edges make the FEA stiffness matrix singular in
+    # practice.  Reject them here instead of letting the solver emit NaNs or
+    # crash inside Pardiso/MKL.
+    if quality["median_edge_m"] > 0.0 and quality["min_edge_m"] < 1.0e-5 * quality["median_edge_m"]:
+        raise SystemExit(
+            f"mesh has degenerate tetrahedra: min edge {quality['min_edge_m']:.3g} m is "
+            f"<1e-5 of median edge {quality['median_edge_m']:.3g} m. "
+            "Refine the surface or adjust --surface-target-faces before running FEA."
+        )
 
     write_outputs(prefix, points, tets, hub_ids, surface_ids, args.hub_node_set, args.surface_node_set)
     mark("write mesh outputs")

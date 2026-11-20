@@ -273,7 +273,11 @@ def geometry_defaults(measured: dict[str, float | int] | None,
     return {
         "drum_radius": clean(radius),
         "drum_half_length": clean(half_length),
-        "surface_target_faces": 80000 if n_solids > 1 else 8000,
+        # Start modest even for multi-solid assemblies.  The mesh converter
+        # raises this automatically when TetGen rejects self-intersections;
+        # a very large starting target creates sliver tetrahedra that make the
+        # FEA stiffness matrix ill-conditioned.
+        "surface_target_faces": 8000,
         "min_solid_volume": 1.0e-5 if n_solids > 1 else 0.0,
         "mesh_size": clean(mesh_size),
         "bed_height": clean(bed_height),
@@ -781,7 +785,8 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
                 "--min-solid-volume", f"{min_solid_volume:g}",
                 "--hub-radius", f"{hub_radius:g}",
                 "--axis", cad_axis,
-                "--tetgen-switches", "pYQ",
+                # Leave TetGen's quality bounds enabled (do not override them
+                # with raw pYQ); sliver tets destabilize the FEA solve.
                 "--time-stages",
             ],
         })

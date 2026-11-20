@@ -101,7 +101,7 @@ PARAM_INFO: dict[str, str] = {
     "cad_axis": "Drum axis in original STEP coordinates. New models default to Y; the converter rotates this axis to local +Z for Chrono.",
     "unit_scale": "Multiply STEP coordinates by this factor (0.001 when CAD coordinates are millimetres). Final mesh units must be metres.",
     "mesh_size": "Approximate tetrahedral edge length. Smaller gives a finer, slower FEA mesh.",
-    "surface_target_faces": "Minimum contact-surface triangle count from STEP. The converter raises it automatically until decimation stays watertight and preserves volume (complex screws often need 50k-80k).",
+    "surface_target_faces": "Starting contact-surface triangle count from STEP. The converter raises it automatically if TetGen rejects self-intersections. Keep it modest (8000 default); very large targets can create sliver tetrahedra that destabilize the FEA solve.",
     "surface_max_faces": "Upper bound for the watertight decimation retry used by STEP mesh generation.",
     "surface_repair_order": "'none' unifies fused CAD faces and retries decimation until watertight. 'before'/'after' are legacy MeshFix routes that can inflate volume.",
     "min_solid_volume": "Drop STEP assembly solids smaller than this volume (m^3) before meshing (fasteners/debris).",
@@ -1224,7 +1224,8 @@ class StudyGUI:
                 "--min-solid-volume", f"{min_solid_volume:g}",
                 "--hub-radius", f"{hub_radius:g}",
                 "--axis", cad_axis,
-                "--tetgen-switches", "pYQ",
+                # Keep TetGen's default radius-edge/dihedral quality bounds;
+                # pYQ disables them and can create FEA-destabilizing slivers.
                 "--time-stages",
             ]
             if surface_repair_order == "after":
