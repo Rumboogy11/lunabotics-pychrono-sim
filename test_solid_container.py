@@ -43,20 +43,31 @@ def make_motion() -> object:
 
 
 class SolidContainerTest(unittest.TestCase):
+    def test_bed_particle_bounds_use_snapped_grid(self) -> None:
+        run = make_run()
+        (min_x, min_y, min_z), (max_x, max_y, max_z) = crm.bed_particle_bounds(run, make_motion())
+        self.assertAlmostEqual(min_x, -0.188995)
+        self.assertAlmostEqual(max_x, -0.188995 + 94 * run.spacing)
+        self.assertAlmostEqual(min_y, -0.214914)
+        self.assertAlmostEqual(max_y, -0.214914 + 107 * run.spacing)
+        self.assertAlmostEqual(min_z, 0.0)
+        self.assertAlmostEqual(max_z, 0.2)
+
     def test_container_gap_clears_bed_bce_layers(self) -> None:
         run = make_run()
         padding = crm.solid_container_padding(run)
-        self.assertAlmostEqual(padding, max(4.0 * run.spacing, 0.02 * run.drum_radius))
+        self.assertAlmostEqual(padding, 0.5 * run.spacing)
+        self.assertGreater(padding, 0.0)
+        self.assertLess(padding, run.spacing)
 
-        (min_x, min_y, min_z), (max_x, max_y, max_z) = crm.fit_solid_container(run, make_motion())
-        half_x, half_y = crm.bed_half_extents(
-            run.drum_radius, run.drum_half_length, run.spin_axis, run.bed_padding
-        )
-        self.assertAlmostEqual(min_x, -half_x - padding)
-        self.assertAlmostEqual(max_x, half_x + padding)
-        self.assertAlmostEqual(min_y, -half_y - padding)
-        self.assertAlmostEqual(max_y, half_y + padding)
-        self.assertLess(min_z, 0.0)
+        motion = make_motion()
+        (pmin_x, pmin_y, pmin_z), (pmax_x, pmax_y, pmax_z) = crm.bed_particle_bounds(run, motion)
+        (min_x, min_y, min_z), (max_x, max_y, max_z) = crm.fit_solid_container(run, motion)
+        self.assertAlmostEqual(min_x, pmin_x - padding)
+        self.assertAlmostEqual(max_x, pmax_x + padding)
+        self.assertAlmostEqual(min_y, pmin_y - padding)
+        self.assertAlmostEqual(max_y, pmax_y + padding)
+        self.assertAlmostEqual(min_z, pmin_z - padding)
 
     def test_lid_sits_below_active_box_ceiling_and_above_drum(self) -> None:
         run = make_run()
