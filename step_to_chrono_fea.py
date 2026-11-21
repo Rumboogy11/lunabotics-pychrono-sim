@@ -309,7 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--surface-only",
         action="store_true",
         help="export only the watertight, local-frame surface STL and its JSON metadata; "
-             "skip TetGen and all volume-mesh outputs (used for optional fill detectors)",
+             "skip TetGen and all volume-mesh outputs",
     )
 
     p.add_argument(
@@ -1408,7 +1408,7 @@ def main() -> int:
         surface_points = surface_points_m / args.unit_scale
         local_surface = trimesh.Trimesh(surface_points_m, surface_faces, process=False)
         if args.surface_only and not local_surface.is_watertight:
-            raise RuntimeError("fill-detector surface is not watertight after scaling/repair")
+            raise RuntimeError("surface-only export is not watertight after scaling/repair")
         local_surface.export(stl_path)
 
         if args.surface_only:

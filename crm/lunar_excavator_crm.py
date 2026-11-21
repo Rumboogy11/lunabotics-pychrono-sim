@@ -17,18 +17,13 @@ At each output time, SPH particles are transformed into the drum's local frame
 using its full live pose.  The mesh's local Z axis is the long axis of the drum.
 With SPH particle radius ``rp = 0.5 * spacing`` (Chrono ``d0 = spacing``), an
 "excavated" particle is above the initial bed surface by the ``rp`` lift
-tolerance and either:
+tolerance and inside the eroded outer drum envelope (``radial <= drum_radius -
+rp`` and ``abs(local_z) <= drum_half_length - rp``, bounds clamped at zero).
 
-* inside the eroded outer drum envelope (``radial <= drum_radius - rp`` and
-  ``abs(local_z) <= drum_half_length - rp``, bounds clamped at zero), or, when
-  ``--fill-detector-obj`` is supplied, inside the exact watertight negative of
-  the drum interior, eroded by ``rp``.
-
-The optional mesh follows the excavator's exact rotation and translation and is
-never expanded into a revolved envelope, so it cannot protrude outside the
-physical geometry.  Classification is instantaneous: a particle is counted only
-while it is inside the current mesh pose and above the initial bed, and loses
-the flag when it leaves the mesh.  Fill uses exactly this excavated set::
+The cylindrical envelope follows the excavator's exact rotation and translation.
+Classification is instantaneous: a particle is counted only while it is inside
+the current drum pose and above the initial bed, and loses the flag when it
+leaves either condition.  Fill uses exactly this excavated set::
 
     retained_mass = n_excavated * particle_mass
     capacity_mass = bulk_density * pi * inner_radius**2 * drum_length
@@ -82,12 +77,6 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(CRM_DIR))
 
 from crm_soil import DEFAULT_SOIL, CrmSoilParams  # noqa: E402
-from fill_detector import (  # noqa: E402
-    FillDetector,
-    FillSurfaceError,
-    detector_definition,
-    load_fill_detector,
-)
 from crm_soil import _enum as fsi_enum  # noqa: E402
 from lunar_excavator_config import (  # noqa: E402
     BED_PADDING_RADIUS_FRACTION,
@@ -126,7 +115,6 @@ class CrmRunParams:
     drum_half_length: float = MOTION_DEFAULT.drum_half_length
     inner_radius: float = 0.055          # nominal cavity radius [m]
     capacity_volume: float | None = None  # override for CAD free volume [m^3]
-    fill_detector_obj: str | None = None  # watertight local-frame negative of the drum interior
     active_box_x: float = 0.631333  # padded bed + 2 drum diameters (reference drum)
     active_box_y: float = 0.687407
     active_box_z: float = 0.866370  # bed + initial centre height + 2 diameters
@@ -301,10 +289,6 @@ def build_parser(*, include_drum_gravity: bool = True) -> argparse.ArgumentParse
                    help="nominal cavity radius for fill ratio in m (default: 0.055)")
     p.add_argument("--capacity-volume", type=float, default=None,
                    help="override nominal cavity volume in m^3 (for CAD-calibrated designs)")
-    p.add_argument("--fill-detector-obj", type=Path, default=None,
-                   help="watertight OBJ surface in drum-local metres representing the negative "
-                        "interior of the excavator; follows the full drum pose and defines "
-                        "excavated/fill particles by current containment only")
     p.add_argument("--active-box", type=str, default=None,
                    help="active SPH domain full size X,Y,Z in metres (default: padded bed + 2 drum "
                         "diameters laterally; bed + initial height + 2 diameters + padding vertically)")
@@ -565,7 +549,6 @@ def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -
         "drum_half_length": getattr(args, "drum_half_length", None),
         "inner_radius": args.inner_radius,
         "capacity_volume": args.capacity_volume,
-        "fill_detector_obj": getattr(args, "fill_detector_obj", None),
         "max_velocity": args.max_velocity,
         "artificial_viscosity": getattr(args, "artificial_viscosity", None),
         "shifting_ppst_push": getattr(args, "shifting_ppst_push", None),
@@ -574,8 +557,6 @@ def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -
         "proximity_steps": args.proximity_steps,
     }
     overrides.update({k: v for k, v in mapping.items() if v is not None})
-    if overrides.get("fill_detector_obj") is not None:
-        overrides["fill_detector_obj"] = str(overrides["fill_detector_obj"])
     if args.active_box is not None:
         box = parse_box(args.active_box)
         overrides.update(active_box_x=box[0], active_box_y=box[1], active_box_z=box[2])
@@ -1079,21 +1060,16 @@ def compute_metrics(positions: np.ndarray, drum, run: CrmRunParams, motion,
     lift_tol = rp
 
     lifted = pos[:, 2] > surface_z + lift_tol
-    detector = load_fill_detector(run.fill_detector_obj)
-    if detector is not None:
-        # Exact containment in the supplied negative-interior mesh, transformed
-        # by the drum's live pose.  This is instantaneous: leaving the mesh
-        # clears the flag on the next metrics call.
-        excavated = detector.contains_with_margin(local, rp) & lifted
-    else:
-        excavated = (
-            (radial2 <= r_outer2)
-            & (lz <= half_len_eff)
-            & lifted
-        )
+    # Analytic outer drum envelope in the live drum-local frame.  This is
+    # instantaneous: leaving the eroded cylinder clears the flag on the next
+    # metrics call.
+    excavated = (
+        (radial2 <= r_outer2)
+        & (lz <= half_len_eff)
+        & lifted
+    )
 
-    # Fill is exactly the excavated set; only its source changes when a mesh
-    # detector is supplied.
+    # Fill is exactly the excavated set.
     inside = excavated
 
     inside_count = int(np.count_nonzero(inside))
@@ -1147,8 +1123,7 @@ def write_particle_csv(path: Path, positions: np.ndarray, flags: np.ndarray) -> 
 def write_config(path: Path, soil: CrmSoilParams, run: CrmRunParams,
                  mesh: Path, motion, capacity_volume: float,
                  particle_mass: float, particle_mass_source: str,
-                 computational_domain: tuple[tuple[float, float, float], tuple[float, float, float]],
-                 fill_detector: FillDetector | None = None) -> None:
+                 computational_domain: tuple[tuple[float, float, float], tuple[float, float, float]]) -> None:
     container_min, container_max = fit_solid_container(run, motion)
     config = {
         "model": "Chrono::CRM (SPH continuum)",
@@ -1179,8 +1154,6 @@ def write_config(path: Path, soil: CrmSoilParams, run: CrmRunParams,
             "spin_axis_global": motion.drum_spin_axis,
             "capacity_volume_m3": capacity_volume,
             "capacity_source": "user override" if run.capacity_volume else "pi*r_i^2*L",
-            "fill_detector_obj": run.fill_detector_obj,
-            "fill_detector_definition": detector_definition(fill_detector),
         },
         "particle_mass_kg": particle_mass,
         "particle_mass_source": particle_mass_source,
@@ -1217,10 +1190,6 @@ def main() -> int:
     args = build_parser().parse_args()
     soil = make_soil(args)
     run = make_run_params(args)
-    try:
-        fill_detector = load_fill_detector(run.fill_detector_obj)
-    except FillSurfaceError as exc:
-        raise SystemExit(str(exc)) from exc
 
     if args.print_soil:
         print(soil.summary())
@@ -1285,8 +1254,8 @@ def main() -> int:
                 f"max={container_bounds[1]}, padding={solid_container_padding(run):g} m",
                 f"world computational domain: min={comp_domain[0]}, max={comp_domain[1]}",
                 f"capacity={capacity_volume:.6g} m^3 ({capacity_volume * soil.density:.4f} kg)",
-                f"fill detector: {detector_definition(fill_detector)}"
-                + (f" ({run.fill_detector_obj})" if run.fill_detector_obj else ""),
+                f"fill detector: analytic drum envelope eroded by {0.5 * run.spacing:g} m "
+                f"plus the bed lift gate",
             ]
         ),
         flush=True,
@@ -1376,7 +1345,6 @@ def main() -> int:
         write_config(
             out_dir / "config.json", soil, run, mesh, motion,
             capacity_volume, particle_mass, mass_source, comp_domain,
-            fill_detector=fill_detector,
         )
         state_file = (out_dir / "summary.csv").open("w", newline="", encoding="utf-8")
         writer = csv.DictWriter(state_file, fieldnames=metric_fields(run))

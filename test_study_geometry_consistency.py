@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
+import io
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -119,66 +120,26 @@ class StudyGeometryConsistencyTest(unittest.TestCase):
             with self.assertRaises(wiz.StudyConfigError):
                 wiz.build_commands(cfg)
 
-    def test_detector_config_is_forwarded_to_crm_only_and_capacity_is_unchanged(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="detector_cfg_", dir="/tmp/opencode") as tmp:
+    def test_capacity_volume_is_forwarded_without_mesh_detector_options(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="capacity_cfg_", dir="/tmp/opencode") as tmp:
             cfg = consistent_cfg(Path(tmp))
             cfg["auto_geometry"] = False
-            cfg["fill_detector_step"] = Path(tmp) / "cavity.step"
-            cfg["fill_detector_obj"] = Path(tmp) / "mesh" / "cavity_detector_surface.obj"
             cfg["capacity_volume"] = 0.0123
             steps = wiz.build_commands(cfg)
             crm_cmd = next(s["command"] for s in steps if s["name"] == "rigid-CRM")
             fea_cmd = next(s["command"] for s in steps if s["name"] == "one-way-FEA")
 
-            self.assertEqual(
-                crm_cmd[crm_cmd.index("--fill-detector-obj") + 1],
-                str(cfg["fill_detector_obj"]),
-            )
-            self.assertNotIn("--fill-detector-obj", fea_cmd)
             self.assertEqual(crm_cmd[crm_cmd.index("--capacity-volume") + 1], "0.0123")
-
-    def test_detector_step_generates_surface_conversion_steps(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="detector_wizard_", dir="/tmp/opencode") as tmp:
-            detector_step = Path(tmp) / "cavity.step"
-            detector_step.write_text("ISO-10303-21;\nEND-ISO-10303-21;\n", encoding="utf-8")
-            crm_obj = Path(tmp) / "drum.obj"
-            fea_node = Path(tmp) / "drum.node"
-            fea_ele = Path(tmp) / "drum.ele"
-            for path in (crm_obj, fea_node, fea_ele):
-                path.write_text("stub for command generation", encoding="utf-8")
-            args = wiz.build_parser().parse_args([
-                "--geometry", "files",
-                "--output-dir", tmp,
-                "--crm-obj", str(crm_obj),
-                "--fea-node", str(fea_node),
-                "--fea-ele", str(fea_ele),
-                "--fill-detector-step", str(detector_step),
-                "--no-auto-geometry",
-                "--dry-run",
-                "--yes",
-            ])
-            with patch.object(wiz, "INTERACTIVE", False):
-                cfg = wiz.collect_settings(args)
-            self.assertEqual(cfg["fill_detector_step"], detector_step.resolve())
-            self.assertEqual(
-                cfg["fill_detector_obj"],
-                Path(tmp) / "mesh" / "cavity_detector_surface.obj",
-            )
-            steps = cfg["mesh_steps"]
-            names = [step["name"] for step in steps]
-            self.assertIn("generate-fill-detector-surface", names)
-            self.assertIn("make-fill-detector-OBJ", names)
-            surface_cmd = next(s["command"] for s in steps
-                               if s["name"] == "generate-fill-detector-surface")
-            self.assertIn("--surface-only", surface_cmd)
-            commands = wiz.build_commands(cfg)
-            crm_cmd = next(s["command"] for s in commands if s["name"] == "rigid-CRM")
-            fea_cmd = next(s["command"] for s in commands if s["name"] == "one-way-FEA")
-            self.assertEqual(
-                crm_cmd[crm_cmd.index("--fill-detector-obj") + 1],
-                str(cfg["fill_detector_obj"]),
-            )
+            self.assertNotIn("--fill-detector-obj", crm_cmd)
             self.assertNotIn("--fill-detector-obj", fea_cmd)
+            self.assertNotIn("--fill-detector-step", crm_cmd)
+            self.assertNotIn("--fill-detector-step", fea_cmd)
+
+    def test_detector_step_option_is_rejected(self) -> None:
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            wiz.build_parser().parse_args([
+                "--fill-detector-step", "ignored.step",
+            ])
 
 
 if __name__ == "__main__":

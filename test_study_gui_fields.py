@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import io
 import os
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -152,73 +154,20 @@ class SurfaceFitToleranceFieldTest(unittest.TestCase):
             self.assertEqual(mesh_cmd[mesh_cmd.index("--surface-fit-tolerance") + 1], "0.002")
 
 
-class FillDetectorConfigTest(IsolatedGuiDefaultsTest):
-    def test_detector_field_is_editable_and_config_is_forwarded(self) -> None:
-        import tkinter as tk
-        from tkinter import ttk
-
+class MeshFillDetectorRemovedTest(IsolatedGuiDefaultsTest):
+    def test_mesh_detector_options_are_gone(self) -> None:
         import study_gui as gui
+        import study_wizard as wiz
 
-        self.assertEqual(gui.shipped_defaults()["fill_detector_step"], "")
-        self.assertIn(
+        self.assertNotIn("fill_detector_step", gui.shipped_defaults())
+        self.assertNotIn(
             "fill_detector_step",
             [key for _, key, _ in gui.DEFAULT_GROUPS[0][1]],
         )
-
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            app = gui.StudyGUI(root)
-
-            def descendants(widget):
-                for child in widget.winfo_children():
-                    yield child
-                    yield from descendants(child)
-
-            geom_labels = [
-                child.cget("text") for child in descendants(app.pages[1])
-                if isinstance(child, (tk.Label, ttk.Label))
-            ]
-            self.assertTrue(any("Fill-detector" in label for label in geom_labels))
-
-            with tempfile.TemporaryDirectory(prefix="detector_gui_", dir="/tmp/opencode") as tmp:
-                detector_step = Path(tmp) / "cavity.step"
-                detector_step.write_text(
-                    "ISO-10303-21;\nEND-ISO-10303-21;\n", encoding="utf-8")
-                app._apply_config({"fill_detector_step": str(detector_step)})
-                self.assertEqual(app._g("fill_detector_step"), str(detector_step))
-
-                app.vars["geometry"].set("step")
-                app.vars["output_dir"].set(tmp)
-                app.vars["step_file"].set(str(ROOT / "geometry" / "spikey" / "Assembly 1.step"))
-                app.vars["cad_axis"].set("Y")
-                app.vars["capacity_volume"].set("0.25")
-                cfg = app._collect_cfg()
-                self.assertEqual(cfg["fill_detector_step"], detector_step.resolve())
-                self.assertEqual(
-                    cfg["fill_detector_obj"],
-                    Path(tmp) / "mesh" / "cavity_detector_surface.obj",
-                )
-
-                steps = gui.wiz.build_commands(cfg)
-                names = [step["name"] for step in steps]
-                self.assertIn("generate-fill-detector-surface", names)
-                self.assertIn("make-fill-detector-OBJ", names)
-
-                crm_cmd = next(step["command"] for step in steps if step["name"] == "rigid-CRM")
-                fea_cmd = next(step["command"] for step in steps if step["name"] == "one-way-FEA")
-                self.assertEqual(
-                    crm_cmd[crm_cmd.index("--fill-detector-obj") + 1],
-                    str(cfg["fill_detector_obj"]),
-                )
-                self.assertNotIn("--fill-detector-obj", fea_cmd)
-                self.assertEqual(crm_cmd[crm_cmd.index("--capacity-volume") + 1], "0.25")
-
-                with self.assertRaisesRegex(ValueError, "not found"):
-                    app.vars["fill_detector_step"].set(str(Path(tmp) / "missing.step"))
-                    app._collect_cfg()
-        finally:
-            root.destroy()
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            wiz.build_parser().parse_args([
+                "--fill-detector-step", "ignored.step",
+            ])
 
 
 class Full3dFeaToggleTest(IsolatedGuiDefaultsTest):
