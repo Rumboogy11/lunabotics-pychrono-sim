@@ -66,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--crm-dt", type=float, default=None,
                    help="rigid CRM timestep in s (default: spacing-dependent, 4e-5 at 2 mm)")
     p.add_argument("--crm-fps", type=float, default=None,
-                   help="rigid CRM output cadence in Hz (default: 20)")
+                   help="rigid CRM summary cadence in Hz (default: 20)")
 
     p.add_argument("--fea-duration", type=float, default=None,
                    help="FEA duration in s (default: --duration)")

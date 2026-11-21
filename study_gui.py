@@ -119,10 +119,10 @@ PARAM_INFO: dict[str, str] = {
     "artificial_viscosity": "Artificial bilateral SPH viscosity. Raise above 0.5 to damp pressure-wave soil ejection at the first drum bite; lower values preserve more dynamic response.",
     "shifting_ppst_push": "PPST particle-shifting push strength. Lower than 3.0 reduces outward particle drift; 0 disables the push term.",
     "crm_dt": "Explicit CRM timestep, or 'auto' for a spacing-dependent stable value. Unsafe explicit dt is rejected unless explicitly allowed.",
-    "crm_fps": "How often CRM summary frames are written. Particle and soil-wrench files use their own cadences.",
+    "crm_fps": "How often CRM summary rows are written to summary.csv. Particle CSV and soil-wrench files use their own independent cadences.",
     "fea_fps": "Independent FEA summary/export cadence. Lower values speed up replay; FEA dynamics still follow FEA dt.",
     "loads_fps": "Soil-wrench CSV sampling rate for one-way FEA. The FEA driver interpolates by time, so 20 Hz is usually enough; lower values make the CRM solver faster and soil_loads.csv much smaller.",
-    "particle_fps": "Independent particle CSV cadence for ParaView. It does NOT follow CRM output FPS automatically; set this equal to 'CRM output FPS' (20) to write one particle file per CRM frame. Lower values sharply reduce CRM disk I/O; 5 Hz is usually enough for visualization.",
+    "particle_fps": "Independent particle CSV cadence for ParaView. It does NOT follow CRM summary FPS automatically; set this equal to 'CRM summary FPS' (20) to write one particle file per CRM frame. Lower values sharply reduce CRM disk I/O; 5 Hz is usually enough for visualization.",
     "particle_writers": "Background processes that write per-frame particle CSV files while the CRM solver continues. Increase only if disk writes remain a bottleneck.",
     "fea_dt": "Structural integrator timestep for one-way FEA, independent of CRM dt. Default is 0.002 s.",
     "bed_height": "Depth of the soil bed. The drum starts at bed_height + radius above the ground.",
@@ -391,10 +391,10 @@ DEFAULT_GROUPS: list[tuple[str, list[tuple[str, str, dict]]]] = [
         ("Artificial viscosity", "artificial_viscosity", {}),
         ("PPST shifting push", "shifting_ppst_push", {}),
         ("CRM dt (s or 'auto')", "crm_dt", {}),
-        ("CRM output FPS", "crm_fps", {}),
-        ("FEA output FPS", "fea_fps", {}),
+        ("CRM summary FPS", "crm_fps", {}),
+        ("Particle CSV FPS", "particle_fps", {}),
+        ("FEA summary FPS", "fea_fps", {}),
         ("Soil loads FPS", "loads_fps", {}),
-        ("Particle output FPS", "particle_fps", {}),
         ("Particle writer processes", "particle_writers", {}),
         ("FEA dt (s)", "fea_dt", {}),
         ("Bed height (m)", "bed_height", {}),
@@ -730,8 +730,10 @@ class StudyGUI:
         r = self._row(p, r, "Artificial viscosity", "artificial_viscosity")
         r = self._row(p, r, "PPST shifting push", "shifting_ppst_push")
         r = self._row(p, r, "CRM dt (s or 'auto')", "crm_dt")
-        r = self._row(p, r, "CRM output FPS", "crm_fps")
-        r = self._row(p, r, "FEA output FPS", "fea_fps")
+        r = self._row(p, r, "CRM summary FPS", "crm_fps")
+        r = self._row(p, r, "Particle CSV FPS", "particle_fps")
+        r = self._row(p, r, "FEA summary FPS", "fea_fps")
+        r = self._row(p, r, "Soil loads FPS", "loads_fps")
         r = self._row(p, r, "FEA dt (s)", "fea_dt")
         r = self._row(p, r, "Bed height (m)", "bed_height")
         r = self._row(p, r, "Bed padding (fraction of radius)", "bed_padding")

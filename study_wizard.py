@@ -365,13 +365,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="artificial bilateral SPH viscosity (default: 0.5)")
     p.add_argument("--shifting-ppst-push", type=float, default=None,
                     help="PPST shifting push strength (default: 3.0)")
-    p.add_argument("--fps", type=float, default=None, help="CRM output cadence in Hz (default: 20)")
-    p.add_argument("--fea-fps", type=float, default=None, help="FEA output cadence in Hz (default: same as CRM)")
-    p.add_argument("--crm-fps", type=float, default=None, help="alias for --fps (CRM output cadence in Hz)")
+    p.add_argument("--fps", type=float, default=None, help="CRM summary CSV cadence in Hz (default: 20)")
+    p.add_argument("--fea-fps", type=float, default=None, help="FEA summary cadence in Hz (default: same as CRM)")
+    p.add_argument("--crm-fps", type=float, default=None, help="alias for --fps (CRM summary CSV cadence in Hz)")
     p.add_argument("--loads-fps", type=float, default=None,
                    help="soil-wrench CSV cadence in Hz (default: 20; one-way FEA interpolates by time)")
     p.add_argument("--particle-fps", type=float, default=None,
-                   help="particle CSV cadence in Hz (default: 5; capped by --fps)")
+                   help="particle CSV cadence in Hz; independent of summary cadence (default: 5; capped by --fps)")
     p.add_argument("--particle-writers", type=int, default=None,
                    help="background processes for CRM particle CSV writes (default: 4)")
     p.add_argument("--bed-height", type=float, default=None, help="initial soil bed height in m")
@@ -890,8 +890,9 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         crm_fps = args.crm_fps
     elif INTERACTIVE:
         crm_fps = prompt_float(
-            "CRM output cadence (Hz)", crm_fps_default, minimum=1e-3,
-            detail="How often CRM summary frames are written. Particle and soil-wrench files use their own cadences.",
+            "CRM summary cadence (Hz)", crm_fps_default, minimum=1e-3,
+            detail="How often CRM summary rows are written to summary.csv. Particle and soil-wrench files "
+                   "use their own independent cadences.",
         )
     else:
         crm_fps = crm_fps_default
@@ -903,7 +904,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         fea_fps = args.fps
     elif INTERACTIVE:
         fea_fps = prompt_float(
-            "FEA output cadence (Hz)", crm_fps, minimum=1e-3,
+            "FEA summary cadence (Hz)", crm_fps, minimum=1e-3,
             detail="How often FEA summary frames are recorded/exported. Independent of CRM cadence; "
                    "lower values speed up replay (FEA dynamics/load fidelity still follow --fea-dt).",
         )
@@ -929,8 +930,10 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
     elif INTERACTIVE:
         particle_fps = prompt_float(
             "Particle CSV cadence (Hz)", particle_fps_default, minimum=1e-3,
-            detail="How often per-frame particle positions are written for ParaView. This is capped by "
-                   "the CRM output cadence; 5 Hz greatly reduces disk I/O while keeping visualization useful.",
+            detail="How often per-frame particle positions are written for ParaView. This is independent "
+                   "of the CRM summary cadence; set it equal to the CRM summary cadence to write one "
+                   "particle file per summary frame. 5 Hz greatly reduces disk I/O while keeping "
+                   "visualization useful.",
         )
     else:
         particle_fps = particle_fps_default
@@ -1128,7 +1131,8 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             f"CRM mesh:     {crm_obj}",
             f"FEA mesh:     {fea_node} / {fea_ele}",
             f"Duration:     CRM {duration:g} s, FEA {fea_duration:g} s",
-            f"Cadence:      CRM {crm_fps:g} Hz, FEA {fea_fps:g} Hz, loads {loads_fps:g} Hz, particles {particle_fps:g} Hz",
+            f"Cadence:      CRM summary {crm_fps:g} Hz, FEA summary {fea_fps:g} Hz, "
+            f"loads {loads_fps:g} Hz, particles {particle_fps:g} Hz",
             f"Drum:         R={drum_radius:g} m, half-length={drum_half_length:g} m, "
             f"z0≈{bed_height + drum_radius:g} m",
             f"SPH:          spacing={spacing:g} m, dt={dt_text}, "
