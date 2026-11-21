@@ -15,6 +15,11 @@ os.environ.setdefault("PYCHRONO_GUI_NO_REEXEC", "1")
 
 
 class WizardCadenceFieldsTest(unittest.TestCase):
+    def test_preview_particle_sample_default_is_25000(self) -> None:
+        import study_gui as gui
+
+        self.assertEqual(gui.SHIPPED_SETTINGS["preview_particle_limit"], 25000)
+
     def test_particle_fps_is_editable_next_to_crm_summary_fps(self) -> None:
         import tkinter as tk
         from tkinter import ttk

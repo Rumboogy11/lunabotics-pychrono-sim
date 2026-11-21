@@ -7,10 +7,11 @@ It reads the files written by the study directly:
   * ``crm/particles_*.csv`` for a subsampled 3D particle point cloud,
   * ``crm/summary.csv`` and ``fea/summary.csv`` for scalar timelines.
 
-Particles are drawn as 1-2 pixel points on a Tk canvas instead of 3D spheres,
-and each particle frame is reservoir-sampled to a small fixed limit.  The 3D
-view is a plain perspective/orthographic projection with mouse orbit and zoom;
-it needs no NumPy, VTK, PIL, or file conversion.
+Particles are drawn as 1-2 pixel points on a Tk canvas instead of 3D spheres.
+Every row in a displayed frame is read (to report the true simulation particle
+count), then at most the configured number of points is reservoir-sampled for
+drawing.  The 3D view is a plain perspective/orthographic projection with mouse
+orbit and zoom; it needs no NumPy, VTK, PIL, or file conversion.
 """
 
 from __future__ import annotations
@@ -25,17 +26,8 @@ from typing import Callable, Iterable
 import tkinter as tk
 from tkinter import BooleanVar, IntVar, StringVar, filedialog, ttk
 
-PARTICLE_LIMIT = 1200
-
-
-def particle_sample_limit(stride: int) -> int:
-    """Return the display budget for a particle-row stride.
-
-    Stride 1 keeps the full budget; larger strides reduce both the number of
-    CSV rows read and the number of points drawn, so the control has a visible
-    effect instead of only changing which particles are sampled.
-    """
-    return max(1, PARTICLE_LIMIT // max(1, int(stride)))
+PARTICLE_SAMPLE_DEFAULT = 25000
+PARTICLE_SAMPLE_MAX = 250000
 FRAME_DELAY_MS = 250
 
 SUMMARY_FIELDS = ("frame", "time_s", "drum_z_m", "spin_deg")
@@ -135,27 +127,25 @@ def discover_particle_frames(out_dir: Path) -> list[Path]:
     return sorted(paths, key=frame_number_from_path)
 
 
-def load_particle_sample(path: Path, limit: int = PARTICLE_LIMIT,
-                         stride: int = 1) -> tuple[list[tuple[float, float, float, int, int]], int]:
+def load_particle_sample(path: Path,
+                         limit: int = PARTICLE_SAMPLE_DEFAULT
+                         ) -> tuple[list[tuple[float, float, float, int, int]], int]:
     """Reservoir-sample one particle CSV frame with bounded memory.
 
-    ``stride`` skips rows before sampling; 1 considers every row.  Returns
-    ``(sample, total_rows)`` where ``total_rows`` counts rows that survived the
-    stride and had valid coordinates.  Each sample item is
-    ``(x, y, z, inside_drum, excavated)`` in world metres / integer flags.
+    Every valid row is read, so ``total_rows`` is the number of SPH particles
+    in that frame.  At most ``limit`` of them are retained for drawing.  Each
+    sample item is ``(x, y, z, inside_drum, excavated)`` in world metres /
+    integer flags.
     """
     sample: list[tuple[float, float, float, int, int]] = []
     total = 0
-    stride = max(1, int(stride))
     rng = random.Random(20261120)
     try:
         with path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             if reader.fieldnames is None:
                 return [], 0
-            for row_index, raw in enumerate(reader):
-                if row_index % stride:
-                    continue
+            for raw in reader:
                 x = _to_float(raw.get("X"))
                 y = _to_float(raw.get("Y"))
                 z = _to_float(raw.get("Z"))
@@ -259,23 +249,23 @@ class OutputPreview:
         root: tk.Tk,
         initial_dir: str,
         palette: Callable[[], dict[str, str]],
-        particle_stride: int = 1,
+        particle_limit: int = PARTICLE_SAMPLE_DEFAULT,
         frame_stride: int = 1,
-        stride_callback: Callable[[int, int], None] | None = None,
+        limits_callback: Callable[[int, int], None] | None = None,
     ) -> None:
         self.parent = parent
         self.root = root
         self.palette = palette
-        self.stride_callback = stride_callback
+        self.limits_callback = limits_callback
         self.dir_var = StringVar(value=initial_dir)
         self.show_particles = BooleanVar(value=True)
         self.show_crm = BooleanVar(value=True)
         self.show_fea = BooleanVar(value=True)
         self.playing = BooleanVar(value=False)
         self.frame_var = IntVar(value=0)
-        self.particle_stride = max(1, int(particle_stride))
+        self.particle_limit = min(PARTICLE_SAMPLE_MAX, max(1, int(particle_limit)))
         self.frame_stride = max(1, int(frame_stride))
-        self.particle_stride_var = IntVar(value=self.particle_stride)
+        self.particle_limit_var = IntVar(value=self.particle_limit)
         self.frame_stride_var = IntVar(value=self.frame_stride)
         self.view_mode = StringVar(value="3D perspective")
         self.yaw_deg = 35.0
@@ -284,6 +274,7 @@ class OutputPreview:
         self._drag_origin: tuple[int, int] | None = None
 
         self.frames: list[Path] = []
+        self._all_frame_count = 0
         self.frame_numbers: list[int] = []
         self.frame_lookup: dict[int, dict[str, float]] = {}
         self.crm_rows: list[dict[str, float]] = []
@@ -338,20 +329,20 @@ class OutputPreview:
         view_box.bind("<<ComboboxSelected>>", lambda _e: self._draw_particles())
         ttk.Button(options, text="Reset view", width=10,
                    command=self._reset_view).pack(side="left", padx=4)
-        ttk.Label(options, text="Particle stride").pack(side="left", padx=(14, 4))
-        self.particle_stride_box = ttk.Spinbox(
-            options, from_=1, to=100, width=5,
-            textvariable=self.particle_stride_var, command=self._on_stride_change)
-        self.particle_stride_box.pack(side="left", padx=2)
+        ttk.Label(options, text="Particles to sample").pack(side="left", padx=(14, 4))
+        self.particle_limit_box = ttk.Spinbox(
+            options, from_=1, to=PARTICLE_SAMPLE_MAX, width=7,
+            textvariable=self.particle_limit_var, command=self._on_limits_change)
+        self.particle_limit_box.pack(side="left", padx=2)
         ttk.Label(options, text="Frame stride").pack(side="left", padx=(12, 4))
         self.frame_stride_box = ttk.Spinbox(
             options, from_=1, to=50, width=5,
-            textvariable=self.frame_stride_var, command=self._on_stride_change)
+            textvariable=self.frame_stride_var, command=self._on_limits_change)
         self.frame_stride_box.pack(side="left", padx=2)
-        for box in (self.particle_stride_box, self.frame_stride_box):
-            box.bind("<Return>", lambda _e: self._on_stride_change())
-            box.bind("<FocusOut>", lambda _e: self._on_stride_change())
-        ttk.Label(options, text="(1 = all rows/points; drag to orbit, wheel to zoom)",
+        for box in (self.particle_limit_box, self.frame_stride_box):
+            box.bind("<Return>", lambda _e: self._on_limits_change())
+            box.bind("<FocusOut>", lambda _e: self._on_limits_change())
+        ttk.Label(options, text="(drag to orbit, wheel to zoom)",
                   font="TkSmallCaptionFont").pack(side="left", padx=(10, 2))
 
         pane = ttk.Panedwindow(self.parent, orient="horizontal")
@@ -393,14 +384,14 @@ class OutputPreview:
     def set_directory(self, path: str | Path) -> None:
         self.dir_var.set(str(path))
 
-    def set_strides(self, particle_stride: int, frame_stride: int) -> bool:
-        """Apply externally edited strides; return True when they changed."""
-        particle = max(1, int(particle_stride))
+    def set_display_limits(self, particle_limit: int, frame_stride: int) -> bool:
+        """Apply externally edited display limits; return True when changed."""
+        particle = min(PARTICLE_SAMPLE_MAX, max(1, int(particle_limit)))
         frame = max(1, int(frame_stride))
-        changed = (particle, frame) != (self.particle_stride, self.frame_stride)
-        self.particle_stride = particle
+        changed = (particle, frame) != (self.particle_limit, self.frame_stride)
+        self.particle_limit = particle
         self.frame_stride = frame
-        self.particle_stride_var.set(particle)
+        self.particle_limit_var.set(particle)
         self.frame_stride_var.set(frame)
         if changed:
             self.loaded_frame = -1
@@ -410,6 +401,7 @@ class OutputPreview:
         out_dir = Path(self.dir_var.get().strip()).expanduser()
         all_frames = discover_particle_frames(out_dir)
         self.frames = all_frames[::self.frame_stride]
+        self._all_frame_count = len(all_frames)
         self.frame_numbers = [frame_number_from_path(path) for path in self.frames]
         self.crm_rows = load_summary(out_dir / "crm" / "summary.csv")
         self.frame_lookup = {
@@ -425,11 +417,16 @@ class OutputPreview:
         self.frame_var.set(self.current_frame)
         self._update_frame_label()
         self._draw_all()
+        self._update_status()
 
+    def _update_status(self) -> None:
+        """Refresh the status line, including the current frame's sim count."""
+        out_dir = Path(self.dir_var.get().strip()).expanduser()
         details = [
-            f"{len(self.frames)}/{len(all_frames)} particle frames",
+            f"{len(self.frames)}/{self._all_frame_count} particle frames",
             f"frame stride {self.frame_stride}",
-            f"particle stride {self.particle_stride}",
+            f"sample limit {self.particle_limit:,}",
+            f"{self.particle_total:,} sim particles",
             f"{len(self.crm_rows)} CRM rows",
             f"{len(self.fea_rows)} FEA rows",
         ]
@@ -451,23 +448,23 @@ class OutputPreview:
     def _on_layer_toggle(self) -> None:
         self._draw_all()
 
-    def _on_stride_change(self) -> None:
+    def _on_limits_change(self) -> None:
         try:
-            particle = int(self.particle_stride_var.get())
+            particle = int(self.particle_limit_var.get())
         except (tk.TclError, TypeError, ValueError):
-            particle = self.particle_stride
+            particle = self.particle_limit
         try:
             frame = int(self.frame_stride_var.get())
         except (tk.TclError, TypeError, ValueError):
             frame = self.frame_stride
-        particle = max(1, min(100, particle))
+        particle = min(PARTICLE_SAMPLE_MAX, max(1, particle))
         frame = max(1, min(50, frame))
-        changed = self.set_strides(particle, frame)
+        changed = self.set_display_limits(particle, frame)
         if not changed:
             return
-        if self.stride_callback is not None:
+        if self.limits_callback is not None:
             try:
-                self.stride_callback(particle, frame)
+                self.limits_callback(particle, frame)
             except Exception:
                 pass
         else:
@@ -607,9 +604,9 @@ class OutputPreview:
         frame_index = min(self.current_frame, len(self.frames) - 1)
         if frame_index != self.loaded_frame:
             self.particles, self.particle_total = load_particle_sample(
-                self.frames[frame_index], particle_sample_limit(self.particle_stride),
-                self.particle_stride)
+                self.frames[frame_index], self.particle_limit)
             self.loaded_frame = frame_index
+            self._update_status()
 
         radius = _to_float(self.config.get("drum_radius")) or 0.06
         frame_id = (self.frame_numbers[frame_index]
@@ -625,8 +622,9 @@ class OutputPreview:
         mode = self.view_mode.get()
         title = getattr(self, "particle_title", None)
         if title is not None:
-            title.configure(text=("CRM particles (3D points)" if mode.startswith("3D")
-                                  else "CRM particle cross-section (Y-Z, points only)"))
+            base_title = ("CRM particles (3D points)" if mode.startswith("3D")
+                          else "CRM particle cross-section (Y-Z, points only)")
+            title.configure(text=f"{base_title} | {self.particle_total:,} sim particles")
         if mode.startswith("3D"):
             self._draw_particles_3d(canvas, palette, width, height,
                                     summary_row, center_z, mode == "3D perspective")
@@ -718,8 +716,8 @@ class OutputPreview:
 
         canvas.create_text(
             8, 8, anchor="nw",
-            text=f"showing {len(self.particles)} of {self.particle_total} particles | "
-                 f"p-stride {self.particle_stride}, f-stride {self.frame_stride}",
+            text=f"sampled {len(self.particles):,} of {self.particle_total:,} sim particles | "
+                 f"limit {self.particle_limit:,}, f-stride {self.frame_stride}",
             fill=palette["text"], font="TkSmallCaptionFont")
         canvas.create_text(width - 8, height - 8, anchor="se",
                            text="Y horizontal, Z vertical (m)",
@@ -869,10 +867,10 @@ class OutputPreview:
                                outline="")
 
         spin = _to_float(summary_row.get("spin_deg") if summary_row else None) or 0.0
-        caption = (f"showing {len(self.particles)} of {self.particle_total} particles | "
+        caption = (f"sampled {len(self.particles):,} of {self.particle_total:,} sim particles | "
+                   f"limit {self.particle_limit:,} | "
                    f"yaw {self.yaw_deg:.0f}°, pitch {self.pitch_deg:.0f}° | "
-                   f"spin {spin:.0f}° | p-stride {self.particle_stride}, "
-                   f"f-stride {self.frame_stride}")
+                   f"spin {spin:.0f}° | f-stride {self.frame_stride}")
         canvas.create_text(8, 8, anchor="nw", text=caption,
                            fill=palette["text"], font="TkSmallCaptionFont")
         canvas.create_text(width - 8, height - 8, anchor="se",

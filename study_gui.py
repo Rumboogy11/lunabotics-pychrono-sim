@@ -85,7 +85,11 @@ if str(ROOT / "crm") not in sys.path:
     sys.path.insert(0, str(ROOT / "crm"))
 
 import study_wizard as wiz  # noqa: E402
-from study_output_preview import OutputPreview  # noqa: E402
+from study_output_preview import (  # noqa: E402
+    PARTICLE_SAMPLE_DEFAULT,
+    PARTICLE_SAMPLE_MAX,
+    OutputPreview,
+)
 
 
 PARAM_INFO: dict[str, str] = {
@@ -203,7 +207,7 @@ SHIPPED_SETTINGS: dict[str, object] = {
     "text_color": LIGHT_TEXT,
     "dark_mode": False,
     "show_output_preview": True,
-    "preview_particle_stride": 1,
+    "preview_particle_limit": PARTICLE_SAMPLE_DEFAULT,
     "preview_frame_stride": 1,
 }
 
@@ -214,7 +218,7 @@ SETTINGS_INFO: dict[str, str] = {
     "text_color": "Foreground text color as #RRGGBB. Pick... opens the system color dialog.",
     "dark_mode": "Use a dark interface palette. If the text color is still the default, it switches to a light shade automatically.",
     "show_output_preview": "Show the lightweight CRM/FEA Output Preview tab. It reads study CSVs directly and draws a bounded 3D subsample of particles on a Tk canvas.",
-    "preview_particle_stride": "In the Output Preview, read only every Nth particle row and show at most 1200/stride points. 1 reads all rows and shows up to 1200 points; higher values reduce both CSV work and the number of drawn points.",
+    "preview_particle_limit": "In the Output Preview, reservoir-sample at most this many SPH particles from each displayed frame. Every row is read, so the canvas also shows the true simulated particle count. Default 25,000; raise for more detail (slower drawing), lower for a sparser cloud.",
     "preview_frame_stride": "In the Output Preview, show only every Nth discovered particle CSV frame in the slider and Play loop. 1 shows all frames.",
 }
 
@@ -269,9 +273,9 @@ def load_ui_settings() -> dict[str, object]:
         values["text_color"] = str(data["text_color"]).strip()
     values["dark_mode"] = bool(data.get("dark_mode", False))
     values["show_output_preview"] = bool(data.get("show_output_preview", True))
-    values["preview_particle_stride"] = _setting_int(
-        data.get("preview_particle_stride"), "Preview particle stride", 1, 100,
-        int(SHIPPED_SETTINGS["preview_particle_stride"]))
+    values["preview_particle_limit"] = _setting_int(
+        data.get("preview_particle_limit"), "Preview particle count", 1, PARTICLE_SAMPLE_MAX,
+        int(SHIPPED_SETTINGS["preview_particle_limit"]))
     values["preview_frame_stride"] = _setting_int(
         data.get("preview_frame_stride"), "Preview frame stride", 1, 50,
         int(SHIPPED_SETTINGS["preview_frame_stride"]))
@@ -288,9 +292,9 @@ def write_ui_settings(values: dict[str, object]) -> None:
                        else str(SHIPPED_SETTINGS["text_color"])),
         "dark_mode": bool(values.get("dark_mode", False)),
         "show_output_preview": bool(values.get("show_output_preview", True)),
-        "preview_particle_stride": _setting_int(
-            values.get("preview_particle_stride"), "Preview particle stride", 1, 100,
-            int(SHIPPED_SETTINGS["preview_particle_stride"])),
+        "preview_particle_limit": _setting_int(
+            values.get("preview_particle_limit"), "Preview particle count", 1, PARTICLE_SAMPLE_MAX,
+            int(SHIPPED_SETTINGS["preview_particle_limit"])),
         "preview_frame_stride": _setting_int(
             values.get("preview_frame_stride"), "Preview frame stride", 1, 50,
             int(SHIPPED_SETTINGS["preview_frame_stride"])),
@@ -557,9 +561,9 @@ class StudyGUI:
         self.output_preview = OutputPreview(
             self.preview_tab, self.root, self._initial_preview_dir(),
             palette=lambda: self.ui_palette,
-            particle_stride=int(self.settings["preview_particle_stride"]),
+            particle_limit=int(self.settings["preview_particle_limit"]),
             frame_stride=int(self.settings["preview_frame_stride"]),
-            stride_callback=self._on_preview_stride_change,
+            limits_callback=self._on_preview_limits_change,
         )
         self._apply_ui_settings(self.settings)
 
@@ -590,12 +594,12 @@ class StudyGUI:
             return
         preview.refresh()
 
-    def _on_preview_stride_change(self, particle_stride: int, frame_stride: int) -> None:
-        """Persist strides edited directly in the Output Preview tab."""
+    def _on_preview_limits_change(self, particle_limit: int, frame_stride: int) -> None:
+        """Persist display limits edited directly in the Output Preview tab."""
         self.settings = dict(self.settings)
-        self.settings["preview_particle_stride"] = int(particle_stride)
+        self.settings["preview_particle_limit"] = int(particle_limit)
         self.settings["preview_frame_stride"] = int(frame_stride)
-        for key, value in (("preview_particle_stride", particle_stride),
+        for key, value in (("preview_particle_limit", particle_limit),
                            ("preview_frame_stride", frame_stride)):
             var = self.settings_vars.get(key)
             if var is not None:
@@ -603,17 +607,17 @@ class StudyGUI:
         write_ui_settings(self.settings)
         self.output_preview.refresh()
 
-    def _apply_preview_strides(self, values: dict[str, object]) -> None:
+    def _apply_preview_limits(self, values: dict[str, object]) -> None:
         preview = getattr(self, "output_preview", None)
         if preview is None:
             return
-        particle_stride = _setting_int(
-            values.get("preview_particle_stride"), "Preview particle stride", 1, 100,
-            int(SHIPPED_SETTINGS["preview_particle_stride"]))
+        particle_limit = _setting_int(
+            values.get("preview_particle_limit"), "Preview particle count", 1, PARTICLE_SAMPLE_MAX,
+            int(SHIPPED_SETTINGS["preview_particle_limit"]))
         frame_stride = _setting_int(
             values.get("preview_frame_stride"), "Preview frame stride", 1, 50,
             int(SHIPPED_SETTINGS["preview_frame_stride"]))
-        if preview.set_strides(particle_stride, frame_stride):
+        if preview.set_display_limits(particle_limit, frame_stride):
             preview.refresh()
 
     def _open_output_preview(self) -> None:
@@ -1238,7 +1242,7 @@ class StudyGUI:
             "text_color": StringVar(value=str(values["text_color"])),
             "dark_mode": BooleanVar(value=bool(values["dark_mode"])),
             "show_output_preview": BooleanVar(value=bool(values["show_output_preview"])),
-            "preview_particle_stride": StringVar(value=str(values["preview_particle_stride"])),
+            "preview_particle_limit": StringVar(value=str(values["preview_particle_limit"])),
             "preview_frame_stride": StringVar(value=str(values["preview_frame_stride"])),
         }
         r = self._settings_row(p, r, "Text size", "font_size", kind="size")
@@ -1248,7 +1252,7 @@ class StudyGUI:
         r = self._settings_row(p, r, "Dark mode", "dark_mode", kind="check")
         r = self._settings_row(p, r, "Show output preview tab", "show_output_preview",
                                kind="check", command=self._apply_settings_now)
-        r = self._settings_row(p, r, "Preview particle stride (rows)", "preview_particle_stride")
+        r = self._settings_row(p, r, "Preview particles to sample", "preview_particle_limit")
         r = self._settings_row(p, r, "Preview frame stride (files)", "preview_frame_stride")
         ttk.Separator(p).grid(row=r, column=0, columnspan=5, sticky="ew", pady=8); r += 1
         bar = ttk.Frame(p)
@@ -1333,9 +1337,9 @@ class StudyGUI:
             "text_color": color,
             "dark_mode": bool(self.settings_vars["dark_mode"].get()),
             "show_output_preview": bool(self.settings_vars["show_output_preview"].get()),
-            "preview_particle_stride": _setting_int(
-                self.settings_vars["preview_particle_stride"].get(), "Preview particle stride",
-                1, 100, int(self.settings["preview_particle_stride"]), strict=strict),
+            "preview_particle_limit": _setting_int(
+                self.settings_vars["preview_particle_limit"].get(), "Preview particle count",
+                1, PARTICLE_SAMPLE_MAX, int(self.settings["preview_particle_limit"]), strict=strict),
             "preview_frame_stride": _setting_int(
                 self.settings_vars["preview_frame_stride"].get(), "Preview frame stride",
                 1, 50, int(self.settings["preview_frame_stride"]), strict=strict),
@@ -1345,7 +1349,7 @@ class StudyGUI:
         if not self.settings_vars:
             return
         for key in ("font_size", "window_width", "window_height", "text_color",
-                    "preview_particle_stride", "preview_frame_stride"):
+                    "preview_particle_limit", "preview_frame_stride"):
             self.settings_vars[key].set(str(values[key]))
         self.settings_vars["dark_mode"].set(bool(values["dark_mode"]))
         self.settings_vars["show_output_preview"].set(bool(values["show_output_preview"]))
@@ -1466,7 +1470,7 @@ class StudyGUI:
             except tk.TclError:
                 continue
 
-        self._apply_preview_strides(values)
+        self._apply_preview_limits(values)
         self._apply_preview_visibility(bool(values.get("show_output_preview", True)))
 
     def _style_combobox_popdown(self, widget, bg: str, field: str,

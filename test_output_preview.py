@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import inspect
 import math
 import tempfile
 import unittest
@@ -11,11 +12,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from study_output_preview import (
-    PARTICLE_LIMIT,
+    PARTICLE_SAMPLE_DEFAULT,
     OutputPreview,
     _project_point,
     load_particle_sample,
-    particle_sample_limit,
 )
 
 
@@ -58,14 +58,14 @@ class OutputPreviewCameraTest(unittest.TestCase):
         self.assertAlmostEqual(preview.pitch_deg, 20.0)
 
 
-class ParticleStrideTest(unittest.TestCase):
-    def test_sample_limit_shrinks_with_stride(self) -> None:
-        self.assertEqual(particle_sample_limit(1), PARTICLE_LIMIT)
-        self.assertEqual(particle_sample_limit(4), PARTICLE_LIMIT // 4)
-        self.assertEqual(particle_sample_limit(0), PARTICLE_LIMIT)
+class ParticleSampleTest(unittest.TestCase):
+    def test_default_particle_sample_count_is_25000(self) -> None:
+        default = inspect.signature(OutputPreview.__init__).parameters["particle_limit"].default
+        self.assertEqual(default, PARTICLE_SAMPLE_DEFAULT)
+        self.assertEqual(PARTICLE_SAMPLE_DEFAULT, 25000)
 
-    def test_stride_reduces_drawn_particle_count(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="preview_stride_", dir="/tmp/opencode") as tmp:
+    def test_sample_count_controls_drawn_particles_and_reports_total(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="preview_sample_", dir="/tmp/opencode") as tmp:
             path = Path(tmp) / "particles_000000.csv"
             with path.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
@@ -73,14 +73,33 @@ class ParticleStrideTest(unittest.TestCase):
                 for i in range(5000):
                     writer.writerow([i * 0.001, 0.0, 0.0, 0, 0])
 
-            full, full_total = load_particle_sample(path, particle_sample_limit(1), 1)
-            strided, strided_total = load_particle_sample(path, particle_sample_limit(4), 4)
+            small, total = load_particle_sample(path, 100)
+            large, _ = load_particle_sample(path, 2000)
 
-            self.assertEqual(full_total, 5000)
-            self.assertEqual(len(full), PARTICLE_LIMIT)
-            self.assertEqual(strided_total, 1250)
-            self.assertEqual(len(strided), PARTICLE_LIMIT // 4)
-            self.assertLess(len(strided), len(full))
+            self.assertEqual(total, 5000)
+            self.assertEqual(len(small), 100)
+            self.assertEqual(len(large), 2000)
+            self.assertLess(len(small), len(large))
+
+    def test_status_reports_true_simulation_particle_count(self) -> None:
+        fake = SimpleNamespace(
+            dir_var=SimpleNamespace(get=lambda: "/tmp/study"),
+            frames=[object(), object()],
+            _all_frame_count=2,
+            frame_stride=1,
+            particle_limit=25000,
+            particle_total=242172,
+            crm_rows=[object()],
+            fea_rows=[object()],
+            status="",
+        )
+        fake.status_var = SimpleNamespace(
+            set=lambda text: setattr(fake, "status", text))
+
+        OutputPreview._update_status(fake)
+
+        self.assertIn("242,172 sim particles", fake.status)
+        self.assertIn("sample limit 25,000", fake.status)
 
 
 if __name__ == "__main__":
