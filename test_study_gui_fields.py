@@ -152,6 +152,80 @@ class SurfaceFitToleranceFieldTest(unittest.TestCase):
             self.assertEqual(mesh_cmd[mesh_cmd.index("--surface-fit-tolerance") + 1], "0.002")
 
 
+class FillDetectorStepFieldTest(IsolatedGuiDefaultsTest):
+    def test_optional_detector_defaults_blank_and_flows_to_rigid_crm_only(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        import study_gui as gui
+
+        self.assertEqual(gui.shipped_defaults()["fill_detector_step"], "")
+        self.assertIn(
+            ("Fill-detector STEP (optional)", "fill_detector_step",
+             {"width": 60, "browse": "file"}),
+            gui.DEFAULT_GROUPS[0][1],
+        )
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+
+            def descendants(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descendants(child)
+
+            geom_labels = [
+                child.cget("text") for child in descendants(app.pages[1])
+                if isinstance(child, (tk.Label, ttk.Label))
+            ]
+            self.assertIn("Fill-detector STEP (optional)", geom_labels)
+
+            with tempfile.TemporaryDirectory(prefix="fill_detector_gui_", dir="/tmp/opencode") as tmp:
+                detector_step = Path(tmp) / "cavity.step"
+                detector_step.write_text("ISO-10303-21;\nEND-ISO-10303-21;\n", encoding="utf-8")
+                app._apply_config({"fill_detector_step": str(detector_step)})
+                self.assertEqual(app._g("fill_detector_step"), str(detector_step))
+
+                app.vars["geometry"].set("step")
+                app.vars["output_dir"].set(tmp)
+                app.vars["step_file"].set(str(ROOT / "geometry" / "spikey" / "Assembly 1.step"))
+                app.vars["cad_axis"].set("Y")
+                app.vars["capacity_volume"].set("0.25")
+                cfg = app._collect_cfg()
+                self.assertEqual(cfg["fill_detector_step"], detector_step.resolve())
+                self.assertEqual(
+                    cfg["fill_detector_obj"],
+                    Path(tmp) / "mesh" / "cavity_detector_surface.obj",
+                )
+
+                steps = gui.wiz.build_commands(cfg)
+                names = [step["name"] for step in steps]
+                self.assertIn("generate-fill-detector-surface", names)
+                self.assertIn("make-fill-detector-OBJ", names)
+                surface_cmd = next(
+                    step["command"] for step in steps
+                    if step["name"] == "generate-fill-detector-surface"
+                )
+                self.assertIn("--surface-only", surface_cmd)
+                self.assertTrue(any("cavity_detector" in part for part in surface_cmd))
+                obj_cmd = next(
+                    step["command"] for step in steps
+                    if step["name"] == "make-fill-detector-OBJ"
+                )
+                self.assertTrue(any("cavity_detector_surface.stl" in part for part in obj_cmd))
+
+                crm_cmd = next(step["command"] for step in steps if step["name"] == "rigid-CRM")
+                fea_cmd = next(step["command"] for step in steps if step["name"] == "one-way-FEA")
+                self.assertEqual(crm_cmd[crm_cmd.index("--fill-detector-obj") + 1],
+                                 str(cfg["fill_detector_obj"]))
+                self.assertEqual(crm_cmd[crm_cmd.index("--capacity-volume") + 1], "0.25")
+                self.assertNotIn("--fill-detector-obj", fea_cmd)
+        finally:
+            root.destroy()
+
+
 class Full3dFeaToggleTest(IsolatedGuiDefaultsTest):
     def test_full_3d_fea_export_is_off_by_default(self) -> None:
         import study_gui as gui

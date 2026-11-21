@@ -111,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.description = __doc__
     # The rigid driver's OBJ switches do not apply to this solid-FEA model.
     for action in list(p._actions):
-        if any(flag in {"--mesh", "--mesh-file"} for flag in action.option_strings):
+        if any(flag in {"--mesh", "--mesh-file", "--fill-detector-obj"} for flag in action.option_strings):
             p._remove_action(action)
         elif "--dt" in action.option_strings:
             action.help = "CRM/FSI step size in seconds (default: 2.5e-4 for FEA)"

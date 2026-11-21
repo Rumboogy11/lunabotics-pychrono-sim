@@ -469,7 +469,7 @@ def _fit_orbit_radius(bounds, center, axis, u, v):
     radial, axial = _orbit_extents(bounds, center, axis, u, v)
     if radial is None:
         return 0.6
-    return max(4.4 * radial, 2.4 * axial, 0.25)
+    return max(5.0 * radial, 2.4 * axial, 0.25)
 
 
 def _lowered_orbit_center(bounds, center, axis, u, v):

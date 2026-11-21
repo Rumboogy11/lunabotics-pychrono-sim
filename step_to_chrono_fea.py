@@ -305,6 +305,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print per-stage timings to help find meshing bottlenecks",
     )
+    p.add_argument(
+        "--surface-only",
+        action="store_true",
+        help="export only the watertight, local-frame surface STL and its JSON metadata; "
+             "skip TetGen and all volume-mesh outputs (used for optional fill detectors)",
+    )
 
     p.add_argument(
         "--max-volume-error",
@@ -1400,7 +1406,68 @@ def main() -> int:
             surface_points_m = np.asarray(repaired.points, dtype=float)
             surface_faces = repaired.faces.reshape(-1, 4)[:, 1:].astype(np.int32)
         surface_points = surface_points_m / args.unit_scale
-        trimesh.Trimesh(surface_points_m, surface_faces, process=False).export(stl_path)
+        local_surface = trimesh.Trimesh(surface_points_m, surface_faces, process=False)
+        if args.surface_only and not local_surface.is_watertight:
+            raise RuntimeError("fill-detector surface is not watertight after scaling/repair")
+        local_surface.export(stl_path)
+
+        if args.surface_only:
+            surface_metadata = {
+                "source_step": str(step_path),
+                "pipeline": surface_pipeline.replace(" -> TetGen", " -> local-frame surface export"),
+                "surface_only": True,
+                "meshfix_used": meshfix_used,
+                "raw_surface_watertight": raw_watertight,
+                "outputs": {"surface_stl": str(stl_path)},
+                "units": "metres",
+                "unit_scale": args.unit_scale,
+                "cad_solids": n_solids,
+                "cad_solids_kept": kept_solids,
+                "cad_solids_dropped": n_solids - kept_solids,
+                "min_solid_volume_m3": args.min_solid_volume,
+                "cad_faces": n_faces,
+                "surface_deflection_m": surface_deflection,
+                "angular_deflection_rad": args.angular_deflection,
+                "max_surface_edge_m": args.mesh_size,
+                "surface_target_faces_requested": args.surface_target_faces,
+                "surface_target_faces_used": surface_target_used,
+                "surface_fit_tolerance_m": args.surface_fit_tolerance,
+                "surface_fit_status": (
+                    "disabled" if not surface_fit_meta["enabled"]
+                    else "pass" if surface_fit_meta["passed"] else "fail"
+                ),
+                "surface_fit": surface_fit_meta,
+                "surface_faces_before_decimation": int(faces_before_decimation),
+                "surface_points": int(len(surface_points_m)),
+                "surface_faces": int(len(surface_faces)),
+                "source_drum_axis": AXES_TO_NAME[args.axis],
+                "export_drum_axis": "Z",
+                "bbox_min_m": np.asarray(surface_points_m).min(axis=0).tolist(),
+                "bbox_max_m": np.asarray(surface_points_m).max(axis=0).tolist(),
+                "cad_volume_m3": cad_volume,
+            }
+            if args.part_aware_simplify:
+                surface_metadata.update(
+                    {
+                        "part_aware": part_aware_meta,
+                        "part_aware_solid_analysis_deflection_m": solid_analysis_deflection,
+                    }
+                )
+            surface_meta_path = prefix.with_suffix(".json")
+            with surface_meta_path.open("w", encoding="utf-8") as f:
+                json.dump(surface_metadata, f, indent=2)
+                f.write("\n")
+            if surface_fit_meta["enabled"]:
+                print(
+                    f"  exterior fit error={surface_fit_meta['error_m']:.6g} m "
+                    f"(tolerance {args.surface_fit_tolerance:.6g} m)"
+                )
+                if not surface_fit_meta["passed"]:
+                    raise SystemExit("surface fit tolerance was not met")
+            print(f"Wrote {stl_path}")
+            print(f"  surface points={len(surface_points_m)} faces={len(surface_faces)}")
+            mark("surface-only export")
+            return 0
 
         tet = tetgen.TetGen(surface_points, surface_faces)
         try:

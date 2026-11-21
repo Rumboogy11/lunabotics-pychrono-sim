@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -117,6 +118,64 @@ class StudyGeometryConsistencyTest(unittest.TestCase):
             cfg["drum_radius"] = 0.3
             with self.assertRaises(wiz.StudyConfigError):
                 wiz.build_commands(cfg)
+
+    def test_detector_is_rigid_crm_only_and_capacity_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="detector_cfg_", dir="/tmp/opencode") as tmp:
+            cfg = consistent_cfg(Path(tmp))
+            cfg["auto_geometry"] = False
+            cfg["fill_detector_step"] = Path(tmp) / "cavity.step"
+            cfg["fill_detector_obj"] = Path(tmp) / "mesh" / "cavity_detector_surface.obj"
+            cfg["capacity_volume"] = 0.0123
+            steps = wiz.build_commands(cfg)
+            crm_cmd = next(s["command"] for s in steps if s["name"] == "rigid-CRM")
+            fea_cmd = next(s["command"] for s in steps if s["name"] == "one-way-FEA")
+
+            self.assertEqual(crm_cmd[crm_cmd.index("--fill-detector-obj") + 1],
+                             str(cfg["fill_detector_obj"]))
+            self.assertNotIn("--fill-detector-obj", fea_cmd)
+            self.assertEqual(crm_cmd[crm_cmd.index("--capacity-volume") + 1], "0.0123")
+
+    def test_wizard_cli_uses_a_separate_surface_only_conversion(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="detector_wizard_", dir="/tmp/opencode") as tmp:
+            detector_step = Path(tmp) / "cavity.step"
+            detector_step.write_text("ISO-10303-21;\nEND-ISO-10303-21;\n", encoding="utf-8")
+            crm_obj = Path(tmp) / "drum.obj"
+            fea_node = Path(tmp) / "drum.node"
+            fea_ele = Path(tmp) / "drum.ele"
+            for path in (crm_obj, fea_node, fea_ele):
+                path.write_text("stub for command generation", encoding="utf-8")
+            args = wiz.build_parser().parse_args([
+                "--geometry", "files",
+                "--output-dir", tmp,
+                "--crm-obj", str(crm_obj),
+                "--fea-node", str(fea_node),
+                "--fea-ele", str(fea_ele),
+                "--fill-detector-step", str(detector_step),
+                "--no-auto-geometry",
+                "--dry-run",
+                "--yes",
+            ])
+            with patch.object(wiz, "INTERACTIVE", False):
+                cfg = wiz.collect_settings(args)
+            self.assertEqual(cfg["fill_detector_step"], detector_step.resolve())
+            self.assertEqual(
+                cfg["fill_detector_obj"],
+                Path(tmp) / "mesh" / "cavity_detector_surface.obj",
+            )
+            names = [step["name"] for step in cfg["mesh_steps"]]
+            self.assertIn("generate-fill-detector-surface", names)
+            self.assertIn("make-fill-detector-OBJ", names)
+            surface_cmd = next(
+                step["command"] for step in cfg["mesh_steps"]
+                if step["name"] == "generate-fill-detector-surface"
+            )
+            self.assertIn("--surface-only", surface_cmd)
+            self.assertTrue(any("cavity_detector" in part for part in surface_cmd))
+            obj_cmd = next(
+                step["command"] for step in cfg["mesh_steps"]
+                if step["name"] == "make-fill-detector-OBJ"
+            )
+            self.assertTrue(any("cavity_detector_surface.stl" in part for part in obj_cmd))
 
 
 if __name__ == "__main__":

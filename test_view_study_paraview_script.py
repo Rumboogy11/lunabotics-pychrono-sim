@@ -55,13 +55,13 @@ class ParaViewParticleDisplayTest(unittest.TestCase):
 
 
 class ParaViewCameraOrbitTest(unittest.TestCase):
-    def test_auto_fit_radius_uses_doubled_clearance(self) -> None:
+    def test_auto_fit_radius_uses_five_times_radial_clearance(self) -> None:
         axis, u, v = viewer._orbit_basis()
         bounds = (-1.0, 1.0, -2.0, 2.0, -3.0, 3.0)
 
         radius = viewer._fit_orbit_radius(bounds, (0.0, 0.0, 0.0), axis, u, v)
 
-        self.assertAlmostEqual(radius, 8.8)
+        self.assertAlmostEqual(radius, 10.0)
 
     def test_orbit_center_is_lowered_by_one_third_excavator_radius(self) -> None:
         axis, u, v = viewer._orbit_basis()
