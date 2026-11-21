@@ -184,23 +184,31 @@ def _project_point(
     pitch: float,
     focal: float | None,
 ) -> tuple[float, float, float, float]:
-    """Project a world point with a cheap yaw/pitch camera.
+    """Project a world point with a standard yaw/pitch orbit camera.
 
-    ``yaw`` and ``pitch`` are radians.  Positive depth is farther from the
-    viewer.  Returns ``(screen_x, screen_y, depth, perspective_factor)`` before
-    any canvas scaling is applied.
+    ``yaw`` is the camera azimuth around world Z and ``pitch`` is its elevation;
+    both are radians.  Positive screen Y is up (the canvas flips it when
+    drawing), and positive depth is farther from the viewer.
+
+    The camera basis is derived from the viewing direction so that world Z stays
+    up: horizontal drag rotates the azimuth and vertical drag changes the
+    elevation without mirroring the drum or the particles.
     """
     dx = point[0] - center[0]
     dy = point[1] - center[1]
     dz = point[2] - center[2]
     cy, sy = math.cos(yaw), math.sin(yaw)
-    x1 = dx * cy - dy * sy
-    y1 = dx * sy + dy * cy
     cp, sp = math.cos(pitch), math.sin(pitch)
-    y2 = y1 * cp - dz * sp
-    z2 = y1 * sp + dz * cp
-    factor = 1.0 if focal is None else focal / max(0.2 * focal, focal + y2)
-    return x1 * factor, -z2 * factor, y2, factor
+
+    # Component of the point toward the camera in the horizontal plane.
+    toward = dx * cy + dy * sy
+    # Right/up vectors of a camera placed at (cos(yaw), sin(yaw), pitch).
+    screen_x = -dx * sy + dy * cy
+    screen_y = dz * cp - toward * sp
+    # Depth is positive away from the camera, so nearer points have smaller values.
+    depth = -(toward * cp + dz * sp)
+    factor = 1.0 if focal is None else focal / max(0.2 * focal, focal + depth)
+    return screen_x * factor, screen_y * factor, depth, factor
 
 
 def _shade(color: str, background: str, amount: float) -> str:
@@ -470,7 +478,9 @@ class OutputPreview:
         dx = event.x - self._drag_origin[0]
         dy = event.y - self._drag_origin[1]
         self._drag_origin = (event.x, event.y)
-        self.yaw_deg = (self.yaw_deg + dx * 0.5) % 360.0
+        # Move the scene with the pointer: dragging right shifts the front of
+        # the drum right, and dragging down lowers it.
+        self.yaw_deg = (self.yaw_deg - dx * 0.5) % 360.0
         self.pitch_deg = max(-80.0, min(80.0, self.pitch_deg + dy * 0.5))
         self._draw_particles()
 
@@ -760,12 +770,14 @@ class OutputPreview:
         min_x, max_x = min(p[0] for p in all_points), max(p[0] for p in all_points)
         min_y, max_y = min(p[1] for p in all_points), max(p[1] for p in all_points)
         min_z, max_z = min(p[2] for p in all_points), max(p[2] for p in all_points)
-        span = max(max_x - min_x, max_y - min_y, max_z - min_z, 4.0 * radius)
+        extent_x, extent_y = max_x - min_x, max_y - min_y
+        extent_z = max_z - min_z
+        span = max(extent_x, extent_y, extent_z, 4.0 * radius)
         view_center = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0,
                        (min_z + max_z) / 2.0)
         yaw = math.radians(self.yaw_deg)
         pitch = math.radians(self.pitch_deg)
-        focal = 3.0 * span if perspective else None
+        focal = 4.0 * span if perspective else None
 
         def project(point: tuple[float, float, float]):
             return _project_point(point, view_center, yaw, pitch, focal)
@@ -781,16 +793,17 @@ class OutputPreview:
                                     view_center[2] - d[2] * span * 0.35))
                            for d in ((1, 0, 0), (0, 1, 0), (0, 0, 1))]
 
-        values = [p[0] for p in projected + projected_wire + projected_axes]
-        values_y = [p[1] for p in projected + projected_wire + projected_axes]
-        sx_min, sx_max = min(values), max(values)
-        sy_min, sy_max = min(values_y), max(values_y)
-        sx_span, sy_span = max(1e-12, sx_max - sx_min), max(1e-12, sy_max - sy_min)
+        # Keep one scale for every orbit angle.  Fitting the projected bounds
+        # on each redraw re-centred and re-zoomed the scene as it rotated,
+        # which made the motion look wrong.  A bounding-sphere radius is
+        # orientation-independent; the margin covers perspective magnification.
+        view_radius = 0.5 * math.sqrt(extent_x**2 + extent_y**2 + extent_z**2)
+        fit_radius = max(1e-12, view_radius * 1.3)
         pad_x, pad_y = 30, 24
         plot_w, plot_h = max(1, width - 2 * pad_x), max(1, height - 2 * pad_y)
-        scale = min(plot_w / sx_span, plot_h / sy_span) * self.zoom
-        origin_x = width / 2.0 - (sx_min + sx_max) / 2.0 * scale
-        origin_y = height / 2.0 + (sy_min + sy_max) / 2.0 * scale
+        scale = min(plot_w, plot_h) / (2.0 * fit_radius) * self.zoom
+        origin_x = width / 2.0
+        origin_y = height / 2.0
 
         def screen(point) -> tuple[float, float]:
             return origin_x + point[0] * scale, origin_y - point[1] * scale
