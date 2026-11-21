@@ -12,11 +12,25 @@ A two-way coupled FEA driver (`crm/lunar_excavator_crm_fea.py`) and a combined r
 
 > **Fill measure:** `inside_drum`, `fill_ratio_count`, and `fill_ratio_mass` use the same instantaneous `excavated` set: SPH particles lifted above the initial bed and fully inside the analytical detector cylinder eroded by one particle radius. By default the cylinder is sized from the measured drum radius and full length; it may instead be sized manually. The cylinder follows the excavator's full live pose, and a particle loses its flag as soon as it leaves the current cylinder or drops back to the bed. Capacity, the nominal `inner_radius` denominator, SPH/BCE counts, and particle CSV columns are unchanged.
 
-## Requirements
+## Installation
 
-- Local **Chrono 10** source build with **FSI-SPH** and **vehicle/CRM** modules, Python bindings, and CUDA (see `environment/INSTALL.md`).
-- NVIDIA GPU with a CUDA 12.9-capable setup as used by the local build.
-- Standard PyPI `pychrono` wheels do not include `pychrono.fsi`/`pychrono.vehicle` and cannot run the CRM drivers.
+Run the installer on Arch/CachyOS or Debian/Ubuntu:
+
+```bash
+git clone https://github.com/Rumboogy11/lunabotics-pychrono-sim.git
+cd lunabotics-pychrono-sim
+./install.sh
+```
+
+It clones the custom Chrono fork, builds it with FSI-SPH/vehicle/CRM modules and
+CUDA 12.9, and creates the project-local `chrono-env`. See
+`environment/INSTALL.md` for options (including `--no-system-packages`,
+`--cuda-arch`, ParaView, and no-root setups). On NTFS/FUSE checkouts the
+installer keeps the environment on a native filesystem and creates symlinks.
+
+Standard PyPI `pychrono` wheels do not include `pychrono.fsi`/`pychrono.vehicle`
+and cannot run the CRM drivers. An NVIDIA GPU with a compatible driver is
+required for simulation; the CUDA toolkit itself is installed into `chrono-env`.
 
 ## Quick start
 
@@ -155,7 +169,8 @@ Launch the consolidated GUI with `./run_study_gui.sh`. Its **Settings** tab adju
 │   └── FEA_COUPLING.md
 ├── fea/                            # promoted solid meshes and related artifacts
 ├── geometry/                       # CAD/mesh inputs used by studies
-├── environment/                    # build/activation scripts and dependency notes
+├── install.sh                      # one-shot installer (Arch/CachyOS, Debian/Ubuntu)
+├── environment/                    # conda env spec, Chrono patch, build/activation scripts
 ├── step_to_chrono_fea.py           # STEP -> TetGen FEA mesh + CRM surface
 ├── study_wizard.py / run_study.sh  # interactive one-way study workflow
 ├── study_gui.py / run_study_gui.sh # consolidated Tkinter GUI

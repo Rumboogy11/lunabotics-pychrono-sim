@@ -1,0 +1,331 @@
+diff --git a/src/chrono_fsi/sph/ChFsiFluidSystemSPH.cpp b/src/chrono_fsi/sph/ChFsiFluidSystemSPH.cpp
+index a0301b8674..6f84e294b4 100644
+--- a/src/chrono_fsi/sph/ChFsiFluidSystemSPH.cpp
++++ b/src/chrono_fsi/sph/ChFsiFluidSystemSPH.cpp
+@@ -20,6 +20,7 @@
+ 
+ #include <cmath>
+ #include <algorithm>
++#include <limits>
+ #include <sstream>
+ #include <string>
+ 
+@@ -2992,6 +2993,45 @@ std::vector<ChVector3d> ChFsiFluidSystemSPH::CreatePointsCylinderAnnulus(double
+     return points;
+ }
+ 
++namespace {
++
++// Conservative bounds used to skip ray tests against triangle groups that cannot be hit.
++struct MeshRayBounds {
++    ChVector3d min;
++    ChVector3d max;
++};
++
++struct MeshRayNode {
++    MeshRayBounds bounds;
++    int first = 0;
++    int count = 0;
++    int left = -1;
++    int right = -1;
++};
++
++// Slab test with the padded triangle bounds.  The two ray directions used below have no zero components; starting at
++// tmin = 0 keeps all triangles in front of (or straddling) the ray origin as candidates.
++inline bool RayHitsMeshBounds(const MeshRayBounds& bounds,
++                              const ChVector3d& origin,
++                              const ChVector3d& inv_dir,
++                              const ChVector3d& pad) {
++    double tmin = 0;
++    double tmax = std::numeric_limits<double>::infinity();
++    for (int axis = 0; axis < 3; ++axis) {
++        double t0 = (bounds.min[axis] - pad[axis] - origin[axis]) * inv_dir[axis];
++        double t1 = (bounds.max[axis] + pad[axis] - origin[axis]) * inv_dir[axis];
++        if (t0 > t1)
++            std::swap(t0, t1);
++        tmin = std::max(tmin, t0);
++        tmax = std::min(tmax, t1);
++        if (tmin > tmax)
++            return false;
++    }
++    return tmax >= 0;
++}
++
++}  // namespace
++
+ std::vector<ChVector3d> ChFsiFluidSystemSPH::CreatePointsMesh(ChTriangleMeshConnected& mesh) const {
+     std::vector<ChVector3d> points;
+ 
+@@ -2999,96 +3039,201 @@ std::vector<ChVector3d> ChFsiFluidSystemSPH::CreatePointsMesh(ChTriangleMeshConn
+ 
+     // Ensure mesh if watertight
+     mesh.RepairDuplicateVertices(1e-9);
++    if (mesh.m_vertices.empty() || mesh.m_face_v_indices.empty())
++        return points;
+     auto bbox = mesh.GetBoundingBox();
+ 
+     const double EPSI = 1e-6;
+ 
+-    // Count grid points using the same bounds as the original nested loops, then
+-    // flatten them to a single index.  Each index is independent, which lets
++    // Build the same incrementally accumulated coordinate sequences as the original nested loops, then flatten them
++    // to a single index.  Recomputing bbox.min + i * spacing would change the low-order bits of each coordinate; keeping
++    // the accumulated values makes the generated BCE points bit-identical.  Each index is independent, which lets
+     // OpenMP execute the ray tests in parallel without changing the result.
+-    int Nx = 0;
++    std::vector<double> grid_x;
++    std::vector<double> grid_y;
++    std::vector<double> grid_z;
+     for (double x = bbox.min.x(); x < bbox.max.x(); x += spacing)
+-        ++Nx;
+-    int Ny = 0;
++        grid_x.push_back(x);
+     for (double y = bbox.min.y(); y < bbox.max.y(); y += spacing)
+-        ++Ny;
+-    int Nz = 0;
++        grid_y.push_back(y);
+     for (double z = bbox.min.z(); z < bbox.max.z(); z += spacing)
+-        ++Nz;
++        grid_z.push_back(z);
++
++    const int Nx = static_cast<int>(grid_x.size());
++    const int Ny = static_cast<int>(grid_y.size());
++    const int Nz = static_cast<int>(grid_z.size());
++    if (Nx == 0 || Ny == 0 || Nz == 0)
++        return points;
+ 
+     const int num_points = Nx * Ny * Nz;
+     std::vector<unsigned char> inside(static_cast<size_t>(num_points), 0);
+ 
++    // Build a median-split BVH over conservative triangle AABBs.  It is used only to skip ray/triangle tests that
++    // cannot intersect; the barycentric test and parity count below are unchanged.
++    const ChVector3d ray_dirs[2] = {ChVector3d(5, 0.5, 0.25), ChVector3d(-3, 0.7, 10)};
++    ChVector3d inv_dirs[2];
++    ChVector3d box_pad;
++    for (int axis = 0; axis < 3; ++axis) {
++        double max_dir = std::max(std::abs(ray_dirs[0][axis]), std::abs(ray_dirs[1][axis]));
++        box_pad[axis] = EPSI * max_dir +
++                        64 * std::numeric_limits<double>::epsilon() *
++                            std::max({1.0, std::abs(bbox.min[axis]), std::abs(bbox.max[axis])});
++        inv_dirs[0][axis] = 1.0 / ray_dirs[0][axis];
++        inv_dirs[1][axis] = 1.0 / ray_dirs[1][axis];
++    }
++
++    const int num_faces = static_cast<int>(mesh.m_face_v_indices.size());
++    std::vector<MeshRayBounds> tri_bounds(num_faces);
++    std::vector<ChVector3d> tri_centroids(num_faces);
++    for (int i = 0; i < num_faces; ++i) {
++        const auto& t_face = mesh.m_face_v_indices[i];
++        const auto& v1 = mesh.m_vertices[t_face.x()];
++        const auto& v2 = mesh.m_vertices[t_face.y()];
++        const auto& v3 = mesh.m_vertices[t_face.z()];
++        for (int axis = 0; axis < 3; ++axis) {
++            tri_bounds[i].min[axis] = std::min({v1[axis], v2[axis], v3[axis]});
++            tri_bounds[i].max[axis] = std::max({v1[axis], v2[axis], v3[axis]});
++        }
++        tri_centroids[i] = (v1 + v2 + v3) / 3.0;
++    }
++
++    std::vector<int> tri_order(num_faces);
++    for (int i = 0; i < num_faces; ++i)
++        tri_order[i] = i;
++
++    std::vector<MeshRayNode> nodes;
++    nodes.reserve(2 * num_faces + 1);
++    constexpr int leaf_size = 16;
++    auto build_node = [&](auto&& self, int first, int count) -> int {
++        const int node_index = static_cast<int>(nodes.size());
++        nodes.emplace_back();
++
++        MeshRayBounds node_bounds = tri_bounds[tri_order[first]];
++        for (int n = first + 1; n < first + count; ++n) {
++            const auto& tri = tri_bounds[tri_order[n]];
++            for (int axis = 0; axis < 3; ++axis) {
++                node_bounds.min[axis] = std::min(node_bounds.min[axis], tri.min[axis]);
++                node_bounds.max[axis] = std::max(node_bounds.max[axis], tri.max[axis]);
++            }
++        }
++        nodes[node_index].bounds = node_bounds;
++        nodes[node_index].first = first;
++        nodes[node_index].count = count;
++
++        if (count > leaf_size) {
++            int axis = 0;
++            double max_extent = node_bounds.max.x() - node_bounds.min.x();
++            for (int a = 1; a < 3; ++a) {
++                double extent = node_bounds.max[a] - node_bounds.min[a];
++                if (extent > max_extent) {
++                    max_extent = extent;
++                    axis = a;
++                }
++            }
++
++            const int mid = first + count / 2;
++            std::nth_element(tri_order.begin() + first, tri_order.begin() + mid, tri_order.begin() + first + count,
++                             [&](int a, int b) {
++                                 double ca = tri_centroids[a][axis];
++                                 double cb = tri_centroids[b][axis];
++                                 if (ca != cb)
++                                     return ca < cb;
++                                 return a < b;
++                             });
++            nodes[node_index].left = self(self, first, mid - first);
++            nodes[node_index].right = self(self, mid, first + count - mid);
++        }
++        return node_index;
++    };
++    const int root = build_node(build_node, 0, num_faces);
++
+ #pragma omp parallel for schedule(dynamic, 64)
+     for (int idx = 0; idx < num_points; ++idx) {
+         const int ix = idx / (Ny * Nz);
+         const int iy = (idx / Nz) % Ny;
+         const int iz = idx % Nz;
+ 
+-        ChVector3d ray_origin(bbox.min.x() + ix * spacing + 1e-9, bbox.min.y() + iy * spacing + 1e-9,
+-                              bbox.min.z() + iz * spacing + 1e-9);
++        ChVector3d ray_origin(grid_x[ix] + 1e-9, grid_y[iy] + 1e-9, grid_z[iz] + 1e-9);
+ 
+-        ChVector3d ray_dir[2] = {ChVector3d(5, 0.5, 0.25), ChVector3d(-3, 0.7, 10)};
+         int intersectCounter[2] = {0, 0};
+ 
+-        for (unsigned int i = 0; i < mesh.m_face_v_indices.size(); ++i) {
+-            auto& t_face = mesh.m_face_v_indices[i];
+-            auto& v1 = mesh.m_vertices[t_face.x()];
+-            auto& v2 = mesh.m_vertices[t_face.y()];
+-            auto& v3 = mesh.m_vertices[t_face.z()];
+-
+-            // Find vectors for two edges sharing V1
+-            auto edge1 = v2 - v1;
+-            auto edge2 = v3 - v1;
+-
+-            int t_inter[2] = {0, 0};
+-
+-            for (unsigned int j = 0; j < 2; j++) {
+-                // Begin calculating determinant - also used to calculate uu parameter
+-                auto pvec = Vcross(ray_dir[j], edge2);
+-                // if determinant is near zero, ray is parallel to plane of triangle
+-                double det = Vdot(edge1, pvec);
+-                // NOT CULLING
+-                if (det > -EPSI && det < EPSI) {
+-                    t_inter[j] = 0;
+-                    continue;
+-                }
+-                double inv_det = 1.0 / det;
++        // Visit only BVH nodes hit by at least one of the two rays.  A node hit by either ray can contain a triangle
++        // that the original loop would count, so parity is unaffected by the pruning.
++        const MeshRayNode* node_stack[128];
++        int stack_size = 0;
++        node_stack[stack_size++] = &nodes[root];
++        while (stack_size > 0) {
++            const MeshRayNode& node = *node_stack[--stack_size];
++            if (!RayHitsMeshBounds(node.bounds, ray_origin, inv_dirs[0], box_pad) &&
++                !RayHitsMeshBounds(node.bounds, ray_origin, inv_dirs[1], box_pad))
++                continue;
+ 
+-                // calculate distance from V1 to ray origin
+-                auto tvec = ray_origin - v1;
++            if (node.left >= 0) {
++                node_stack[stack_size++] = &nodes[node.left];
++                node_stack[stack_size++] = &nodes[node.right];
++                continue;
++            }
+ 
+-                /// Calculate uu parameter and test bound
+-                double uu = Vdot(tvec, pvec) * inv_det;
+-                // The intersection lies outside of the triangle
+-                if (uu < 0.0 || uu > 1.0) {
+-                    t_inter[j] = 0;
+-                    continue;
+-                }
++            for (int n = node.first; n < node.first + node.count; ++n) {
++                const unsigned int i = static_cast<unsigned int>(tri_order[n]);
++                auto& t_face = mesh.m_face_v_indices[i];
++                auto& v1 = mesh.m_vertices[t_face.x()];
++                auto& v2 = mesh.m_vertices[t_face.y()];
++                auto& v3 = mesh.m_vertices[t_face.z()];
++
++                // Find vectors for two edges sharing V1
++                auto edge1 = v2 - v1;
++                auto edge2 = v3 - v1;
++
++                int t_inter[2] = {0, 0};
++
++                for (unsigned int j = 0; j < 2; j++) {
++                    // Begin calculating determinant - also used to calculate uu parameter
++                    auto pvec = Vcross(ray_dirs[j], edge2);
++                    // if determinant is near zero, ray is parallel to plane of triangle
++                    double det = Vdot(edge1, pvec);
++                    // NOT CULLING
++                    if (det > -EPSI && det < EPSI) {
++                        t_inter[j] = 0;
++                        continue;
++                    }
++                    double inv_det = 1.0 / det;
+ 
+-                // Prepare to test vv parameter
+-                auto qvec = Vcross(tvec, edge1);
++                    // calculate distance from V1 to ray origin
++                    auto tvec = ray_origin - v1;
+ 
+-                // Calculate vv parameter and test bound
+-                double vv = Vdot(ray_dir[j], qvec) * inv_det;
+-                // The intersection lies outside of the triangle
+-                if (vv < 0.0 || ((uu + vv) > 1.0)) {
+-                    t_inter[j] = 0;
+-                    continue;
+-                }
++                    /// Calculate uu parameter and test bound
++                    double uu = Vdot(tvec, pvec) * inv_det;
++                    // The intersection lies outside of the triangle
++                    if (uu < 0.0 || uu > 1.0) {
++                        t_inter[j] = 0;
++                        continue;
++                    }
+ 
+-                double tt = Vdot(edge2, qvec) * inv_det;
+-                if (tt > EPSI) {  /// ray intersection
+-                    t_inter[j] = 1;
+-                    continue;
++                    // Prepare to test vv parameter
++                    auto qvec = Vcross(tvec, edge1);
++
++                    // Calculate vv parameter and test bound
++                    double vv = Vdot(ray_dirs[j], qvec) * inv_det;
++                    // The intersection lies outside of the triangle
++                    if (vv < 0.0 || ((uu + vv) > 1.0)) {
++                        t_inter[j] = 0;
++                        continue;
++                    }
++
++                    double tt = Vdot(edge2, qvec) * inv_det;
++                    if (tt > EPSI) {  /// ray intersection
++                        t_inter[j] = 1;
++                        continue;
++                    }
++
++                    // No hit, no win
++                    t_inter[j] = 0;
+                 }
+ 
+-                // No hit, no win
+-                t_inter[j] = 0;
++                intersectCounter[0] += t_inter[0];
++                intersectCounter[1] += t_inter[1];
+             }
+-
+-            intersectCounter[0] += t_inter[0];
+-            intersectCounter[1] += t_inter[1];
+         }
+ 
+         if (((intersectCounter[0] % 2) == 1) && ((intersectCounter[1] % 2) == 1))  // inside mesh
+@@ -3107,8 +3252,7 @@ std::vector<ChVector3d> ChFsiFluidSystemSPH::CreatePointsMesh(ChTriangleMeshConn
+         const int ix = idx / (Ny * Nz);
+         const int iy = (idx / Nz) % Ny;
+         const int iz = idx % Nz;
+-        points.emplace_back(bbox.min.x() + ix * spacing, bbox.min.y() + iy * spacing,
+-                            bbox.min.z() + iz * spacing);
++        points.emplace_back(grid_x[ix], grid_y[iy], grid_z[iz]);
+     }
+ 
+     return points;

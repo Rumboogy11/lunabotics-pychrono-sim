@@ -1,13 +1,17 @@
-# Chrono::CRM / one-way FEA workflow
-# The primary supported runtime is the local Chrono 10 source build under
-# chrono-src/chrono-env/chrono-build/chrono-install (Python 3.12, CUDA 12.9,
-# FSI-SPH + vehicle modules). It is not installed from pip.
+# Python dependencies for the project-local chrono-env.
+# Installed by ./install.sh from environment/environment.yml; this file is kept
+# for pip-only setups and lightweight checks.
+#
+# The CRM drivers require the custom Chrono source build (pychrono.core,
+# pychrono.fsi, pychrono.vehicle, pychrono.fea). The PyPI `pychrono` wheel does
+# not provide FSI/vehicle modules and is deliberately NOT installed by the
+# installer.
 
-# Optional: CPU-only PyChrono wheel for lightweight local checks. This wheel
-# does not include pychrono.fsi/vehicle and cannot run the CRM drivers.
-pychrono==10.0.0rc1
-
-# Optional: result/geometry viewing and mesh preprocessing utilities.
+numpy>=2.0
 matplotlib>=3.8
 trimesh>=4.0
-fast-simplification>=0.2
+pyvista>=0.46
+vtk>=9.3
+tetgen>=0.6
+pymeshfix>=0.17
+cadquery-ocp>=7.7

@@ -1,74 +1,127 @@
 # Installation
 
-The supported workflow is a local Chrono 10 source build with CRM/FSI support.
-It runs the rigid Chrono::CRM driver, the one-way CRM→FEA replay, and the study wizard.
+`./install.sh` turns a fresh Arch Linux, CachyOS, Debian, or Ubuntu host into a
+working checkout of this project. It installs system prerequisites, creates a
+project-local `chrono-env`, checks out the custom Chrono fork, and builds/installs
+PyChrono with FSI-SPH + vehicle modules. Nothing is installed into the system
+Python.
 
-## 1. Chrono::CRM source build (recommended)
+## Quick install
 
-All required components live under the project root:
+```bash
+git clone https://github.com/Rumboogy11/lunabotics-pychrono-sim.git
+cd lunabotics-pychrono-sim
+./install.sh
+```
+
+If you do not have root/sudo access, install the few system packages yourself
+and run:
+
+```bash
+./install.sh --no-system-packages
+```
+
+Common options:
+
+| Option | Purpose |
+| --- | --- |
+| `--no-system-packages` | Skip `pacman`/`apt`; use tools already on `PATH` |
+| `--with-paraview` | Also install ParaView with the system package manager |
+| `--cuda-arch NNN` | Override GPU arch (e.g. `86`, `89`, `120`); auto-detected otherwise |
+| `--jobs N` | Request parallel build jobs (default: `nproc`; capped by available memory for the Chrono build) |
+| `--clean` | Remove `chrono-build/` and `chrono-install/` before rebuilding |
+| `--skip-build` | Install env/source/deps only, do not compile Chrono |
+| `--skip-patch` | Do not apply the local SPH patch to the Chrono checkout |
+| `--chrono-repo URL` / `--chrono-ref REF` | Override the custom fork URL/commit |
+| `--work-root PATH` | Store env/build/source outside the checkout (useful on NTFS/FUSE mounts) |
+
+The install is idempotent: re-running it updates the environment and rebuilds
+only what is needed. Source changes are preserved; `--clean` only removes the
+build and install trees.
+
+## What gets installed
 
 | Path | Purpose |
 | --- | --- |
-| `chrono-src/` | Chrono 10.0.0 source checkout |
-| `chrono-env/` | Python 3.12, CMake 3.31, Ninja, SWIG, GCC 14.4, CUDA 12.9 |
+| `chrono-src/` | Custom Chrono checkout pinned to commit `757a75b3c3…` from `https://github.com/Rumboogy11/chrono.git`, plus `environment/patches/chrono-local-crm-sph.patch` (BVH-accelerated BCE generation from the original workstation) |
+| `chrono-env/` | Project-local conda-forge env: Python 3.12, CMake 3.31, Ninja, SWIG 4.5.1, GCC 13.4, CUDA 12.9, Eigen, yaml-cpp, Tk, X11/GL runtime libs, NumPy, Matplotlib, PyVista/VTK, trimesh, tetgen, pymeshfix, OCP |
 | `chrono-build/` | CMake/Ninja build tree |
-| `chrono-install/` | installed libraries and PyChrono modules |
+| `chrono-install/` | Installed Chrono libraries and `pychrono` Python modules |
+| `.tools/` | Downloaded micromamba binary |
+| `.mamba/` | Downloaded conda packages cache |
 
-Notes:
-- CUDA **12.9** is required by the Chrono 10.0.0 FSI-SPH source used here (CUDA 13 is not supported).
-- The build targets `sm_120` for the RTX 5070 Ti; adjust if building for a different GPU.
-- MPI/HDF5, visualization modules, sensors, demos, and tests are not required for this workflow.
+If the checkout is on NTFS, exFAT, FUSE, CIFS, or another filesystem that
+cannot host conda's symlinks, the installer automatically places all six
+directories under `${XDG_DATA_HOME:-$HOME/.local/share}/pychrono/<hash>/` and
+creates symlinks in the project root. Set `PYCHRONO_WORK_ROOT` or pass
+`--work-root PATH` to choose that location yourself.
+
+The project pins conda-forge GCC 13.4 because GCC 14.4 has several internal
+compiler errors in this Chrono revision, including at `-O2`. The C++ release
+build uses `-O2`; set `CHRONO_CXX_RELEASE_FLAGS='-O3 -DNDEBUG'` only if you
+change the toolchain to one that has been tested with that setting.
+
+Chrono's Eigen-heavy sources need several GB of memory per compiler process.
+The installer caps build parallelism at half the machine's available threads
+(at least one), and may lower it further to one job per 4 GiB of available
+memory. Use `--jobs 1` for the most conservative build. The cap applies only to
+the Chrono build.
+
+The PyPI/conda-forge `pychrono` package is deliberately **not** used: it lacks
+`pychrono.fsi`/`pychrono.vehicle`, and its shared libraries conflict with the
+source build. The installer removes an old conda `pychrono` package if it finds
+one in `chrono-env`.
+
+### CUDA notes
+
+- The custom FSI-SPH source requires **CUDA 12.9** (CUDA 13 is not supported).
+- A compatible NVIDIA driver must be present at runtime; `nvcc` and the CUDA
+  libraries are installed inside `chrono-env`, so a system CUDA toolkit is not
+  required.
+- The installer queries `nvidia-smi` for the first GPU's compute capability and
+  stores it in `chrono-env/etc/chrono-cuda-arch`. Automatic detection fails on
+  machines without `nvidia-smi`; pass `--cuda-arch NNN` there.
+- The original workstation used `sm_120` (RTX 5070 Ti).
+
+## Activate and verify
 
 ```bash
-# Activate local toolchain and put chrono-install first on PYTHONPATH.
 source environment/activate-chrono-source.sh
 
-# Configure, build, install, and import-check (use --clean for a fresh tree).
-./environment/build-chrono-source.sh --clean
-
-# Verify the expected modules.
 "$CHRONO_ENV/bin/python" - <<'PY'
-import pychrono.core, pychrono.fsi, pychrono.vehicle
+import pychrono.core, pychrono.fea, pychrono.fsi, pychrono.vehicle
 print("CRM Python modules available")
 PY
 
-# Quick CRM smoke test.
 PYTHON="$CHRONO_ENV/bin/python" ./crm/run.sh --smoke-test
 ```
 
-`crm/run.sh`, `crm/run_oneway_fea.sh`, and `run_study.sh` select `chrono-env/bin/python`
-automatically when `PYTHON` is unset and the local environment is present.
+Runners select `chrono-env/bin/python` automatically when `PYTHON` is unset and
+the local environment is present.
 
-`./crm/run.sh --help` and `./crm/run.sh --print-soil` work without CRM modules because
-Chrono imports are deferred until a simulation starts.
+`./crm/run.sh --help` and `./crm/run.sh --print-soil` work without CRM modules
+because Chrono imports are deferred until a simulation starts.
 
-## 2. Optional CPU-only PyChrono wheel
+## System packages
 
-A PyPI `pychrono` wheel can be useful for lightweight non-CRM checks, but it does **not**
-include `pychrono.fsi` or `pychrono.vehicle` and therefore cannot run the CRM drivers.
+The installer uses `pacman` on Arch/CachyOS and `apt-get` on Debian/Ubuntu to
+install: `git`, `curl`, `bzip2`, `tar`, `python3`, Tk support, `xdg-utils`, and
+basic X11/GL runtime libraries needed by VTK, PyVista, OCP, and the Tk GUI.
+ParaView is
+optional and installed only with `--with-paraview`.
 
-```bash
-uv venv --python 3.12 ./pychrono-env
-uv pip install --python ./pychrono-env/bin/python pychrono==10.0.0rc1
-```
-
-## 3. Optional viewer and preprocessing tools
-
-ParaView export/viewing uses VTK/PyVista when available. Geometry/result plotting and mesh
-preprocessing may use NumPy, Matplotlib, trimesh, or fast-simplification depending on the
-tool you run.
-
-```bash
-# Example: install optional utilities into an environment of your choice
-python -m pip install matplotlib trimesh fast-simplification
-```
+## Optional tools
 
 - `view_results.py` plots CRM/FEA summaries and writes `results_overview.png`.
 - `view_geometry.py` compares STEP CAD vs converted mesh/surface.
-- `export_study_vtk.py` / `view_study_paraview.py` export and view studies in ParaView (VTK/PyVista required).
+- `export_study_vtk.py` exports studies for ParaView. `view_study_paraview.py`
+  imports `paraview.simple` and PySide6 from ParaView's own Python, so run it
+  with `paraview --script=view_study_paraview.py` (or `pvpython`) rather than
+  `chrono-env/bin/python`. Install ParaView with `--with-paraview` if needed.
 - `stl_to_obj.py` converts STL meshes to OBJ (pure format conversion, no extra deps).
+- `fast-simplification` is not required by the current tools.
 
-## 4. Notes
+## Notes
 
 - Run commands from the project root unless a script states otherwise.
 - Large outputs are written under `Output_*` (ignored by git). Prefer project-local paths over `/tmp`.

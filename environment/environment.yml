@@ -1,0 +1,49 @@
+# Reproducible project-local environment for the Chrono::CRM workflow.
+# Created by ./install.sh at ./chrono-env (do not install the conda-forge
+# `pychrono` package here: its libraries conflict with the local source build).
+name: chrono-env
+channels:
+  - conda-forge
+dependencies:
+  # Python toolchain used by both the build and the project scripts.
+  - python=3.12
+  - pip
+  - tk
+
+  # Chrono build tooling (versions matching environment/build-chrono-source.sh).
+  - cmake=3.31.*
+  - ninja
+  - swig=4.5.1
+  # GCC 14.4 has multiple internal compiler errors in this Chrono revision,
+  # including at -O2. GCC 13.4 built the full source tree successfully.
+  - gcc=13.4.*
+  - gxx=13.4.*
+  - llvm-openmp
+
+  # CUDA 12.9 is required by the FSI-SPH source in the custom Chrono fork.
+  # CUDA 13 is not supported by that source.
+  - cuda-toolkit=12.9.*
+
+  # Chrono C++ dependencies.
+  - eigen=3.4.*
+  - yaml-cpp
+
+  # Runtime libraries needed by pip wheels (VTK/PyVista/OCP) on headless hosts.
+  - libgl
+  - libglu
+  - xorg-libx11
+  - xorg-libxext
+  - xorg-libxrender
+  - libxkbcommon
+  - glib
+
+  # Python dependencies for simulation, STEP meshing, plotting and viewers.
+  - pip:
+      - numpy>=2.0
+      - matplotlib>=3.8
+      - trimesh>=4.0
+      - pyvista>=0.46
+      - vtk>=9.3
+      - tetgen>=0.6
+      - pymeshfix>=0.17
+      - cadquery-ocp>=7.7

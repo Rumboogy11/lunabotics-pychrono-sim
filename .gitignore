@@ -6,6 +6,18 @@ chrono-install/
 chrono-src/
 pychrono-env/
 
+# The installer may replace the paths above with symlinks to a native work root.
+/chrono-build
+/chrono-env
+/chrono-install
+/chrono-src
+/.tools
+/.mamba
+
+# Installer-managed tool downloads and conda package cache.
+.tools/
+.mamba/
+
 # Simulation output and large generated result sets.
 /Output*/
 output/
