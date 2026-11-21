@@ -4,6 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/chrono_runtime_env.sh"
 
 if [[ -z "${PYTHON:-}" && -x "$PROJECT_ROOT/chrono-env/bin/python" ]]; then
     PYTHON="$PROJECT_ROOT/chrono-env/bin/python"
@@ -14,5 +15,6 @@ if [[ -d "$PROJECT_ROOT/chrono-install/share/chrono/python" ]]; then
     export PYTHONPATH="$PROJECT_ROOT/chrono-install/share/chrono/python${PYTHONPATH:+:$PYTHONPATH}"
 fi
 export LD_LIBRARY_PATH="$PROJECT_ROOT/chrono-install/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+chrono_use_local_runtime
 
 exec "$PYTHON" "$SCRIPT_DIR/lunar_excavator_crm.py" "$@"

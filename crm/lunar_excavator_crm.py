@@ -478,9 +478,11 @@ def import_crm_modules():
         import pychrono.vehicle as veh
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise SystemExit(
-            "Chrono::CRM requires a PyChrono build with pychrono.fsi and "
-            "pychrono.vehicle (CRMTerrain). The PyPI wheel does not include them. "
-            "Use a source/conda-forge Chrono build with FSI/SPH and CRM enabled; "
+            "Failed to import PyChrono core/FSI/vehicle modules for the CRM run.\n"
+            f"  Original error: {exc}\n"
+            "If this mentions an undefined Chrono symbol, check that crm/run.sh is\n"
+            "preloading chrono-install/lib ahead of the stale chrono-env copies.\n"
+            "A source/conda-forge Chrono build with FSI/SPH and CRM is required;\n"
             "see environment/INSTALL.md."
         ) from exc
     return chrono, fsi, veh
