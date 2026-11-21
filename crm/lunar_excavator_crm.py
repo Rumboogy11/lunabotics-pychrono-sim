@@ -885,6 +885,8 @@ def main() -> int:
             [
                 f"CRM run: spacing={run.spacing:g} m, dt={run.dt:g} s, "
                 f"duration={run.duration:g} s, fps={run.fps:g}",
+                f"Output cadence: metrics={run.fps:g} Hz, particles={run.particle_fps:g} Hz, "
+                f"loads={run.loads_fps:g} Hz",
                 f"drum: mesh={mesh.name}, R={motion.drum_radius:g} m, "
                 f"half-length={motion.drum_half_length:g} m, "
                 f"spin={motion.drum_spin_axis.upper()}, omega={run.omega:g} rad/s",

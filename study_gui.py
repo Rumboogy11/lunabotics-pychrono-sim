@@ -122,7 +122,7 @@ PARAM_INFO: dict[str, str] = {
     "crm_fps": "How often CRM summary frames are written. Particle and soil-wrench files use their own cadences.",
     "fea_fps": "Independent FEA summary/export cadence. Lower values speed up replay; FEA dynamics still follow FEA dt.",
     "loads_fps": "Soil-wrench CSV sampling rate for one-way FEA. The FEA driver interpolates by time, so 20 Hz is usually enough; lower values make the CRM solver faster and soil_loads.csv much smaller.",
-    "particle_fps": "How often particle CSV frames are written for ParaView. Capped by CRM output FPS. Lower values sharply reduce CRM disk I/O; 5 Hz is usually enough for visualization.",
+    "particle_fps": "Independent particle CSV cadence for ParaView. It does NOT follow CRM output FPS automatically; set this equal to 'CRM output FPS' (20) to write one particle file per CRM frame. Lower values sharply reduce CRM disk I/O; 5 Hz is usually enough for visualization.",
     "particle_writers": "Background processes that write per-frame particle CSV files while the CRM solver continues. Increase only if disk writes remain a bottleneck.",
     "fea_dt": "Structural integrator timestep for one-way FEA, independent of CRM dt. Default is 0.002 s.",
     "bed_height": "Depth of the soil bed. The drum starts at bed_height + radius above the ground.",

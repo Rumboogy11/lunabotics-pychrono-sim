@@ -74,7 +74,7 @@ The wizard can convert a STEP model into CRM/FEA meshes, auto-scale derived geom
 ./run_study.sh --geometry step --step-file geometry/MyDrum.step --duration 20
 ```
 
-Each study writes reproducible outputs (e.g. `study_config.json`, `commands.sh`, stage logs/summaries, `crm/soil_loads.csv`) under `Output_<study_name>/`.
+Each study writes reproducible outputs (e.g. `study_config.json`, `commands.sh`, stage logs/summaries, `crm/soil_loads.csv`) under `Output_<study_name>/`. CRM summary frames, soil-wrench samples, and particle CSV frames have independent cadences: `crm_fps`, `loads_fps`, and `particle_fps`. Set `particle_fps` equal to `crm_fps` (e.g. 20 Hz) to write one particle file per CRM frame; the default 5 Hz writes every fourth frame at 20 Hz and is usually sufficient for ParaView.
 
 View results:
 
