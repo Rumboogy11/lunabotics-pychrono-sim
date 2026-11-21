@@ -20,7 +20,10 @@ or stale animation behind.
       <out>/combined.pvd is written with the same content for backwards
       compatibility. Neither file ever includes FEA data.
 
-If the one-way FEA driver produced a *complete* VTK export, frames live in
+The one-way FEA driver no longer writes per-frame deformation VTU files; that
+visualization export dominated FEA runtime. Scalar FEA histories remain in
+<fea>/summary.csv and are displayed by the GUI's Output Preview. For backwards
+compatibility, a *legacy complete* VTK export is still accepted:
   <fea>/vtk/frame_*.vtu  and  <fea>/vtk/fea.pvd
 with point data (Displacement, DisplacementMagnitude) and cell data
 (von_mises_pa, von_mises_MPa). A validated copy is written to <out>/fea.pvd and
@@ -35,7 +38,7 @@ Typical use::
 
     # then in ParaView (recommended, non-FEA by default):
     pvpython /path/to/view_study_paraview.py Output_study_20261119_144040/paraview
-    # add a validated FEA stress overlay when available:
+    # legacy FEA overlay, only when an older complete VTK export exists:
     pvpython /path/to/view_study_paraview.py Output_study_20261119_144040/paraview --with-fea
     # or ParaView GUI:
     # PYCHRONO_EXPORT_DIR=Output_study_20261119_144040/paraview paraview --script=/path/to/view_study_paraview.py
@@ -620,6 +623,9 @@ def main() -> int:
     ap.add_argument("--stride", type=int, default=1,
                     help="export every Nth CRM frame (default: 1 = all). "
                          "Use >1 to reduce size for long/high-fps runs.")
+    ap.add_argument("--particle-stride", type=int, default=None,
+                    help="export every Nth CRM particle frame independently of the "
+                         "excavator series (default: same as --stride; 0 also means same)")
     ap.add_argument("--particle-render-stride", type=int, default=1,
                     help="render only every Nth particle in each exported frame "
                          "(default: 1 = all particles). Use >1 to reduce particle "
@@ -637,6 +643,8 @@ def main() -> int:
                else (study_dir / "paraview"))
     out_dir.mkdir(parents=True, exist_ok=True)
     stride = max(1, int(args.stride))
+    particle_stride_requested = max(0, int(args.particle_stride or 0))
+    particle_frame_stride = particle_stride_requested if particle_stride_requested > 0 else stride
     particle_render_stride = max(1, int(args.particle_render_stride or 1))
     workers = max(1, int(args.workers))
 
@@ -661,8 +669,9 @@ def main() -> int:
     particle_radius_m = (particle_spacing / 2.0) if particle_spacing is not None else None
     print(f"Exporting study: {study_dir}")
     print(f"  out: {out_dir}")
-    print(f"  spin axis: {spin_axis}  stride: {stride}  particle render stride: "
-          f"{particle_render_stride}  workers: {workers}")
+    print(f"  spin axis: {spin_axis}  stride: {stride}  "
+          f"particle frame stride: {particle_frame_stride}  "
+          f"particle render stride: {particle_render_stride}  workers: {workers}")
     if particle_radius_m is not None:
         print(f"  particle radius: {particle_radius_m:g} m (spacing {particle_spacing:g} m)")
     if surface:
@@ -672,7 +681,7 @@ def main() -> int:
 
     crm_parts: list[tuple[str, Path]] = []
     if not args.excavator_only:
-        p = export_crm_particles(crm_dir, out_dir, stride=stride,
+        p = export_crm_particles(crm_dir, out_dir, stride=particle_frame_stride,
                                  particle_radius_m=particle_radius_m, workers=workers,
                                  render_stride=particle_render_stride)
         if p:
@@ -718,7 +727,7 @@ def main() -> int:
             print(f"  fea: ignoring {fea_source} ({fea_status}); non-FEA series is unaffected")
         else:
             print(f"  fea: no VTK export found at {fea_source} "
-                  "(run one-way FEA with --export-vtk to visualize stress/deformation)")
+                  "(FEA deformation VTU export is disabled; scalar summaries remain in fea/summary.csv)")
 
     def series_name(name: str) -> str | None:
         return name if (out_dir / name).is_file() else None
@@ -728,6 +737,7 @@ def main() -> int:
         "out_dir": str(out_dir),
         "spin_axis": spin_axis,
         "stride": stride,
+        "particle_stride": particle_frame_stride,
         "particle_render_stride": particle_render_stride,
         "workers": workers,
         "surface": str(surface) if surface else None,
@@ -756,7 +766,7 @@ def main() -> int:
     print(f"  paraview {combined}")
     print("  # recommended (non-FEA CRM animation; FEA excluded by default):")
     print(f"  pvpython {ROOT / 'view_study_paraview.py'} {out_dir}")
-    print(f"  # add validated FEA stress overlay when available:")
+    print("  # legacy FEA overlay, only when an older complete VTK export exists:")
     print(f"  pvpython {ROOT / 'view_study_paraview.py'} {out_dir} --with-fea")
     return 0
 

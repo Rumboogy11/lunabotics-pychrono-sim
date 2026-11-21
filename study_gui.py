@@ -142,16 +142,18 @@ PARAM_INFO: dict[str, str] = {
     "export_workers": "Number of processes used to write ParaView frame files in parallel.",
     # Output & export
     "save_particles": "Write CRM particle positions as CSV at the particle output FPS. Needed for ParaView particle spheres; uses disk space.",
-    "fea_export_vtk": "Write fea/vtk/frame_*.vtu and fea.pvd so ParaView can show von Mises stress and deformation. Required for 3D stress/deformation views.",
-    "fea_vtk_stride": "Export every Nth recorded FEA frame to VTU. Use >1 to reduce disk/time for long runs.",
+    "fea_export_vtk": "Deprecated and disabled. FEA VTU deformation export was removed because it dominated one-way FEA runtime; scalar FEA summaries are still written.",
+    "fea_vtk_stride": "Deprecated and disabled along with FEA VTU deformation export.",
     "export_vtk": "Create separate ParaView series (crm_particles.pvd, excavator.pvd, optional fea.pvd) plus combined.pvd and a manifest after the run.",
-    "paraview_stride": "Export every Nth CRM frame. Use 1 for all frames; all series stay time-aligned.",
+    "paraview_stride": "Export every Nth CRM frame for both particles and excavator. Use 1 for all frames; all series stay time-aligned.",
+    "paraview_particle_stride": "Export every Nth CRM particle frame independently of the excavator series. Use 0 to follow the general ParaView export stride, or >1 to reduce the much larger particle series.",
     "paraview_particle_render_stride": "Render only every Nth particle in each exported frame. Use 1 for all particles; >1 reduces particle file size and ParaView load without skipping frames.",
     "open_results": "Open the output folder when the study finishes.",
     "open_paraview": "Open the preconfigured 3D view in the full ParaView GUI after a successful run (pvpython render window is the fallback).",
     # Tools tab
     "tools_study_dir": "Study/output directory to inspect. Use the folder containing study_config.json or a previous Output_* run.",
     "tools_stride": "Export every Nth CRM frame when using the Export ParaView VTK/PVD tool. Use 1 for all frames. All series stay time-aligned.",
+    "tools_particle_stride": "Export every Nth CRM particle frame in the Export ParaView VTK/PVD tool. Use 0 to follow the quick export stride, or >1 to reduce the particle series independently.",
     "tools_particle_render_stride": "Render only every Nth particle in each exported frame in the Export ParaView VTK/PVD tool. Use 1 for all particles; >1 reduces particle file size and ParaView load without skipping frames.",
     "tools_camera_orbit": "Automatically add a ParaView camera track that orbits the excavator drum while the time animation plays. The track follows the drum center from the excavator frames.",
     "tools_orbit_speed": "Camera revolutions per simulation second. Positive orbits one way, negative reverses. 0.1 means one revolution every 10 seconds of study time.",
@@ -201,6 +203,8 @@ SHIPPED_SETTINGS: dict[str, object] = {
     "text_color": LIGHT_TEXT,
     "dark_mode": False,
     "show_output_preview": True,
+    "preview_particle_stride": 1,
+    "preview_frame_stride": 1,
 }
 
 SETTINGS_INFO: dict[str, str] = {
@@ -209,7 +213,9 @@ SETTINGS_INFO: dict[str, str] = {
     "window_height": "Window height in pixels used the next time the GUI starts (480-2160).",
     "text_color": "Foreground text color as #RRGGBB. Pick... opens the system color dialog.",
     "dark_mode": "Use a dark interface palette. If the text color is still the default, it switches to a light shade automatically.",
-    "show_output_preview": "Show the lightweight CRM/FEA Output Preview tab. It reads study CSVs directly and draws subsampled particle points on a Tk canvas.",
+    "show_output_preview": "Show the lightweight CRM/FEA Output Preview tab. It reads study CSVs directly and draws a bounded 3D subsample of particles on a Tk canvas.",
+    "preview_particle_stride": "In the Output Preview, read only every Nth particle row before sampling. 1 reads all rows; higher values reduce CSV work.",
+    "preview_frame_stride": "In the Output Preview, show only every Nth discovered particle CSV frame in the slider and Play loop. 1 shows all frames.",
 }
 
 GENERATED_DOC_ID = "<generated>"
@@ -263,6 +269,12 @@ def load_ui_settings() -> dict[str, object]:
         values["text_color"] = str(data["text_color"]).strip()
     values["dark_mode"] = bool(data.get("dark_mode", False))
     values["show_output_preview"] = bool(data.get("show_output_preview", True))
+    values["preview_particle_stride"] = _setting_int(
+        data.get("preview_particle_stride"), "Preview particle stride", 1, 100,
+        int(SHIPPED_SETTINGS["preview_particle_stride"]))
+    values["preview_frame_stride"] = _setting_int(
+        data.get("preview_frame_stride"), "Preview frame stride", 1, 50,
+        int(SHIPPED_SETTINGS["preview_frame_stride"]))
     return values
 
 
@@ -276,6 +288,12 @@ def write_ui_settings(values: dict[str, object]) -> None:
                        else str(SHIPPED_SETTINGS["text_color"])),
         "dark_mode": bool(values.get("dark_mode", False)),
         "show_output_preview": bool(values.get("show_output_preview", True)),
+        "preview_particle_stride": _setting_int(
+            values.get("preview_particle_stride"), "Preview particle stride", 1, 100,
+            int(SHIPPED_SETTINGS["preview_particle_stride"])),
+        "preview_frame_stride": _setting_int(
+            values.get("preview_frame_stride"), "Preview frame stride", 1, 50,
+            int(SHIPPED_SETTINGS["preview_frame_stride"])),
     }
     SETTINGS_FILE.write_text(json.dumps(clean, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -327,10 +345,11 @@ def shipped_defaults() -> dict[str, object]:
         "raw_stress_every": "5",
         "export_workers": "4",
         "save_particles": True,
-        "fea_export_vtk": True,
+        "fea_export_vtk": False,
         "fea_vtk_stride": "1",
         "export_vtk": True,
         "paraview_stride": "1",
+        "paraview_particle_stride": "0",
         "paraview_particle_render_stride": "1",
         "open_paraview": False,
         "open_results": False,
@@ -399,10 +418,9 @@ DEFAULT_GROUPS: list[tuple[str, list[tuple[str, str, dict]]]] = [
     ]),
     ("Output & Export", [
         ("Save CRM particle CSV frames", "save_particles", {"check": True}),
-        ("Export FEA stress/deformation VTU", "fea_export_vtk", {"check": True}),
-        ("FEA VTK stride (frames)", "fea_vtk_stride", {}),
         ("Export ParaView datasets after run", "export_vtk", {"check": True}),
         ("ParaView export stride (frames)", "paraview_stride", {}),
+        ("ParaView particle stride (0 = same)", "paraview_particle_stride", {}),
         ("ParaView particle render stride", "paraview_particle_render_stride", {}),
         ("ParaView export workers", "export_workers", {}),
         ("Open results folder after run", "open_results", {"check": True}),
@@ -536,9 +554,12 @@ class StudyGUI:
         self._build_tools_tab()
         self._build_docs_tab()
         self._build_settings_tab()
-        self.preview = OutputPreview(
+        self.output_preview = OutputPreview(
             self.preview_tab, self.root, self._initial_preview_dir(),
             palette=lambda: self.ui_palette,
+            particle_stride=int(self.settings["preview_particle_stride"]),
+            frame_stride=int(self.settings["preview_frame_stride"]),
+            stride_callback=self._on_preview_stride_change,
         )
         self._apply_ui_settings(self.settings)
 
@@ -564,18 +585,44 @@ class StudyGUI:
         return str(ROOT)
 
     def _refresh_output_preview(self) -> None:
-        preview = getattr(self, "preview", None)
+        preview = getattr(self, "output_preview", None)
         if preview is None or not bool(self.settings.get("show_output_preview", True)):
             return
         preview.refresh()
+
+    def _on_preview_stride_change(self, particle_stride: int, frame_stride: int) -> None:
+        """Persist strides edited directly in the Output Preview tab."""
+        self.settings = dict(self.settings)
+        self.settings["preview_particle_stride"] = int(particle_stride)
+        self.settings["preview_frame_stride"] = int(frame_stride)
+        for key, value in (("preview_particle_stride", particle_stride),
+                           ("preview_frame_stride", frame_stride)):
+            var = self.settings_vars.get(key)
+            if var is not None:
+                var.set(str(value))
+        write_ui_settings(self.settings)
+        self.output_preview.refresh()
+
+    def _apply_preview_strides(self, values: dict[str, object]) -> None:
+        preview = getattr(self, "output_preview", None)
+        if preview is None:
+            return
+        particle_stride = _setting_int(
+            values.get("preview_particle_stride"), "Preview particle stride", 1, 100,
+            int(SHIPPED_SETTINGS["preview_particle_stride"]))
+        frame_stride = _setting_int(
+            values.get("preview_frame_stride"), "Preview frame stride", 1, 50,
+            int(SHIPPED_SETTINGS["preview_frame_stride"]))
+        if preview.set_strides(particle_stride, frame_stride):
+            preview.refresh()
 
     def _open_output_preview(self) -> None:
         self.settings_vars["show_output_preview"].set(True)
         self._apply_settings_now()
         self.notebook.select(self.preview_tab)
-        if getattr(self, "preview", None) is not None:
-            self.preview.set_directory(self._initial_preview_dir())
-            self.preview.refresh()
+        if getattr(self, "output_preview", None) is not None:
+            self.output_preview.set_directory(self._initial_preview_dir())
+            self.output_preview.refresh()
 
     def _build_study_tab(self):
         top = ttk.Frame(self.study_tab)
@@ -719,18 +766,17 @@ class StudyGUI:
         ttk.Label(p, text="Saved outputs and ParaView/VTK export (added as final wizard step when enabled).",
                   font=HEADER_FONT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8); r += 1
         r = self._row(p, r, "Save CRM particle CSV frames", "save_particles", check=True)
-        r = self._row(p, r, "Export FEA stress/deformation VTU", "fea_export_vtk", check=True,
-                      help_text="Required to visualize von Mises stresses in ParaView.")
-        r = self._row(p, r, "FEA VTK stride (frames)", "fea_vtk_stride")
         r = self._row(p, r, "Export ParaView datasets after run", "export_vtk", check=True,
                       help_text="Creates separate particle and excavator series + combined PVD.")
         r = self._row(p, r, "ParaView export stride (frames)", "paraview_stride")
+        r = self._row(p, r, "ParaView particle stride (0 = same)", "paraview_particle_stride")
         r = self._row(p, r, "ParaView particle render stride", "paraview_particle_render_stride")
         ttk.Separator(p).grid(row=r, column=0, columnspan=4, sticky="ew", pady=8); r += 1
         r = self._row(p, r, "Open results folder after run", "open_results", check=True)
         r = self._row(p, r, "Open ParaView after run", "open_paraview", check=True)
         ttk.Label(p, text="ParaView note: run 'pvpython view_study_paraview.py <study>/paraview' for a preconfigured 3D view\n"
-                          "(particles as spheres, separate excavator, FEA colored by von Mises stress).",
+                          "(particles as spheres and a separate excavator). FEA deformation VTU export is disabled;\n"
+                          "scalar FEA histories remain in fea/summary.csv and the Output Preview tab.",
                   justify=LEFT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8)
 
     def _page_review(self):
@@ -744,11 +790,11 @@ class StudyGUI:
         ttk.Button(top, text="Refresh preview", command=self._refresh_preview).pack(side=RIGHT)
         paned = ttk.Panedwindow(p, orient=VERTICAL)
         paned.pack(fill=BOTH, expand=True, padx=6, pady=4)
-        self.preview = ttk.Frame(paned)
+        self.cmd_preview_frame = ttk.Frame(paned)
         self.log_frame = ttk.Frame(paned)
-        paned.add(self.preview, weight=1)
+        paned.add(self.cmd_preview_frame, weight=1)
         paned.add(self.log_frame, weight=2)
-        self.cmd_text = self._text_widget(self.preview, height=16)
+        self.cmd_text = self._text_widget(self.cmd_preview_frame, height=16)
         self.log_text = self._text_widget(self.log_frame, height=18)
         runbar = ttk.Frame(p)
         runbar.pack(fill=X, padx=6, pady=4)
@@ -990,8 +1036,8 @@ class StudyGUI:
             "  (passing args after '--' may not work with some ParaView builds).\n"
             "• pvpython fallback: pvpython view_study_paraview.py <study>/paraview stays open until its render window is closed.\n"
             "• Particles are rendered as 3D spheres (glyphs sized from export). Excavator is a separate source.\n"
-            "• FEA stress/deformation requires FEA VTK export; viewer colors by von Mises and warps by displacement by default.\n"
-            "• The lightweight Output Preview tab reads CRM/FEA CSVs directly, subsamples particles as 2D points, and needs no VTK conversion."
+            "• FEA deformation VTU export is disabled; scalar FEA results remain in fea/summary.csv.\n"
+            "• The lightweight Output Preview tab reads CRM/FEA CSVs directly and draws a bounded 3D point cloud with editable particle/frame strides."
         )
         ttk.Label(p, text=notes, justify=LEFT).grid(row=r, column=0, columnspan=4, sticky=W, padx=8, pady=4); r += 1
 
@@ -1002,6 +1048,13 @@ class StudyGUI:
         ttk.Button(p, text="Info", width=6,
                    command=lambda: self._show_info("Quick export stride", PARAM_INFO["tools_stride"])).grid(
                        row=r, column=3, sticky=W, padx=6)
+        r += 1
+        ttk.Label(p, text="Particle frame stride (0 = same as quick)").grid(row=r, column=0, sticky=W, padx=8, pady=4)
+        self.tools_particle_stride = StringVar(value="0")
+        ttk.Entry(p, textvariable=self.tools_particle_stride, width=8).grid(row=r, column=1, sticky=W)
+        ttk.Button(p, text="Info", width=6,
+                   command=lambda: self._show_info("Particle frame stride", PARAM_INFO["tools_particle_stride"])).grid(
+                        row=r, column=3, sticky=W, padx=6)
         r += 1
         ttk.Label(p, text="Particle render stride (every N particles/frame)").grid(row=r, column=0, sticky=W, padx=8, pady=4)
         self.tools_particle_render_stride = StringVar(value="1")
@@ -1183,6 +1236,8 @@ class StudyGUI:
             "text_color": StringVar(value=str(values["text_color"])),
             "dark_mode": BooleanVar(value=bool(values["dark_mode"])),
             "show_output_preview": BooleanVar(value=bool(values["show_output_preview"])),
+            "preview_particle_stride": StringVar(value=str(values["preview_particle_stride"])),
+            "preview_frame_stride": StringVar(value=str(values["preview_frame_stride"])),
         }
         r = self._settings_row(p, r, "Text size", "font_size", kind="size")
         r = self._settings_row(p, r, "Window width (px)", "window_width")
@@ -1191,6 +1246,8 @@ class StudyGUI:
         r = self._settings_row(p, r, "Dark mode", "dark_mode", kind="check")
         r = self._settings_row(p, r, "Show output preview tab", "show_output_preview",
                                kind="check", command=self._apply_settings_now)
+        r = self._settings_row(p, r, "Preview particle stride (rows)", "preview_particle_stride")
+        r = self._settings_row(p, r, "Preview frame stride (files)", "preview_frame_stride")
         ttk.Separator(p).grid(row=r, column=0, columnspan=5, sticky="ew", pady=8); r += 1
         bar = ttk.Frame(p)
         bar.grid(row=r, column=0, columnspan=5, sticky=W, padx=8, pady=6); r += 1
@@ -1274,12 +1331,19 @@ class StudyGUI:
             "text_color": color,
             "dark_mode": bool(self.settings_vars["dark_mode"].get()),
             "show_output_preview": bool(self.settings_vars["show_output_preview"].get()),
+            "preview_particle_stride": _setting_int(
+                self.settings_vars["preview_particle_stride"].get(), "Preview particle stride",
+                1, 100, int(self.settings["preview_particle_stride"]), strict=strict),
+            "preview_frame_stride": _setting_int(
+                self.settings_vars["preview_frame_stride"].get(), "Preview frame stride",
+                1, 50, int(self.settings["preview_frame_stride"]), strict=strict),
         }
 
     def _sync_settings_vars(self, values: dict[str, object]) -> None:
         if not self.settings_vars:
             return
-        for key in ("font_size", "window_width", "window_height", "text_color"):
+        for key in ("font_size", "window_width", "window_height", "text_color",
+                    "preview_particle_stride", "preview_frame_stride"):
             self.settings_vars[key].set(str(values[key]))
         self.settings_vars["dark_mode"].set(bool(values["dark_mode"]))
         self.settings_vars["show_output_preview"].set(bool(values["show_output_preview"]))
@@ -1400,6 +1464,7 @@ class StudyGUI:
             except tk.TclError:
                 continue
 
+        self._apply_preview_strides(values)
         self._apply_preview_visibility(bool(values.get("show_output_preview", True)))
 
     def _style_combobox_popdown(self, widget, bg: str, field: str,
@@ -1436,12 +1501,12 @@ class StudyGUI:
             index = notebook.index(self.docs_tab)
             notebook.insert(index, tab, text="Output Preview")
             notebook.tab(tab, state="normal")
-            preview = getattr(self, "preview", None)
+            preview = getattr(self, "output_preview", None)
             if preview is not None:
                 preview.set_visible(True)
                 self.root.after(0, preview.refresh)
         elif not show and visible:
-            preview = getattr(self, "preview", None)
+            preview = getattr(self, "output_preview", None)
             if preview is not None:
                 preview.set_visible(False)
             notebook.hide(tab)
@@ -1701,10 +1766,11 @@ class StudyGUI:
             "export_workers": export_workers,
             "pla": pla,
             "save_particles": self._gb("save_particles"),
-            "fea_export_vtk": self._gb("fea_export_vtk"),
-            "fea_vtk_stride": max(1, int(float(self._g("fea_vtk_stride") or 1))),
+            "fea_export_vtk": False,
+            "fea_vtk_stride": 1,
             "export_vtk": self._gb("export_vtk"),
             "paraview_stride": max(1, int(float(self._g("paraview_stride") or 1))),
+            "paraview_particle_stride": max(0, int(float(self._g("paraview_particle_stride") or 0))),
             "paraview_particle_render_stride": max(1, int(float(self._g("paraview_particle_render_stride") or 1))),
             "export_workers": export_workers,
             "open_results": self._gb("open_results"),
@@ -1881,7 +1947,8 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                    "shifting_ppst_push", "crm_fps", "fea_fps", "fea_dt",
                   "bed_height", "bed_padding", "settle_time", "descent_speed", "omega", "num_threads",
                   "load_radius_fraction", "raw_stress_every", "export_workers",
-                  "fea_vtk_stride", "paraview_stride", "paraview_particle_render_stride"]:
+                  "fea_vtk_stride", "paraview_stride", "paraview_particle_stride",
+                  "paraview_particle_render_stride"]:
             setv(k, data.get(k))
         for k in ["reverse_spin", "save_particles", "fea_export_vtk", "export_vtk", "open_results", "open_paraview", "auto_geometry"]:
             if k in data:
@@ -1951,8 +2018,8 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             run_dir = str(Path(self._g("output_dir")).expanduser().resolve())
             if hasattr(self, "tools_study_dir"):
                 self.tools_study_dir.set(run_dir)
-            if hasattr(self, "preview"):
-                self.preview.set_directory(run_dir)
+            if hasattr(self, "output_preview"):
+                self.output_preview.set_directory(run_dir)
             self._set_text(self.log_text, "")
             self.status_var.set("Running study...")
             self.step_nb.select(len(self.pages) - 1)
@@ -2081,13 +2148,16 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
     def _tool_export(self):
         d = Path(self.tools_study_dir.get()).expanduser()
         stride = max(1, int(float(self.tools_stride.get() or 1)))
+        particle_stride = max(0, int(float(self.tools_particle_stride.get() or 0)))
         particle_render_stride = max(1, int(float(self.tools_particle_render_stride.get() or 1)))
         workers = max(1, int(float(self.tools_workers.get() or 4)))
         cmd = [py_exec(), str(ROOT / "export_study_vtk.py"), "--study-dir", str(d),
                "--stride", str(stride), "--workers", str(workers),
+               "--particle-stride", str(particle_stride),
                "--particle-render-stride", str(particle_render_stride)]
         self._tool_log(f"# exporting {workers} frame worker process(es) "
-                       f"(stride {stride}, particle render stride "
+                       f"(stride {stride}, particle frame stride "
+                       f"{particle_stride or stride}, particle render stride "
                        f"{particle_render_stride}, columnar CSV parsing)")
         self._run_tool_cmd(cmd, stream=True)
 

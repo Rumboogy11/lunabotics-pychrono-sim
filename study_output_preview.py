@@ -4,11 +4,13 @@
 The preview intentionally avoids VTK/PVD conversion and heavy 3D rendering.
 It reads the files written by the study directly:
 
-  * ``crm/particles_*.csv`` for a subsampled Y-Z particle scatter,
+  * ``crm/particles_*.csv`` for a subsampled 3D particle point cloud,
   * ``crm/summary.csv`` and ``fea/summary.csv`` for scalar timelines.
 
 Particles are drawn as 1-2 pixel points on a Tk canvas instead of 3D spheres,
-and each particle frame is reservoir-sampled to a small fixed limit.
+and each particle frame is reservoir-sampled to a small fixed limit.  The 3D
+view is a plain perspective/orthographic projection with mouse orbit and zoom;
+it needs no NumPy, VTK, PIL, or file conversion.
 """
 
 from __future__ import annotations
@@ -123,21 +125,27 @@ def discover_particle_frames(out_dir: Path) -> list[Path]:
     return sorted(paths, key=frame_number_from_path)
 
 
-def load_particle_sample(path: Path, limit: int = PARTICLE_LIMIT) -> tuple[list[tuple[float, float, float, int, int]], int]:
+def load_particle_sample(path: Path, limit: int = PARTICLE_LIMIT,
+                         stride: int = 1) -> tuple[list[tuple[float, float, float, int, int]], int]:
     """Reservoir-sample one particle CSV frame with bounded memory.
 
-    Returns ``(sample, total_rows)``.  Each sample item is
+    ``stride`` skips rows before sampling; 1 considers every row.  Returns
+    ``(sample, total_rows)`` where ``total_rows`` counts rows that survived the
+    stride and had valid coordinates.  Each sample item is
     ``(x, y, z, inside_drum, excavated)`` in world metres / integer flags.
     """
     sample: list[tuple[float, float, float, int, int]] = []
     total = 0
+    stride = max(1, int(stride))
     rng = random.Random(20261120)
     try:
         with path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             if reader.fieldnames is None:
                 return [], 0
-            for raw in reader:
+            for row_index, raw in enumerate(reader):
+                if row_index % stride:
+                    continue
                 x = _to_float(raw.get("X"))
                 y = _to_float(raw.get("Y"))
                 z = _to_float(raw.get("Z"))
@@ -169,6 +177,53 @@ def _nice_step(span: float) -> float:
     return 10.0 * power
 
 
+def _project_point(
+    point: tuple[float, float, float],
+    center: tuple[float, float, float],
+    yaw: float,
+    pitch: float,
+    focal: float | None,
+) -> tuple[float, float, float, float]:
+    """Project a world point with a cheap yaw/pitch camera.
+
+    ``yaw`` and ``pitch`` are radians.  Positive depth is farther from the
+    viewer.  Returns ``(screen_x, screen_y, depth, perspective_factor)`` before
+    any canvas scaling is applied.
+    """
+    dx = point[0] - center[0]
+    dy = point[1] - center[1]
+    dz = point[2] - center[2]
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    x1 = dx * cy - dy * sy
+    y1 = dx * sy + dy * cy
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    y2 = y1 * cp - dz * sp
+    z2 = y1 * sp + dz * cp
+    factor = 1.0 if focal is None else focal / max(0.2 * focal, focal + y2)
+    return x1 * factor, -z2 * factor, y2, factor
+
+
+def _shade(color: str, background: str, amount: float) -> str:
+    """Blend a #RRGGBB color toward the canvas background for depth cueing."""
+    try:
+        amount = max(0.0, min(1.0, float(amount)))
+        fg = [int(color[i:i + 2], 16) for i in (1, 3, 5)]
+        bg = [int(background[i:i + 2], 16) for i in (1, 3, 5)]
+        return "#" + "".join(f"{round(a * (1.0 - amount) + b * amount):02X}"
+                             for a, b in zip(fg, bg))
+    except (TypeError, ValueError, IndexError):
+        return color
+
+
+def _axis_vector(axis: str) -> tuple[float, float, float]:
+    axis = (axis or "X").strip().upper()
+    if axis == "Y":
+        return 0.0, 1.0, 0.0
+    if axis == "Z":
+        return 0.0, 0.0, 1.0
+    return 1.0, 0.0, 0.0
+
+
 def _time_of(rows: list[dict[str, float]], index: int, fallback_fps: float) -> float:
     if 0 <= index < len(rows):
         value = rows[index].get("time_s")
@@ -186,16 +241,29 @@ class OutputPreview:
         root: tk.Tk,
         initial_dir: str,
         palette: Callable[[], dict[str, str]],
+        particle_stride: int = 1,
+        frame_stride: int = 1,
+        stride_callback: Callable[[int, int], None] | None = None,
     ) -> None:
         self.parent = parent
         self.root = root
         self.palette = palette
+        self.stride_callback = stride_callback
         self.dir_var = StringVar(value=initial_dir)
         self.show_particles = BooleanVar(value=True)
         self.show_crm = BooleanVar(value=True)
         self.show_fea = BooleanVar(value=True)
         self.playing = BooleanVar(value=False)
         self.frame_var = IntVar(value=0)
+        self.particle_stride = max(1, int(particle_stride))
+        self.frame_stride = max(1, int(frame_stride))
+        self.particle_stride_var = IntVar(value=self.particle_stride)
+        self.frame_stride_var = IntVar(value=self.frame_stride)
+        self.view_mode = StringVar(value="3D perspective")
+        self.yaw_deg = 35.0
+        self.pitch_deg = 20.0
+        self.zoom = 1.0
+        self._drag_origin: tuple[int, int] | None = None
 
         self.frames: list[Path] = []
         self.frame_numbers: list[int] = []
@@ -242,16 +310,49 @@ class OutputPreview:
         self.frame_label = ttk.Label(layers, text="no particle frames", width=24)
         self.frame_label.pack(side="left", padx=(6, 2))
 
+        options = ttk.Frame(self.parent)
+        options.pack(fill="x", padx=6, pady=(0, 2))
+        ttk.Label(options, text="View").pack(side="left", padx=(2, 4))
+        view_box = ttk.Combobox(
+            options, textvariable=self.view_mode, state="readonly", width=17,
+            values=("2D Y-Z", "3D ortho", "3D perspective"))
+        view_box.pack(side="left", padx=2)
+        view_box.bind("<<ComboboxSelected>>", lambda _e: self._draw_particles())
+        ttk.Button(options, text="Reset view", width=10,
+                   command=self._reset_view).pack(side="left", padx=4)
+        ttk.Label(options, text="Particle stride").pack(side="left", padx=(14, 4))
+        self.particle_stride_box = ttk.Spinbox(
+            options, from_=1, to=100, width=5,
+            textvariable=self.particle_stride_var, command=self._on_stride_change)
+        self.particle_stride_box.pack(side="left", padx=2)
+        ttk.Label(options, text="Frame stride").pack(side="left", padx=(12, 4))
+        self.frame_stride_box = ttk.Spinbox(
+            options, from_=1, to=50, width=5,
+            textvariable=self.frame_stride_var, command=self._on_stride_change)
+        self.frame_stride_box.pack(side="left", padx=2)
+        for box in (self.particle_stride_box, self.frame_stride_box):
+            box.bind("<Return>", lambda _e: self._on_stride_change())
+            box.bind("<FocusOut>", lambda _e: self._on_stride_change())
+        ttk.Label(options, text="(1 = all; drag canvas to orbit, wheel to zoom)",
+                  font="TkSmallCaptionFont").pack(side="left", padx=(10, 2))
+
         pane = ttk.Panedwindow(self.parent, orient="horizontal")
         pane.pack(fill="both", expand=True, padx=6, pady=4)
 
         particle_frame = ttk.Frame(pane, width=520)
         pane.add(particle_frame, weight=3)
-        ttk.Label(particle_frame, text="CRM particle cross-section (Y-Z, points only)",
-                  font="StudySectionFont").pack(anchor="w", padx=6, pady=(4, 2))
+        self.particle_title = ttk.Label(
+            particle_frame, text="CRM particles (3D points)", font="StudySectionFont")
+        self.particle_title.pack(anchor="w", padx=6, pady=(4, 2))
         self.particle_canvas = tk.Canvas(particle_frame, highlightthickness=0)
         self.particle_canvas.pack(fill="both", expand=True, padx=6, pady=(0, 6))
         self.particle_canvas.bind("<Configure>", lambda _e: self._draw_particles())
+        self.particle_canvas.bind("<ButtonPress-1>", self._on_drag_start)
+        self.particle_canvas.bind("<B1-Motion>", self._on_drag_move)
+        self.particle_canvas.bind("<ButtonRelease-1>", lambda _e: None)
+        self.particle_canvas.bind("<MouseWheel>", self._on_mouse_wheel)
+        self.particle_canvas.bind("<Button-4>", lambda _e: self._zoom_by(1.1))
+        self.particle_canvas.bind("<Button-5>", lambda _e: self._zoom_by(1.0 / 1.1))
 
         timeline_frame = ttk.Frame(pane, width=440)
         pane.add(timeline_frame, weight=2)
@@ -274,9 +375,23 @@ class OutputPreview:
     def set_directory(self, path: str | Path) -> None:
         self.dir_var.set(str(path))
 
+    def set_strides(self, particle_stride: int, frame_stride: int) -> bool:
+        """Apply externally edited strides; return True when they changed."""
+        particle = max(1, int(particle_stride))
+        frame = max(1, int(frame_stride))
+        changed = (particle, frame) != (self.particle_stride, self.frame_stride)
+        self.particle_stride = particle
+        self.frame_stride = frame
+        self.particle_stride_var.set(particle)
+        self.frame_stride_var.set(frame)
+        if changed:
+            self.loaded_frame = -1
+        return changed
+
     def refresh(self) -> None:
         out_dir = Path(self.dir_var.get().strip()).expanduser()
-        self.frames = discover_particle_frames(out_dir)
+        all_frames = discover_particle_frames(out_dir)
+        self.frames = all_frames[::self.frame_stride]
         self.frame_numbers = [frame_number_from_path(path) for path in self.frames]
         self.crm_rows = load_summary(out_dir / "crm" / "summary.csv")
         self.frame_lookup = {
@@ -294,7 +409,9 @@ class OutputPreview:
         self._draw_all()
 
         details = [
-            f"{len(self.frames)} particle frames",
+            f"{len(self.frames)}/{len(all_frames)} particle frames",
+            f"frame stride {self.frame_stride}",
+            f"particle stride {self.particle_stride}",
             f"{len(self.crm_rows)} CRM rows",
             f"{len(self.fea_rows)} FEA rows",
         ]
@@ -315,6 +432,54 @@ class OutputPreview:
 
     def _on_layer_toggle(self) -> None:
         self._draw_all()
+
+    def _on_stride_change(self) -> None:
+        try:
+            particle = int(self.particle_stride_var.get())
+        except (tk.TclError, TypeError, ValueError):
+            particle = self.particle_stride
+        try:
+            frame = int(self.frame_stride_var.get())
+        except (tk.TclError, TypeError, ValueError):
+            frame = self.frame_stride
+        particle = max(1, min(100, particle))
+        frame = max(1, min(50, frame))
+        changed = self.set_strides(particle, frame)
+        if not changed:
+            return
+        if self.stride_callback is not None:
+            try:
+                self.stride_callback(particle, frame)
+            except Exception:
+                pass
+        else:
+            self.refresh()
+
+    def _reset_view(self) -> None:
+        self.yaw_deg = 35.0
+        self.pitch_deg = 20.0
+        self.zoom = 1.0
+        self._draw_particles()
+
+    def _on_drag_start(self, event) -> None:
+        self._drag_origin = (event.x, event.y)
+
+    def _on_drag_move(self, event) -> None:
+        if self._drag_origin is None:
+            return
+        dx = event.x - self._drag_origin[0]
+        dy = event.y - self._drag_origin[1]
+        self._drag_origin = (event.x, event.y)
+        self.yaw_deg = (self.yaw_deg + dx * 0.5) % 360.0
+        self.pitch_deg = max(-80.0, min(80.0, self.pitch_deg + dy * 0.5))
+        self._draw_particles()
+
+    def _zoom_by(self, factor: float) -> None:
+        self.zoom = max(0.2, min(8.0, self.zoom * factor))
+        self._draw_particles()
+
+    def _on_mouse_wheel(self, event) -> None:
+        self._zoom_by(1.1 if event.delta > 0 else 1.0 / 1.1)
 
     def _on_scale(self, _value: str) -> None:
         self.current_frame = int(self.frame_var.get())
@@ -422,20 +587,37 @@ class OutputPreview:
         frame_index = min(self.current_frame, len(self.frames) - 1)
         if frame_index != self.loaded_frame:
             self.particles, self.particle_total = load_particle_sample(
-                self.frames[frame_index], PARTICLE_LIMIT)
+                self.frames[frame_index], PARTICLE_LIMIT, self.particle_stride)
             self.loaded_frame = frame_index
 
         radius = _to_float(self.config.get("drum_radius")) or 0.06
         frame_id = (self.frame_numbers[frame_index]
                     if frame_index < len(self.frame_numbers) else frame_index)
         summary_row = self.frame_lookup.get(frame_id)
-        if summary_row is None and 0 <= frame_id < len(self.crm_rows):
-            summary_row = self.crm_rows[frame_id]
+        if summary_row is None and 0 <= frame_index < len(self.crm_rows):
+            summary_row = self.crm_rows[frame_index]
         center_z = float(summary_row.get("drum_z_m", 0.0)) if summary_row else 0.0
         if center_z == 0.0:
             bed = _to_float(self.config.get("bed_height")) or 0.0
             center_z = bed + radius
 
+        mode = self.view_mode.get()
+        title = getattr(self, "particle_title", None)
+        if title is not None:
+            title.configure(text=("CRM particles (3D points)" if mode.startswith("3D")
+                                  else "CRM particle cross-section (Y-Z, points only)"))
+        if mode.startswith("3D"):
+            self._draw_particles_3d(canvas, palette, width, height,
+                                    summary_row, center_z, mode == "3D perspective")
+        else:
+            self._draw_particles_2d(canvas, palette, width, height,
+                                    summary_row, center_z)
+
+    def _draw_particles_2d(self, canvas: tk.Canvas, palette: dict[str, str],
+                           width: int, height: int,
+                           summary_row: dict[str, float] | None,
+                           center_z: float) -> None:
+        radius = _to_float(self.config.get("drum_radius")) or 0.06
         ys = [point[1] for point in self.particles] + [-radius, radius]
         zs = [point[2] for point in self.particles] + [
             center_z - radius, center_z + radius]
@@ -513,11 +695,165 @@ class OutputPreview:
             canvas.create_oval(sx - 1, sy - 1, sx + 1, sy + 1,
                                fill=color, outline="")
 
-        canvas.create_text(8, 8, anchor="nw",
-                           text=f"showing {len(self.particles)} of {self.particle_total} particles",
-                           fill=palette["text"], font="TkSmallCaptionFont")
+        canvas.create_text(
+            8, 8, anchor="nw",
+            text=f"showing {len(self.particles)} of {self.particle_total} particles | "
+                 f"p-stride {self.particle_stride}, f-stride {self.frame_stride}",
+            fill=palette["text"], font="TkSmallCaptionFont")
         canvas.create_text(width - 8, height - 8, anchor="se",
                            text="Y horizontal, Z vertical (m)",
+                           fill=palette["text"], font="TkSmallCaptionFont")
+
+    def _draw_particles_3d(self, canvas: tk.Canvas, palette: dict[str, str],
+                           width: int, height: int,
+                           summary_row: dict[str, float] | None,
+                           center_z: float, perspective: bool) -> None:
+        """Draw a bounded 3D point cloud using only Tk canvas primitives."""
+        radius = _to_float(self.config.get("drum_radius")) or 0.06
+        inner = _to_float(self.config.get("inner_radius")) or 0.0
+        half_len = _to_float(self.config.get("drum_half_length")) or radius / 2.0
+        axis = _axis_vector(str(self.config.get("spin_axis") or "X"))
+        if abs(axis[2]) < 0.9:
+            norm = math.hypot(axis[0], axis[1]) or 1.0
+            basis_u = (axis[1] / norm, -axis[0] / norm, 0.0)
+        else:
+            basis_u = (1.0, 0.0, 0.0)
+        basis_v = (
+            axis[1] * basis_u[2] - axis[2] * basis_u[1],
+            axis[2] * basis_u[0] - axis[0] * basis_u[2],
+            axis[0] * basis_u[1] - axis[1] * basis_u[0],
+        )
+
+        center = (0.0, 0.0, center_z)
+
+        def ring(r: float, end: float, segments: int = 32) -> list[tuple[float, float, float]]:
+            points = []
+            for i in range(segments + 1):
+                theta = 2.0 * math.pi * i / segments
+                cos_t, sin_t = math.cos(theta), math.sin(theta)
+                points.append((
+                    center[0] + axis[0] * end * half_len
+                    + basis_u[0] * cos_t * r + basis_v[0] * sin_t * r,
+                    center[1] + axis[1] * end * half_len
+                    + basis_u[1] * cos_t * r + basis_v[1] * sin_t * r,
+                    center[2] + axis[2] * end * half_len
+                    + basis_u[2] * cos_t * r + basis_v[2] * sin_t * r,
+                ))
+            return points
+
+        wire = ring(radius, -1.0) + ring(radius, 1.0)
+        if 0.0 < inner < radius:
+            wire += ring(inner, -1.0) + ring(inner, 1.0)
+        for theta in (0.0, math.pi / 2.0, math.pi, 3.0 * math.pi / 2.0):
+            for sign in (-1.0, 1.0):
+                offset = (basis_u[0] * math.cos(theta) + basis_v[0] * math.sin(theta),
+                          basis_u[1] * math.cos(theta) + basis_v[1] * math.sin(theta),
+                          basis_u[2] * math.cos(theta) + basis_v[2] * math.sin(theta))
+                for end in (-1.0, 1.0):
+                    wire.append((
+                        center[0] + axis[0] * end * half_len + offset[0] * radius,
+                        center[1] + axis[1] * end * half_len + offset[1] * radius,
+                        center[2] + axis[2] * end * half_len + offset[2] * radius,
+                    ))
+
+        all_points = [(p[0], p[1], p[2]) for p in self.particles] + wire + [center]
+        min_x, max_x = min(p[0] for p in all_points), max(p[0] for p in all_points)
+        min_y, max_y = min(p[1] for p in all_points), max(p[1] for p in all_points)
+        min_z, max_z = min(p[2] for p in all_points), max(p[2] for p in all_points)
+        span = max(max_x - min_x, max_y - min_y, max_z - min_z, 4.0 * radius)
+        view_center = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0,
+                       (min_z + max_z) / 2.0)
+        yaw = math.radians(self.yaw_deg)
+        pitch = math.radians(self.pitch_deg)
+        focal = 3.0 * span if perspective else None
+
+        def project(point: tuple[float, float, float]):
+            return _project_point(point, view_center, yaw, pitch, focal)
+
+        projected = [project((p[0], p[1], p[2])) for p in self.particles]
+        projected_wire = [project(p) for p in wire]
+        projected_axes = [project((view_center[0] + d[0] * span * 0.35,
+                                   view_center[1] + d[1] * span * 0.35,
+                                   view_center[2] + d[2] * span * 0.35))
+                          for d in ((1, 0, 0), (0, 1, 0), (0, 0, 1))]
+        projected_axes += [project((view_center[0] - d[0] * span * 0.35,
+                                    view_center[1] - d[1] * span * 0.35,
+                                    view_center[2] - d[2] * span * 0.35))
+                           for d in ((1, 0, 0), (0, 1, 0), (0, 0, 1))]
+
+        values = [p[0] for p in projected + projected_wire + projected_axes]
+        values_y = [p[1] for p in projected + projected_wire + projected_axes]
+        sx_min, sx_max = min(values), max(values)
+        sy_min, sy_max = min(values_y), max(values_y)
+        sx_span, sy_span = max(1e-12, sx_max - sx_min), max(1e-12, sy_max - sy_min)
+        pad_x, pad_y = 30, 24
+        plot_w, plot_h = max(1, width - 2 * pad_x), max(1, height - 2 * pad_y)
+        scale = min(plot_w / sx_span, plot_h / sy_span) * self.zoom
+        origin_x = width / 2.0 - (sx_min + sx_max) / 2.0 * scale
+        origin_y = height / 2.0 + (sy_min + sy_max) / 2.0 * scale
+
+        def screen(point) -> tuple[float, float]:
+            return origin_x + point[0] * scale, origin_y - point[1] * scale
+
+        # Axis cross at the view centre.
+        for index, color in enumerate(("#EF5350", "#81C784", "#64B5F6")):
+            x0, y0 = screen(projected_axes[index])
+            x1, y1 = screen(projected_axes[index + 3])
+            canvas.create_line(x0, y0, x1, y1, fill=color, width=1)
+
+        # Drum envelope: outer rings solid, cavity rings dashed.
+        inner_offset = 66 if 0.0 < inner < radius else 0
+        for start, count, color, dash in (
+            (0, 33, "#FFD54F", None),
+            (33, 33, "#FFD54F", None),
+            (66, 33, "#90A4AE", (3, 2)),
+            (99, 33, "#90A4AE", (3, 2)),
+        ):
+            if inner_offset == 0 and start >= 66:
+                continue
+            if start + count > len(projected_wire):
+                continue
+            coords: list[float] = []
+            for point in projected_wire[start:start + count]:
+                sx, sy = screen(point)
+                coords.extend((sx, sy))
+            options = {"fill": color, "width": 1}
+            if dash:
+                options["dash"] = dash
+            canvas.create_line(*coords, **options)
+
+        for start in range(66 + inner_offset, len(projected_wire) - 1, 2):
+            x0, y0 = screen(projected_wire[start])
+            x1, y1 = screen(projected_wire[start + 1])
+            canvas.create_line(x0, y0, x1, y1, fill="#FFD54F", width=1)
+
+        depths = [point[2] for point in projected]
+        depth_min, depth_max = (min(depths), max(depths)) if depths else (0.0, 1.0)
+        depth_span = max(1e-12, depth_max - depth_min)
+        ordered = sorted(zip(self.particles, projected),
+                         key=lambda pair: pair[1][2], reverse=True)
+        for particle, point in ordered:
+            x, y, z, inside, excavated = particle
+            del x, y, z
+            color = PARTICLE_COLORS["excavated"] if excavated else (
+                PARTICLE_COLORS["inside"] if inside else PARTICLE_COLORS["soil"])
+            shade = (point[2] - depth_min) / depth_span
+            sx, sy = screen(point)
+            dot = 2 if point[3] > 1.02 else 1
+            canvas.create_oval(sx - dot, sy - dot, sx + dot, sy + dot,
+                               fill=_shade(color, palette["field"], 0.45 * shade),
+                               outline="")
+
+        spin = _to_float(summary_row.get("spin_deg") if summary_row else None) or 0.0
+        caption = (f"showing {len(self.particles)} of {self.particle_total} particles | "
+                   f"yaw {self.yaw_deg:.0f}°, pitch {self.pitch_deg:.0f}° | "
+                   f"spin {spin:.0f}° | p-stride {self.particle_stride}, "
+                   f"f-stride {self.frame_stride}")
+        canvas.create_text(8, 8, anchor="nw", text=caption,
+                           fill=palette["text"], font="TkSmallCaptionFont")
+        canvas.create_text(width - 8, height - 8, anchor="se",
+                           text=("3D perspective" if perspective else "3D orthographic")
+                                + " | drag to orbit, wheel to zoom",
                            fill=palette["text"], font="TkSmallCaptionFont")
 
     def _draw_timeline(

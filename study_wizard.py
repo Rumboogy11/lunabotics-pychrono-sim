@@ -439,13 +439,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-export-vtk", action="store_true",
                    help="do not export ParaView PVD/VTK time series")
     p.add_argument("--fea-export-vtk", action="store_true",
-                   help="export per-frame FEA stress/deformation VTU during one-way FEA (needed for ParaView stresses)")
+                   help="deprecated no-op: FEA VTU deformation export is disabled")
     p.add_argument("--no-fea-export-vtk", action="store_true",
-                   help="do not export per-frame FEA VTU files")
+                   help="deprecated no-op: FEA VTU deformation export is disabled")
     p.add_argument("--vtk-stride", type=int, default=None,
-                   help="export every Nth recorded FEA frame to VTU (default: 1)")
+                   help="deprecated no-op: FEA VTU deformation export is disabled")
     p.add_argument("--paraview-stride", type=int, default=None,
                    help="export every Nth CRM/excavator frame to ParaView (default: 1)")
+    p.add_argument("--paraview-particle-stride", type=int, default=None,
+                   help="export every Nth CRM particle frame independently "
+                        "(default: same as --paraview-stride; 0 also means same)")
     p.add_argument("--paraview-particle-render-stride", type=int, default=None,
                    help="render only every Nth particle in each ParaView frame "
                         "(default: 1 = all particles)")
@@ -1074,22 +1077,10 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             detail="Write per-frame particle positions from CRM (useful for visualization, uses disk space).",
         )
 
-    if args.fea_export_vtk:
-        fea_export_vtk = True
-    elif args.no_fea_export_vtk:
-        fea_export_vtk = False
-    else:
-        fea_export_vtk = prompt_bool(
-            "Export per-frame FEA stress/deformation VTK during one-way FEA?", True,
-            detail="Writes fea/vtk/frame_*.vtu and fea.pvd so ParaView can show von Mises stress and deformation.",
-        )
-    if fea_export_vtk:
-        fea_vtk_stride = args.vtk_stride if args.vtk_stride is not None else prompt_int(
-            "FEA VTK export stride (every N recorded frames)", 1, minimum=1,
-            detail="Use >1 to reduce disk/time for long runs while keeping 3D stress snapshots.",
-        )
-    else:
-        fea_vtk_stride = args.vtk_stride if args.vtk_stride is not None else 1
+    # FEA VTU deformation export was a visualization-only hotspot and is now
+    # disabled in the one-way driver.  Keep the config keys for compatibility.
+    fea_export_vtk = False
+    fea_vtk_stride = 1
 
     if args.export_vtk:
         export_vtk = True
@@ -1105,6 +1096,13 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             "ParaView export stride (every N frames)", 1, minimum=1,
             detail="Use >1 to reduce export size/time; all series stay time-aligned.",
         )
+        paraview_particle_stride = (
+            args.paraview_particle_stride
+            if args.paraview_particle_stride is not None else prompt_int(
+                "ParaView particle frame stride (0 = same as general)", 0, minimum=0,
+                detail="Use >1 to sample the much larger particle series independently.",
+            )
+        )
         paraview_particle_render_stride = (
             args.paraview_particle_render_stride
             if args.paraview_particle_render_stride is not None else prompt_int(
@@ -1114,6 +1112,9 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         )
     else:
         paraview_stride = args.paraview_stride if args.paraview_stride is not None else 1
+        paraview_particle_stride = (
+            args.paraview_particle_stride if args.paraview_particle_stride is not None else 0
+        )
         paraview_particle_render_stride = (
             args.paraview_particle_render_stride if args.paraview_particle_render_stride is not None else 1
         )
@@ -1134,8 +1135,10 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             f"est. particles ~{estimate_sph_particles(drum_radius=drum_radius, drum_half_length=drum_half_length, bed_height=bed_height, spacing=spacing, spin_axis=spin_axis, bed_padding=bed_padding):,}",
             f"Bed:          height={bed_height:g} m, padding={bed_padding:g} R, "
             f"box={','.join(f'{v:g}' for v in active_box)} m, descent={descent_speed:g} m/s",
-            f"FEA:          dt={fea_dt:g} s, solver={solver}, threads={num_threads}, fea-vtk={fea_export_vtk}",
+            f"FEA:          dt={fea_dt:g} s, solver={solver}, threads={num_threads} "
+            f"(VTU deformation export disabled)",
             f"ParaView:     export={export_vtk} (frame stride {paraview_stride}, "
+            f"particle frame stride {paraview_particle_stride or paraview_stride}, "
             f"particle render stride {paraview_particle_render_stride})",
         ]
         print("\n" + "\n".join(summary) + "\n")
@@ -1206,6 +1209,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "fea_vtk_stride": int(fea_vtk_stride),
         "export_vtk": export_vtk,
         "paraview_stride": int(paraview_stride),
+        "paraview_particle_stride": max(0, int(paraview_particle_stride)),
         "paraview_particle_render_stride": max(1, int(paraview_particle_render_stride)),
         "open_results": args.open_results,
         "open_paraview": args.open_paraview,
@@ -1301,9 +1305,8 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     }
     for key, value in cfg["pla"].items():
         fea_cmd.extend([pla_flags[key], f"{value:g}"])
-    if cfg.get("fea_export_vtk", True):
-        fea_cmd.extend(["--export-vtk", "--vtk-stride", str(max(1, int(cfg.get("fea_vtk_stride", 1)))),
-                        "--vtk-dir", str(fea_dir / "vtk")])
+    # FEA VTU deformation export is intentionally disabled; the driver still
+    # writes every scalar field used by the GUI preview and result plots.
     steps.append({"name": "one-way-FEA", "command": fea_cmd})
 
     if cfg.get("export_vtk", True):
@@ -1312,6 +1315,7 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
             str(ROOT / "export_study_vtk.py"),
             "--study-dir", str(out_dir),
             "--stride", str(max(1, int(cfg.get("paraview_stride", 1)))),
+            "--particle-stride", str(max(0, int(cfg.get("paraview_particle_stride", 0)))),
             "--particle-render-stride", str(max(1, int(cfg.get("paraview_particle_render_stride", 1)))),
             "--workers", str(max(1, int(cfg.get("export_workers", 1)))),
         ]

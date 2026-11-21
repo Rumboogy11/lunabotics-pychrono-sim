@@ -6,7 +6,7 @@ Recommended full ParaView GUI (pass the export dir via environment variable):
 
 pvpython render window (stays open until the render window is closed):
     pvpython /path/to/view_study_paraview.py /path/to/study/paraview
-    # add the validated FEA stress/deformation overlay when available:
+    # legacy FEA stress/deformation overlay, only if an older complete VTK export exists:
     pvpython /path/to/view_study_paraview.py /path/to/study/paraview --with-fea
 
 By default this loads the *non-FEA* CRM animation, as separate pipeline sources
@@ -17,10 +17,13 @@ so each can have its own render settings:
 The equivalent combined collection is crm_animation.pvd (also written as the
 backwards-compatible combined.pvd); neither contains FEA data.
 
-FEA is opt-in via --with-fea/--fea-only and is loaded only when its PVD is a
-valid, complete time series according to export_manifest.json (or, without a
-manifest, after local validation).  A one-frame/t=0 FEA PVD from a cancelled run
-is ignored, so it cannot obscure or freeze the excavation animation.
+The one-way FEA driver no longer writes per-frame deformation VTU files because
+that visualization export dominated FEA runtime.  Scalar FEA histories are in
+fea/summary.csv and in the GUI's Output Preview.  For compatibility, an older,
+complete fea.pvd can still be loaded with --with-fea/--fea-only when it passes
+validation against export_manifest.json (or local validation without a manifest).
+A one-frame/t=0 FEA PVD from a cancelled run is ignored, so it cannot obscure or
+freeze the excavation animation.
 
 If no argument is given, the script tries ./paraview in the current directory.
 
@@ -666,11 +669,11 @@ def main():
         SetActiveSource(disp_source)
         sources_shown.append(('fea', disp_source))
     elif want_fea:
-        print(f"  FEA: not loaded ({fea_status}). To view 3D stress/deformation, rerun one-way FEA "
-              "to completion with --export-vtk, then re-run export_study_vtk.py.")
+        print(f"  FEA: not loaded ({fea_status}). One-way FEA deformation VTU export is disabled; "
+              "scalar FEA histories are in fea/summary.csv and the GUI Output Preview.")
     elif not args.no_fea:
-        print("  FEA: excluded from the default non-FEA series. Use --with-fea to overlay a "
-              "validated FEA export (requires a complete FEA VTK run).")
+        print("  FEA: excluded from the default non-FEA series. Use --with-fea only to overlay a "
+              "legacy, validated FEA VTK export.")
 
     if not sources_shown:
         print("[view_study_paraview] nothing loaded. Expected crm_particles.pvd/excavator.pvd/fea.pvd in", export_dir)
@@ -725,7 +728,7 @@ def main():
     elif want_fea:
         print("  - FEA: no valid series loaded; the non-FEA animation remains available without FEA.")
     else:
-        print("  - FEA: excluded by default. Use --with-fea after a complete FEA VTK run and re-export.")
+        print("  - FEA: excluded by default. --with-fea only applies to legacy validated VTK exports.")
     print("  - Use time controls to animate; if particles obscure geometry, adjust opacity/visibility per source.")
 
     # pvpython exits as soon as this script returns unless an interactive render
