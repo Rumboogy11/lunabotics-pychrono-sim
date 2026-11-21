@@ -414,6 +414,11 @@ def measured_geometry_for_cfg(cfg: dict[str, Any]) -> dict[str, float | int] | N
     )
 
 
+def is_force_descent(cfg: dict[str, Any]) -> bool:
+    """Force-mode studies have no analytic descent time to validate."""
+    return str(cfg.get("descent_mode", "kinematic")).strip().lower() == "force"
+
+
 def validate_study_geometry(cfg: dict[str, Any]) -> list[str]:
     """Reject mixed geometry fields that make fill detection impossible.
 
@@ -433,6 +438,17 @@ def validate_study_geometry(cfg: dict[str, Any]) -> list[str]:
         duration = float(cfg["duration"])
     except (KeyError, TypeError, ValueError):
         return []
+
+    if is_force_descent(cfg):
+        try:
+            force_n = float(cfg.get("descent_force_n", 1.0))
+            ramp_s = float(cfg.get("descent_force_ramp_s", 0.0))
+        except (TypeError, ValueError):
+            raise StudyConfigError("force descent needs numeric descent_force_n and descent_force_ramp_s")
+        if force_n <= 0.0:
+            raise StudyConfigError("descent_force_n must be positive")
+        if ramp_s < 0.0:
+            raise StudyConfigError("descent_force_ramp_s cannot be negative")
 
     measured = measured_geometry_for_cfg(cfg)
     if measured:
@@ -463,7 +479,7 @@ def validate_study_geometry(cfg: dict[str, Any]) -> list[str]:
         )
 
     warnings: list[str] = []
-    if descent_speed > 0.0:
+    if descent_speed > 0.0 and not is_force_descent(cfg):
         full_descent = bed_height / descent_speed
         if duration < full_descent:
             warnings.append(
@@ -528,7 +544,7 @@ def auto_correct_study_geometry(cfg: dict[str, Any]) -> list[str]:
     except (KeyError, TypeError, ValueError):
         descent_speed = 0.0
         bed_height = duration = 0.0
-    if descent_speed > 0.0:
+    if descent_speed > 0.0 and not is_force_descent(cfg):
         needed = bed_height / descent_speed
         if duration < needed:
             corrected = max(duration, float(defaults["lowering_duration"]), needed * 1.05)
@@ -638,7 +654,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--active-box", default=None, help="SPH domain size X,Y,Z in metres")
     p.add_argument("--settle-time", type=float, default=None,
                    help="bed settle time before spin/descent (default: 0.001 s)")
-    p.add_argument("--descent-speed", type=float, default=None, help="drum descent speed in m/s")
+    p.add_argument("--descent-speed", type=float, default=None,
+                   help="drum descent speed in m/s for kinematic mode")
+    p.add_argument("--descent-mode", choices=("kinematic", "force"), default=None,
+                   help="descent control mode (default: kinematic)")
+    p.add_argument("--descent-force", type=float, default=None,
+                   help="downward actuator force in N for --descent-mode force (default: 1.0)")
+    p.add_argument("--descent-force-ramp", type=float, default=None,
+                   help="linear force ramp duration in s for force descent (default: 0)")
     p.add_argument("--omega", type=float, default=None, help="drum spin rate magnitude in rad/s")
     p.add_argument("--reverse-spin", action=argparse.BooleanOptionalAction, default=None,
                    help="reverse drum spin direction (use --no-reverse-spin to force forward)")
@@ -1241,7 +1264,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
     default_duration = max(20.0, float(geo["lowering_duration"]))
     duration = args.duration if args.duration is not None else prompt_float(
         "CRM duration (s)", default_duration, minimum=1e-4,
-        detail="Total rigid-CRM simulation time. For a full excavation use ~bed_height/descent_speed.",
+        detail="Total rigid-CRM simulation time. In kinematic mode a full excavation takes about bed_height/descent_speed; force mode has a load-dependent duration.",
     )
     fea_duration = args.fea_duration if args.fea_duration is not None else prompt_float(
         "FEA duration (s; Enter = same as CRM)", duration, minimum=1e-4,
@@ -1376,9 +1399,24 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         detail="Time to let the bed settle before excavation motion begins. Longer settling can "
                "reduce the first-bite pressure transient that flings soil upward.",
     )
+    descent_mode = args.descent_mode if args.descent_mode is not None else prompt_choice(
+        "Descent mode", ("kinematic", "force"), "kinematic",
+        detail="Kinematic prescribes a constant lowering speed. Force mode applies a downward "
+               "actuator after settling and holds the final target; the FEA replay follows the "
+               "recorded trajectory.",
+    )
     descent_speed = args.descent_speed if args.descent_speed is not None else prompt_float(
-        "Descent speed (m/s)", float(geo["descent_speed"]), minimum=0.0,
-        detail="Vertical lowering speed of the drum into the bed (0 keeps it at constant height).",
+        "Descent speed (m/s; kinematic mode)", float(geo["descent_speed"]), minimum=0.0,
+        detail="Vertical lowering speed for kinematic mode. Ignored by force mode except for "
+               "duration guidance.",
+    )
+    descent_force_n = args.descent_force if args.descent_force is not None else prompt_float(
+        "Descent actuator force (N; force mode)", 1.0, minimum=1e-9,
+        detail="Downward force applied to the drum after settling in force mode.",
+    )
+    descent_force_ramp_s = args.descent_force_ramp if args.descent_force_ramp is not None else prompt_float(
+        "Descent force ramp (s; force mode)", 0.0, minimum=0.0,
+        detail="Linear ramp from zero to the actuator force in force mode.",
     )
     omega_mag = args.omega if args.omega is not None else prompt_float(
         "Spin rate magnitude (rad/s)", 3.14, minimum=0.0,
@@ -1566,7 +1604,12 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             f"SPH:          spacing={spacing:g} m, dt={dt_text}, "
             f"est. particles ~{estimate_sph_particles(drum_radius=drum_radius, drum_half_length=drum_half_length, bed_height=bed_height, spacing=spacing, spin_axis=spin_axis, bed_padding=bed_padding):,}",
             f"Bed:          height={bed_height:g} m, padding={bed_padding:g} R, "
-            f"box={','.join(f'{v:g}' for v in active_box)} m, descent={descent_speed:g} m/s",
+            f"box={','.join(f'{v:g}' for v in active_box)} m, "
+            + (
+                f"descent=force {descent_force_n:g} N (ramp {descent_force_ramp_s:g} s)"
+                if descent_mode == "force"
+                else f"descent={descent_speed:g} m/s"
+            ),
             f"FEA:          dt={fea_dt:g} s, solver={solver}, threads={num_threads} "
             f"(3D stress VTU: {'stride ' + str(fea_vtk_stride) if fea_export_vtk else 'off'})",
             f"ParaView:     export={export_vtk} (frame stride {paraview_stride}, "
@@ -1629,7 +1672,10 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "bed_padding": bed_padding,
         "active_box": active_box,
         "settle_time": settle_time,
+        "descent_mode": descent_mode,
         "descent_speed": descent_speed,
+        "descent_force_n": float(descent_force_n),
+        "descent_force_ramp_s": float(descent_force_ramp_s),
         "omega": omega,
         "reverse_spin": bool(reverse_spin),
         "spin_axis": spin_axis,
@@ -1704,6 +1750,12 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         crm_cmd.extend(["--fill-detector-obj", str(cfg["fill_detector_obj"])])
     if cfg["save_particles"]:
         crm_cmd.append("--save-particles")
+    if is_force_descent(cfg):
+        crm_cmd.extend([
+            "--descent-mode", "force",
+            "--descent-force", f"{float(cfg.get('descent_force_n', 1.0)):g}",
+            "--descent-force-ramp", f"{float(cfg.get('descent_force_ramp_s', 0.0)):g}",
+        ])
     soil_flags = {
         "density": "--density",
         "youngs_modulus": "--youngs-modulus",
@@ -1741,6 +1793,12 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         "--raw-stress-every", str(int(cfg["raw_stress_every"])),
         "--output-dir", str(fea_dir),
     ]
+    if is_force_descent(cfg):
+        fea_cmd.extend([
+            "--descent-mode", "force",
+            "--descent-force", f"{float(cfg.get('descent_force_n', 1.0)):g}",
+            "--descent-force-ramp", f"{float(cfg.get('descent_force_ramp_s', 0.0)):g}",
+        ])
     pla_flags = {
         "youngs_modulus": "--pla-youngs-modulus",
         "poisson_ratio": "--pla-poisson-ratio",

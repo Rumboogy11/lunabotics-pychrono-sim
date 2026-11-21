@@ -106,6 +106,13 @@ FEA_METRIC_FIELDS = rigid.METRIC_FIELDS + [
 ]
 
 
+def fea_metric_fields(run) -> list[str]:
+    """FEA summary columns; force descent adds the shared actuator telemetry."""
+    return FEA_METRIC_FIELDS + (
+        rigid.FORCE_METRIC_FIELDS if run.descent_mode == "force" else []
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = rigid.build_parser()
     p.description = __doc__
@@ -316,6 +323,40 @@ def build_descent_position_function(chrono, motion, t_end: float):
     return seq
 
 
+def build_recorded_position_function(chrono, times, drum_z, z0: float, t_end: float):
+    """Position function following a recorded (force-driven CRM) Z trajectory."""
+    seq = chrono.ChFunctionSequence()
+    if hasattr(seq, "SetClamped"):
+        seq.SetClamped(True)
+    segments = 0
+    first_t = max(0.0, float(times[0]))
+    if first_t > 0.0:
+        seq.InsertFunct(chrono.ChFunctionConst(float(drum_z[0]) - z0), first_t, 1.0, False)
+        segments += 1
+    for i in range(len(times) - 1):
+        t0, t1 = float(times[i]), float(times[i + 1])
+        dt = t1 - t0
+        if dt <= 1.0e-12:
+            continue
+        z0_i, z1_i = float(drum_z[i]) - z0, float(drum_z[i + 1]) - z0
+        if abs(z1_i - z0_i) <= 1.0e-15:
+            seq.InsertFunct(chrono.ChFunctionConst(z0_i), dt, 1.0, False)
+        else:
+            seq.InsertFunct(
+                chrono.ChFunctionRamp(z0_i, (z1_i - z0_i) / dt), dt, 1.0, False
+            )
+        segments += 1
+    last_t = float(times[-1])
+    if t_end > last_t:
+        seq.InsertFunct(
+            chrono.ChFunctionConst(float(drum_z[-1]) - z0), t_end - last_t, 1.0, True
+        )
+        segments += 1
+    if segments == 0:  # pragma: no cover - degenerate history
+        seq.InsertFunct(chrono.ChFunctionConst(float(drum_z[-1]) - z0), 1.0, False)
+    return seq
+
+
 def build_spin_speed_function(chrono, motion, ramp_time: float, t_end: float):
     """Angular speed function about the spindle axis (rad/s).
 
@@ -346,24 +387,47 @@ def build_spin_speed_function(chrono, motion, ramp_time: float, t_end: float):
     return seq
 
 
-def configure_spindle_drive(chrono, system, motion, drive, ramp_time: float, t_end: float):
-    """Attach motor constraints that prescribe spindle descent and spin."""
+def configure_spindle_drive(chrono, system, motion, drive, ramp_time: float, t_end: float,
+                            *, run=None, position_function=None, descent_mode: str | None = None):
+    """Attach spindle descent and spin motors.
+
+    Kinematic mode keeps the original position motor.  Force mode uses a
+    ``ChLinkMotorLinearForce`` on the slider, with a hold motor for the settle
+    interval and the final target, while the spin motor remains prescribed.
+    ``position_function`` lets the one-way replay follow a recorded trajectory.
+    """
     ground = drive["ground"]
     slider = drive["slider"]
     spindle = drive["spindle"]
     z0 = motion.drum_center_z0
     q0 = rigid.initial_chrono_quat(chrono, motion)
+    mode = descent_mode if descent_mode is not None else getattr(run, "descent_mode", "kinematic")
 
-    # Linear motor: slider translates along global Z relative to ground.
-    z_frame = chrono.ChFramed(chrono.ChVector3d(0.0, 0.0, z0), chrono.ChQuaterniond(1.0, 0.0, 0.0, 0.0))
-    lin = chrono.ChLinkMotorLinearPosition()
-    # Chrono measures the motor coordinate from body B (guide) to body A
-    # (slider).  Keeping the slider first makes a negative Z position function
-    # command the intended downward descent.
-    lin.Initialize(slider, ground, z_frame)
-    lin.SetGuideConstraint(chrono.ChLinkMotorLinearPosition.GuideConstraint_PRISMATIC)
-    lin.SetMotionFunction(build_descent_position_function(chrono, motion, max(t_end, motion.t_max, 1.0)))
-    system.Add(lin)
+    if mode == "force":
+        force_drive = rigid.create_force_descent(
+            chrono, system, slider, motion, run, t_end,
+            prismatic=True, ground=ground,
+        )
+        # Spindle Z is the tracked telemetry/one-way quantity; clamping both
+        # bodies keeps it from being recorded below the target after a step.
+        force_drive["clamp_bodies"].append(spindle)
+        lin = force_drive["force_motor"]
+        drive["descent"] = force_drive
+    else:
+        # Linear motor: slider translates along global Z relative to ground.
+        z_frame = chrono.ChFramed(chrono.ChVector3d(0.0, 0.0, z0), chrono.ChQuaterniond(1.0, 0.0, 0.0, 0.0))
+        lin = chrono.ChLinkMotorLinearPosition()
+        # Chrono measures the motor coordinate from body B (guide) to body A
+        # (slider).  Keeping the slider first makes a negative Z position function
+        # command the intended downward descent.
+        lin.Initialize(slider, ground, z_frame)
+        lin.SetGuideConstraint(chrono.ChLinkMotorLinearPosition.GuideConstraint_PRISMATIC)
+        lin.SetMotionFunction(
+            position_function
+            if position_function is not None
+            else build_descent_position_function(chrono, motion, max(t_end, motion.t_max, 1.0))
+        )
+        system.Add(lin)
 
     # Rotation motor: spindle rotates about configured axis relative to slider.
     # Chrono measures body1 relative to body2, so put the spindle first.  The
@@ -623,7 +687,8 @@ def spin_ramp_angle(motion, t: float, ramp_time: float) -> float:
     return 0.5 * motion.drum_omega * elapsed * elapsed / ramp_time
 
 
-def set_solid_initial_velocity(chrono, nodes, motion, t0: float = 0.0, ramp_time: float = 0.0) -> None:
+def set_solid_initial_velocity(chrono, nodes, motion, t0: float = 0.0, ramp_time: float = 0.0,
+                               *, descent_mode: str = "kinematic") -> None:
     """Start every solid node consistent with the prescribed spindle motion.
 
     Hub nodes are constrained to the spindle; initializing free nodes with the
@@ -637,7 +702,7 @@ def set_solid_initial_velocity(chrono, nodes, motion, t0: float = 0.0, ramp_time
         "Z": (0.0, 0.0, omega),
     }[axis]
     center = (0.0, 0.0, motion.drum_z(t0))
-    moving = t0 >= motion.settle_time and center[2] > motion.z_target
+    moving = descent_mode == "kinematic" and t0 >= motion.settle_time and center[2] > motion.z_target
     descent = (0.0, 0.0, -motion.lower_speed if moving else 0.0)
 
     for node in nodes:
@@ -852,8 +917,14 @@ def main() -> int:
                 f"FEA mesh: {node_path.name} / {ele_path.name}",
                 f"drum: R={motion.drum_radius:g} m, half-length={motion.drum_half_length:g} m, "
                 f"spin={motion.drum_spin_axis.upper()}, omega={run.omega:g} rad/s",
-                f"descent: {run.descent_speed:g} m/s, z0={motion.drum_center_z0:.4f} m -> "
-                f"{motion.z_target:.4f} m, bed surface z={surface_z:.4f} m",
+                (
+                    f"descent: force {run.descent_force_n:g} N downward "
+                    f"(ramp={run.descent_force_ramp_s:g} s), z0={motion.drum_center_z0:.4f} m -> "
+                    f"hold at {motion.z_target:.4f} m"
+                    if run.descent_mode == "force"
+                    else f"descent: {run.descent_speed:g} m/s, z0={motion.drum_center_z0:.4f} m -> "
+                    f"{motion.z_target:.4f} m"
+                ) + f", bed surface z={surface_z:.4f} m",
                 f"active SPH box: {run.active_box}, capacity={capacity_volume:.6g} m^3 "
                 f"({capacity_volume * soil.density:.4f} kg)",
                 f"spin-up ramp: {args.spin_ramp_time:g} s",
@@ -925,12 +996,17 @@ def main() -> int:
 
     drive = create_spindle(chrono, system, motion)
     spindle = drive["spindle"]
-    configure_spindle_drive(chrono, system, motion, drive, args.spin_ramp_time, run.duration)
+    configure_spindle_drive(
+        chrono, system, motion, drive, args.spin_ramp_time, run.duration, run=run
+    )
     mesh, nodes, hub_nodes, _material = load_fea_drum(
         chrono, fea, system, motion, node_path, ele_path, pla
     )
     if not args.no_initial_solid_velocity:
-        set_solid_initial_velocity(chrono, nodes, motion, 0.0, args.spin_ramp_time)
+        set_solid_initial_velocity(
+            chrono, nodes, motion, 0.0, args.spin_ramp_time,
+            descent_mode=run.descent_mode,
+        )
     else:
         # Hub nodes are constrained to the spindle; keep their state consistent.
         for node in hub_nodes:
@@ -994,7 +1070,7 @@ def main() -> int:
             args.solver_tolerance, args.timestepper, args.num_threads,
         )
         state_file = (out_dir / "summary.csv").open("w", newline="", encoding="utf-8")
-        writer = csv.DictWriter(state_file, fieldnames=FEA_METRIC_FIELDS)
+        writer = csv.DictWriter(state_file, fieldnames=fea_metric_fields(run))
         writer.writeheader()
 
     peak_fill = 0.0
@@ -1003,6 +1079,26 @@ def main() -> int:
     frame = 0
     wall_start = time.perf_counter()
     next_progress = 0.0
+
+    def descent_telemetry(t: float) -> dict:
+        if run.descent_mode != "force":
+            return {}
+        drive_state = drive["descent"]
+        state = drive_state["state"]
+        actuator = (
+            abs(float(drive_state["force_motor"].GetMotorForce()))
+            if state == "descend" else 0.0
+        )
+        vertical = (
+            rigid.vec_parts(spindle.GetPosDt())[2]
+            if hasattr(spindle, "GetPosDt") else 0.0
+        )
+        return {
+            "descent_mode": run.descent_mode,
+            "descent_state": state,
+            "actuator_force_n": f"{actuator:.6g}",
+            "vertical_speed_m_s": f"{vertical:.6g}",
+        }
 
     def record(t: float, axis_torque: float, reaction_force: float) -> None:
         nonlocal frame, peak_fill, last_row
@@ -1048,6 +1144,7 @@ def main() -> int:
             "max_nodal_displacement_m": f"{max_disp:.6g}",
             "max_von_mises_pa": f"{max_stress:.6g}",
         }
+        row.update(descent_telemetry(t))
         if writer is not None:
             writer.writerow(row)
             state_file.flush()
@@ -1073,6 +1170,10 @@ def main() -> int:
             )
 
     axis_torque, reaction_force = spindle_reaction(links, spindle, motion)
+    if run.descent_mode == "force":
+        rigid.update_force_descent(
+            drive["descent"], motion, run, 0.0, rigid.vec_parts(spindle.GetPos())[2]
+        )
     record(0.0, axis_torque, reaction_force)
     next_output = 1.0 / run.fps
 
@@ -1080,9 +1181,20 @@ def main() -> int:
     try:
         while t < run.duration - 1.0e-12:
             h = min(run.dt, run.duration - t)
+            if run.descent_mode == "force":
+                z = rigid.vec_parts(spindle.GetPos())[2]
+                vz = (rigid.vec_parts(spindle.GetPosDt())[2]
+                      if hasattr(spindle, "GetPosDt") else 0.0)
+                rigid.update_force_descent(
+                    drive["descent"], motion, run, t, z, velocity=vz, dt=h
+                )
             terrain.Synchronize(t)
             terrain.Advance(h)
             t += h
+            if run.descent_mode == "force":
+                rigid.update_force_descent(
+                    drive["descent"], motion, run, t, rigid.vec_parts(spindle.GetPos())[2]
+                )
 
             if args.debug_fea:
                 disp = max_nodal_displacement(nodes)

@@ -16,7 +16,7 @@ Fill/cavity metrics require **full particle containment**, not just a centre-ins
 
 For a geometry-specific cavity, pass `--fill-detector-obj path/to/detector.obj` (generated from a second STEP file by `../study_wizard.py --fill-detector-step` or the GUI's **Fill-detector STEP** field). The OBJ must be watertight, metre-scale, and in the same drum-local frame as the CRM contact mesh. Containment then uses exact ray/parity crossings against that closed surface, with the same `rp` boundary margin. It replaces only the analytic retained-particle predicate: capacity, excavated/lifted tests, SPH/BCE bookkeeping, and particle-position writers are untouched.
 
-Generated studies keep `--drum-radius`/`--drum-half-length` tied to the CAD or mesh actually loaded. With auto geometry enabled (the default), an edited outer dimension is restored to the measured value, an impossible cavity radius is reset, and a duration shorter than the full descent is extended; the corrections are recorded in `study_config.json`. Disable auto geometry only when using a mesh that intentionally matches a custom radius. The containment predicates and SPH/BCE counts are not changed by this check.
+Generated studies keep `--drum-radius`/`--drum-half-length` tied to the CAD or mesh actually loaded. With auto geometry enabled (the default), an edited outer dimension is restored to the measured value, an impossible cavity radius is reset, and a kinematic duration shorter than the full descent is extended (force mode has no analytic descent time, so that correction is skipped); the corrections are recorded in `study_config.json`. Disable auto geometry only when using a mesh that intentionally matches a custom radius. The containment predicates and SPH/BCE counts are not changed by this check.
 
 ## Requirements
 
@@ -67,6 +67,11 @@ PYTHON="$CHRONO_ENV/bin/python" ./run.sh \
 PYTHON="$CHRONO_ENV/bin/python" ./run.sh \
   --mesh-file ../geometry/LunarDrumScrew_spiked.obj \
   --output-dir Output_CRM_Spiked
+
+# Opt-in force-driven descent (kinematic is the default)
+PYTHON="$CHRONO_ENV/bin/python" ./run.sh \
+  --descent-mode force --descent-force 1.0 --descent-force-ramp 0.2 \
+  --loads-file Output_Force/crm/soil_loads.csv --output-dir Output_Force/crm
 ```
 
 ### One-way CRM → FEA (structural screening)
@@ -83,7 +88,7 @@ PYTHON="$CHRONO_ENV/bin/python" ./run.sh \
   --output-dir Output_OneWay/fea
 ```
 
-Use identical motion options in both stages; the replay checks trajectory/load consistency.
+Use identical motion options in both stages; the replay checks trajectory/load consistency. For a force-driven CRM, pass `--descent-mode force` (and the same `--descent-force`/`--descent-force-ramp`) to **both** drivers. The one-way driver replays the recorded `drum_z_m` trajectory with a position motor and rejects a loads file recorded in the other mode; the two-way driver applies the actuator directly to the slider.
 
 ### Two-way FEA (diagnostic only)
 
@@ -121,7 +126,10 @@ write reproducible `study_config.json`/`commands.sh`, run both one-way stages, a
 | `--particle-fps F` | particle CSV cadence for ParaView (default 5 Hz; capped by `--fps`) |
 | `--particle-writers N` | background processes for per-frame particle CSV writes (default 4) |
 | `--settle-time T` | delay before spin/descent (default 0.001 s) |
-| `--descent-speed V` | drum descent speed (default 0.0015 m/s) |
+| `--descent-mode {kinematic,force}` | descent control mode (default `kinematic`) |
+| `--descent-speed V` | drum descent speed in kinematic mode (default 0.0015 m/s) |
+| `--descent-force N` | downward actuator force in force mode (default 1.0 N) |
+| `--descent-force-ramp T` | linear force ramp after settling in force mode (default 0 s) |
 | `--omega W` | spin rate in rad/s (signed/nonzero supported) |
 | `--reverse-spin` | reverse spin direction (helper flag) |
 | `--spin-axis {X,Y,Z}` | global spin axis (default X) |
@@ -143,6 +151,7 @@ write reproducible `study_config.json`/`commands.sh`, run both one-way stages, a
 Notes:
 - Default timestep scales with spacing (e.g. ~4e-5 s at 2 mm). Explicitly oversized `--dt` values are rejected unless `--allow-unsafe-dt` is set.
 - `artificial_viscosity`, `shifting_ppst_push`, and `settle_time` are editable under **Run & Domain** in `study_gui.py` and are recorded in `study_config.json`; the first two are passed only to rigid CRM, while `settle_time` is also passed to one-way FEA so the replay pose stays aligned. Raising viscosity or lowering PPST push can damp the first-contact soil eruption, but neither is a timestep fix.
+- Force descent preserves the original kinematic path as the default and keeps the fill detector, capacity denominator, fill classification, and SPH/BCE counts unchanged. In force mode the rigid CRM drum is held at its initial height through `settle_time`, driven downward by `--descent-force`, then held at `z_target`; gravity and soil reaction also act, so full descent time depends on the force. Spin remains prescribed. Force runs add `descent_mode`, `descent_state`, `actuator_force_n` (positive magnitude), and `vertical_speed_m_s` to `summary.csv` and `soil_loads.csv`; kinematic CSV schemas are unchanged. The wizard/GUI fields are `descent_mode`, `descent_force_n`, and `descent_force_ramp_s`.
 - The soil bed is padded around the drum and the default active SPH box extends two full excavator diameters beyond the padded bed laterally, and from below the bed floor to bed height + initial excavator height + two diameters + padding above the drum centre. Chrono deactivates particles outside this **body-frame** box (zeroing their velocity), so an undersized box makes flung particles freeze in mid-air. The driver also sets a separate fixed **world-frame** computational domain from the padded bed plus six spacings laterally/below the floor and the initial rotor crest plus two rotor diameters and the ballistic rise associated with the SPH EOS reference velocity. Chrono's default world domain is derived from the initial marker AABB (bed surface plus three BCE layers), which puts a hard ceiling just above the bed and freezes excavated soil in a flat layer; the explicit domain is recorded in `config.json` and printed after `Initialize()`. The driver now also calls `AddBoxContainer()` with four side walls and a lid placed just inside the active-box ceiling. The side walls and floor sit half a spacing outside the snapped initial particle grid, so the bed is contained immediately without any BCE marker cutting through soil; these fixed BCE walls reflect ejecta back into the bed before the active box can deactivate it. The bed floor keeps its existing BCE layers, the container interior is recorded as `solid_container` in `config.json`, and the world computational domain is expanded only enough to hold the new BCE layers.
 - Use the full-detail OBJ for production; legacy simplified meshes may close holes.
 - Summary, soil-wrench, and particle cadences are independent. The one-way FEA driver interpolates the wrench by time, and ParaView can render a lower-rate particle series, so reducing those two cadences speeds up CRM without changing solver physics.
@@ -153,8 +162,8 @@ Notes:
 Typical rigid CRM run directory (`--output-dir ...`):
 
 - `config.json` — soil, numerics, mesh, and capacity settings
-- `summary.csv` — per-frame metrics (pose, counts, fill ratios, torque/work/specific energy)
-- `soil_loads.csv` — time-interpolated soil wrench at `--loads-fps` cadence when `--loads-file` is used
+- `summary.csv` — per-frame metrics (pose, counts, fill ratios, torque/work/specific energy; force-mode runs also record descent state/actuator telemetry)
+- `soil_loads.csv` — time-interpolated soil wrench at `--loads-fps` cadence when `--loads-file` is used (force-mode runs add the same descent telemetry columns)
 - `particles_*.csv` — per-frame particle positions/flags when `--save-particles` is used
 - `paraview/` — PVD/VTP/VTU exports when `--export-vtk` is used
 
@@ -163,7 +172,7 @@ Fill ratio uses a nominal cylindrical cavity by default (`--inner-radius` × dru
 ## Limitations
 
 - Default soil parameters are estimates; long production sweeps and simulant calibration are not complete.
-- Drum motion is prescribed/kinematic (reaction wrench recorded; drivetrain dynamics not modeled).
+- Default drum motion is prescribed/kinematic (reaction wrench recorded; drivetrain dynamics not modeled). Force descent is opt-in and adds only a vertical actuator; spin remains prescribed and no full drivetrain/soil feedback controller is modeled.
 - SPH spacing is a numerical resolution choice; physical grain size enters mu(I) via `average_diam`.
 - Cohesive crust fracture is not represented by the default mu(I) continuum model.
 - One-way FEA is a structural response to rigid loads (no soil feedback); two-way FEA coupling remains unresolved.

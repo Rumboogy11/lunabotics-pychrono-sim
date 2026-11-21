@@ -129,7 +129,7 @@ PARAM_INFO: dict[str, str] = {
     "inner_radius": "Nominal cavity radius used to estimate fill ratio and capacity volume.",
     "capacity_volume": "Known internal cavity volume; leave blank to derive capacity from drum radii/length.",
     # Run & domain
-    "duration": "Total rigid-CRM simulation time. For a full excavation use about bed_height / descent_speed.",
+    "duration": "Total rigid-CRM simulation time. In kinematic mode a full excavation takes about bed_height / descent_speed; force mode has a load-dependent duration.",
     "fea_duration": "One-way FEA replay length; cannot exceed the CRM load-history duration. FEA replays rigid CRM soil-wrench CSVs, not SPH contact.",
     "spacing": "Initial SPH particle spacing. Smaller = more particles, higher resolution, slower simulation; ~0.002 m is the default (2x finer than the old 4 mm setting).",
     "d0_multiplier": "Smoothing-length factor h = multiplier * spacing. 1.0 is the standard choice.",
@@ -148,7 +148,10 @@ PARAM_INFO: dict[str, str] = {
                   "Defaults to the padded bed plus 2 excavator diameters laterally, and bed height + initial "
                   "excavator height + 2 diameters + padding vertically, so flung particles are not deactivated.",
     "settle_time": "Time to let the bed settle before excavation motion begins. Longer settling can reduce the first-bite pressure transient that flings soil upward.",
-    "descent_speed": "Vertical lowering speed of the drum into the bed. 0 keeps it at constant height.",
+    "descent_mode": "Kinematic prescribes a constant lowering speed. Force applies a downward actuator after settling, holds at the final target, and makes the FEA replay follow the recorded trajectory. Spin stays prescribed in both modes.",
+    "descent_speed": "Vertical lowering speed of the drum into the bed in kinematic mode. 0 keeps it at constant height; ignored by force descent except for duration guidance.",
+    "descent_force_n": "Downward actuator force in newtons after settling in force mode. Gravity and soil reaction also act on the drum.",
+    "descent_force_ramp_s": "Linear ramp from zero to the descent actuator force in force mode. 0 applies full force immediately after settling.",
     "omega": "Drum angular speed magnitude about the spin axis (~3.14 rad/s = 30 rpm). Sign is controlled by Reverse spin.",
     "reverse_spin": "Flip rotation direction if the CAD excavator spins the wrong way. Signed omega is written as negative.",
     "spin_axis": "Global axis the drum spins about during excavation (usually X for the supplied geometry).",
@@ -379,7 +382,10 @@ def shipped_defaults() -> dict[str, object]:
         "bed_padding": f"{wiz.BED_PADDING_RADIUS_FRACTION:g}",
         "active_box": "0.631333,0.687407,0.86637",
         "settle_time": "0.001",
+        "descent_mode": "kinematic",
         "descent_speed": "0.0015",
+        "descent_force_n": "1.0",
+        "descent_force_ramp_s": "0.0",
         "omega": "3.14",
         "reverse_spin": False,
         "spin_axis": "X",
@@ -451,7 +457,10 @@ DEFAULT_GROUPS: list[tuple[str, list[tuple[str, str, dict]]]] = [
         ("Bed padding (fraction of radius)", "bed_padding", {}),
         ("Active box X,Y,Z (m)", "active_box", {}),
         ("Settle time (s)", "settle_time", {}),
-        ("Descent speed (m/s)", "descent_speed", {}),
+        ("Descent mode", "descent_mode", {"combo": ["kinematic", "force"]}),
+        ("Descent speed (m/s; kinematic)", "descent_speed", {}),
+        ("Descent force (N; force mode)", "descent_force_n", {}),
+        ("Descent force ramp (s; force mode)", "descent_force_ramp_s", {}),
         ("Spin rate |omega| (rad/s)", "omega", {}),
         ("Reverse spin", "reverse_spin", {"check": True}),
         ("Spin axis", "spin_axis", {"combo": ["X", "Y", "Z"]}),
@@ -929,7 +938,10 @@ class StudyGUI:
         r += 1
         r = self._row(p, r, "Active box X,Y,Z (m)", "active_box")
         r = self._row(p, r, "Settle time (s)", "settle_time")
-        r = self._row(p, r, "Descent speed (m/s)", "descent_speed")
+        r = self._row(p, r, "Descent mode", "descent_mode", combo=["kinematic", "force"])
+        r = self._row(p, r, "Descent speed (m/s; kinematic)", "descent_speed")
+        r = self._row(p, r, "Descent force (N; force mode)", "descent_force_n")
+        r = self._row(p, r, "Descent force ramp (s; force mode)", "descent_force_ramp_s")
         r = self._row(p, r, "Spin rate |omega| (rad/s)", "omega")
         r = self._row(p, r, "Reverse spin", "reverse_spin", check=True)
         r = self._row(p, r, "Spin axis", "spin_axis", combo=["X", "Y", "Z"])
@@ -2019,7 +2031,17 @@ class StudyGUI:
             raise ValueError("Bed padding fraction must be non-negative")
         active_box = self._parse_active_box(self._g("active_box"))
         settle_time = float(self._g("settle_time"))
+        descent_mode = self._g("descent_mode").strip().lower()
+        if descent_mode not in {"kinematic", "force"}:
+            raise ValueError("Descent mode must be kinematic or force")
         descent_speed = float(self._g("descent_speed"))
+        descent_force_n = float(self._g("descent_force_n"))
+        descent_force_ramp_s = float(self._g("descent_force_ramp_s"))
+        if descent_mode == "force":
+            if descent_force_n <= 0.0:
+                raise ValueError("Descent force must be positive")
+            if descent_force_ramp_s < 0.0:
+                raise ValueError("Descent force ramp cannot be negative")
         omega_mag = float(self._g("omega"))
         reverse_spin = self._gb("reverse_spin")
         omega = -abs(omega_mag) if reverse_spin else abs(omega_mag)
@@ -2078,7 +2100,10 @@ class StudyGUI:
             "bed_padding": bed_padding,
             "active_box": active_box,
             "settle_time": settle_time,
+            "descent_mode": descent_mode,
             "descent_speed": descent_speed,
+            "descent_force_n": descent_force_n,
+            "descent_force_ramp_s": descent_force_ramp_s,
             "omega": omega,
             "reverse_spin": reverse_spin,
             "spin_axis": spin_axis,
@@ -2266,7 +2291,7 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                     self.vars[k].set(bool(v))
                 else:
                     self.vars[k].set(str(v))
-        for k in ["study_name", "geometry", "cad_axis", "surface_repair_order", "spin_axis", "solver", "crm_dt"]:
+        for k in ["study_name", "geometry", "cad_axis", "surface_repair_order", "spin_axis", "solver", "crm_dt", "descent_mode"]:
             setv(k, data.get(k))
         for k in ["unit_scale", "mesh_size", "surface_target_faces", "surface_faces", "surface_max_faces",
                   "surface_fit_tolerance", "min_solid_volume", "hub_radius",
@@ -2274,7 +2299,7 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                   "drum_radius", "drum_half_length", "inner_radius", "capacity_volume", "duration",
                   "fea_duration", "spacing", "d0_multiplier", "artificial_viscosity",
                    "shifting_ppst_push", "crm_fps", "fea_fps", "fea_dt",
-                  "bed_height", "bed_padding", "settle_time", "descent_speed", "omega", "num_threads",
+                  "bed_height", "bed_padding", "settle_time", "descent_speed", "descent_force_n", "descent_force_ramp_s", "omega", "num_threads",
                   "load_radius_fraction", "raw_stress_every", "export_workers",
                   "fea_vtk_stride", "paraview_stride", "paraview_particle_stride",
                   "paraview_particle_render_stride"]:

@@ -40,6 +40,35 @@ structural screening until coupled contact is validated. It is also a
 single-mesh estimate; no PLA mesh-convergence or coupon-strength calibration has
 been performed.
 
+### Force-driven descent
+
+All drivers default to the original constant-speed kinematic descent. Force
+descent is opt-in with `--descent-mode force --descent-force N` (optional
+`--descent-force-ramp T`). In the rigid CRM, a linear-force motor pushes the
+drum downward after `--settle-time`; a position motor holds the initial height
+beforehand and `z_target` after the descent, while spin remains prescribed. The
+coupled diagnostic FEA path applies the same force/hold drive to the prismatic
+slider and keeps the revolute spin motor unchanged.
+
+The one-way replay has no SPH soil reaction to balance an actuator force, so it
+does **not** apply a force motor. It instead uses a position motor built from
+the rigid CRM's recorded `drum_z_m` samples, linearly interpolating between the
+`--loads-fps` samples and holding the final height afterward. The driver rejects
+a force-mode loads file unless `--descent-mode force` is supplied, and rejects a
+kinematic loads file if force mode is requested; set the mode and force options
+identically in both stages. Force-mode `soil_loads.csv` and both summary CSVs
+add `descent_mode`, `descent_state`, `actuator_force_n` (positive magnitude) and
+`vertical_speed_m_s`; one-way FEA additionally records
+`recorded_trajectory_error_m`. Kinematic CSV schemas are unchanged.
+
+Force descent does not change fill/capacity classification or SPH/BCE
+bookkeeping. The wizard/GUI store the mode as `descent_mode` (`kinematic`/
+`force`), `descent_force_n` (N) and `descent_force_ramp_s` (s) in
+`study_config.json`, and emit the CLI flags only for force studies. Because
+descent time is load-dependent, wizard duration guidance based on
+`--descent-speed` is skipped in force mode; choose `--duration` long enough for
+the chosen force.
+
 One-way replay defaults: `dt=2e-3 s`, `pychrono.pardisomkl.ChSolverPardisoMKL`
 with 8 threads, zero spin ramp, load-node radius `>= 0.8 R`, min reported stress
 element volume `1e-12 m^3`, and locked direct-solver sparsity pattern. If
@@ -87,6 +116,10 @@ local Chrono rebuild was needed.
     --loads /tmp/opencode/oneway_loads_d02.csv \
     --output-dir /tmp/opencode/oneway_fea_d02_default
 ```
+
+For force descent, add the same `--descent-mode force --descent-force 1.0
+--descent-force-ramp 0` to both commands. The one-way stage needs the force-mode
+loads file written by the matching CRM run.
 
 ### Viewing one-way FEA output
 
@@ -216,11 +249,14 @@ CRM demo is
 - selects hub nodes from the loaded mesh itself (radius `<= 0.0015 m`), so a
   mesh converter with an empty `HUB` set is still usable;
 - creates a ground guide, translating slider, and rotating spindle connected by
-  Chrono motor constraints with motion functions (prismatic linear-position
-  descent and revolute rotation-speed spin with configurable ramp), avoiding
-  per-step body state overrides;
+  Chrono motor constraints with motion functions. Kinematic mode uses a
+  prismatic linear-position descent motor; force mode uses a prismatic
+  linear-force motor plus a position hold, and both modes use a revolute
+  rotation-speed spin motor with configurable ramp. This avoids per-step body
+  state overrides;
 - initializes spindle/FEA node kinematics consistently with the prescribed
-  motion at `t=0`;
+  motion at `t=0`; in force mode the initial descent velocity is left zero so
+  the solver starts from rest;
 - ties hub nodes to the spindle with `fea.ChLinkNodeFrame` (three constraints
   per node), leaving the rest of the PLA solid deformable;
 - reconstructs spindle drive torque from hub-link reaction moments about the

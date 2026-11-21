@@ -90,6 +90,21 @@ ONEWAY_FIELDS = [
     "hot_element_volume_m3",
 ]
 
+# Force-driven CRM runs record a non-analytic trajectory and actuator telemetry.
+# These extra columns are emitted only for those runs so kinematic output stays
+# byte-for-byte compatible with earlier studies.
+FORCE_ONEWAY_FIELDS = [
+    "descent_mode",
+    "descent_state",
+    "actuator_force_n",
+    "vertical_speed_m_s",
+    "recorded_trajectory_error_m",
+]
+
+
+def oneway_fields(run) -> list[str]:
+    return ONEWAY_FIELDS + (FORCE_ONEWAY_FIELDS if run.descent_mode == "force" else [])
+
 
 def read_tetgen_ele(path: Path) -> np.ndarray:
     """Read TetGen .ele connectivity as a (n_tet, 4) int64 array (0-based)."""
@@ -310,24 +325,41 @@ class LoadHistory:
         times: list[float] = []
         drum_z: list[float] = []
         values: list[np.ndarray] = []
+        modes: list[str] = []
+        states: list[str] = []
+        actuator: list[float] = []
+        vertical: list[float] = []
         with path.open(newline="", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
             required = ("time_s", "drum_z_m", *self.FIELDS)
             missing = [name for name in required if name not in (reader.fieldnames or [])]
             if missing:
                 raise SystemExit(f"{path} is missing columns: {', '.join(missing)}")
+            columns = reader.fieldnames or []
+            has_force_meta = "descent_mode" in columns
             for row in reader:
                 times.append(float(row["time_s"]))
                 drum_z.append(float(row["drum_z_m"]))
                 values.append(np.array([float(row[name]) for name in self.FIELDS], dtype=float))
+                if has_force_meta:
+                    modes.append((row.get("descent_mode") or "kinematic").strip())
+                    states.append((row.get("descent_state") or "descend").strip())
+                    actuator.append(float(row.get("actuator_force_n") or 0.0))
+                    vertical.append(float(row.get("vertical_speed_m_s") or 0.0))
+        if modes and any(mode != modes[0] for mode in modes):
+            raise SystemExit(f"{path} has inconsistent descent_mode values")
         if len(times) < 2:
             raise SystemExit(f"{path} has fewer than two load samples")
         if any(times[i + 1] < times[i] for i in range(len(times) - 1)):
             raise SystemExit(f"{path} is not sorted by time")
         self.path = path
         self.times = times
-        self.drum_z = drum_z
+        self.drum_z = np.asarray(drum_z, dtype=float)
         self.values = np.asarray(values)
+        self.mode = modes[0] if modes else "kinematic"
+        self.states = states
+        self.actuator = np.asarray(actuator, dtype=float)
+        self.vertical = np.asarray(vertical, dtype=float)
         self.warned = False
 
     @property
@@ -336,14 +368,56 @@ class LoadHistory:
 
     def validate_motion(self, motion) -> None:
         """Reject load histories recorded with a different descent trajectory."""
-        expected = np.asarray([motion.drum_z(t) for t in self.times], dtype=float)
         recorded = np.asarray(self.drum_z, dtype=float)
+        if self.mode == "force":
+            # A force-driven CRM trajectory is not analytic.  The one-way FEA
+            # replay follows the recorded Z samples instead, so only basic
+            # sanity checks are needed here.
+            if not np.all(np.isfinite(recorded)):
+                raise SystemExit(f"{self.path} has non-finite drum_z_m samples")
+            if recorded[0] > motion.drum_center_z0 + 2.0e-4:
+                raise SystemExit(
+                    f"{self.path} starts at drum_z_m={recorded[0]:.6g} m, above the "
+                    f"expected initial height {motion.drum_center_z0:.6g} m"
+                )
+            if np.min(recorded) < motion.z_target - 2.0e-4:
+                raise SystemExit(
+                    f"{self.path} descends below the target {motion.z_target:.6g} m"
+                )
+            return
+        expected = np.asarray([motion.drum_z(t) for t in self.times], dtype=float)
         error = float(np.max(np.abs(recorded - expected)))
         if error > 2.0e-4:
             raise SystemExit(
                 f"load history descent trajectory differs from the FEA motion by {error:.3g} m; "
                 "rerun the rigid CRM with the same --settle-time, --descent-speed, and --bed-height"
             )
+
+    @staticmethod
+    def _interpolate(times: list[float], values, t: float) -> float:
+        index = bisect.bisect_right(times, min(max(t, times[0]), times[-1])) - 1
+        index = max(0, min(index, len(times) - 2))
+        t0, t1 = times[index], times[index + 1]
+        alpha = 0.0 if t1 <= t0 else (min(max(t, t0), t1) - t0) / (t1 - t0)
+        return float(values[index] * (1.0 - alpha) + values[index + 1] * alpha)
+
+    def z_at(self, t: float) -> float:
+        return self._interpolate(self.times, self.drum_z, t)
+
+    def telemetry_at(self, t: float) -> dict:
+        """Optional force-mode telemetry interpolated at ``t``."""
+        if self.mode != "force":
+            return {}
+        index = max(0, min(
+            bisect.bisect_right(self.times, min(max(t, self.times[0]), self.times[-1])) - 1,
+            len(self.times) - 1,
+        ))
+        return {
+            "descent_mode": self.mode,
+            "descent_state": self.states[index],
+            "actuator_force_n": f"{self._interpolate(self.times, self.actuator, t):.6g}",
+            "vertical_speed_m_s": f"{self._interpolate(self.times, self.vertical, t):.6g}",
+        }
 
     def at(self, t: float) -> tuple[np.ndarray, np.ndarray]:
         if t > self.times[-1] + 1.0e-12 and not self.warned:
@@ -542,6 +616,16 @@ def main() -> int:
         drum_radius=run.drum_radius,
         drum_half_length=run.drum_half_length,
     )
+    if run.descent_mode == "force" and loads.mode != "force":
+        raise SystemExit(
+            "force-mode FEA replay needs a force-mode rigid CRM loads file with "
+            "descent_mode/actuator_force_n columns"
+        )
+    if run.descent_mode == "kinematic" and loads.mode == "force":
+        raise SystemExit(
+            "the loads file was recorded with force descent; pass --descent-mode force "
+            "so FEA replays the recorded trajectory"
+        )
     loads.validate_motion(motion)
 
     print(soil.summary(), flush=True)
@@ -553,7 +637,12 @@ def main() -> int:
         f"mesh: {node_path.name} / {ele_path.name}, load radius >= "
         f"{args.load_radius_fraction * motion.drum_radius:.4g} m, scale={args.load_scale:g}\n"
         f"spindle: omega={run.omega:g} rad/s about {run.spin_axis.upper()}, "
-        f"spin ramp={args.spin_ramp_time:g} s",
+        f"spin ramp={args.spin_ramp_time:g} s\n"
+        + (
+            "descent: replaying force-driven CRM trajectory from the loads file"
+            if run.descent_mode == "force"
+            else f"descent: prescribed {run.descent_speed:g} m/s from the FEA motion"
+        ),
         flush=True,
     )
 
@@ -626,12 +715,24 @@ def main() -> int:
 
     drive = fea_driver.create_spindle(chrono, system, motion)
     spindle = drive["spindle"]
-    fea_driver.configure_spindle_drive(chrono, system, motion, drive, args.spin_ramp_time, run.duration)
+    position_function = None
+    if run.descent_mode == "force":
+        position_function = fea_driver.build_recorded_position_function(
+            chrono, loads.times, loads.drum_z, motion.drum_center_z0, run.duration
+        )
+    fea_driver.configure_spindle_drive(
+        chrono, system, motion, drive, args.spin_ramp_time, run.duration,
+        position_function=position_function,
+        descent_mode="kinematic",  # recorded trajectory is replayed by a position motor
+    )
     mesh, nodes, hub_nodes, _material = fea_driver.load_fea_drum(
         chrono, fea, system, motion, node_path, ele_path, pla
     )
     if not args.no_initial_solid_velocity:
-        fea_driver.set_solid_initial_velocity(chrono, nodes, motion, 0.0, args.spin_ramp_time)
+        fea_driver.set_solid_initial_velocity(
+            chrono, nodes, motion, 0.0, args.spin_ramp_time,
+            descent_mode=run.descent_mode,
+        )
     links = fea_driver.attach_hub_nodes(fea, system, spindle, hub_nodes)
     if hasattr(system, "Setup"):
         system.Setup()
@@ -669,7 +770,7 @@ def main() -> int:
         write_config(out_dir / "config.json", args, run, pla, motion, node_path, ele_path,
                      mesh, hub_nodes, loads, load_indices, args.load_scale, vtk_dir)
         state_file = (out_dir / "summary.csv").open("w", newline="", encoding="utf-8")
-        writer = csv.DictWriter(state_file, fieldnames=ONEWAY_FIELDS)
+        writer = csv.DictWriter(state_file, fieldnames=oneway_fields(run))
         writer.writeheader()
         if args.export_vtk:
             try:
@@ -719,13 +820,17 @@ def main() -> int:
         )
         motor = drive["rotation_motor"]
         linear = drive["linear_motor"]
-        command_z = motion.drum_z(t) - motion.drum_center_z0
+        if run.descent_mode == "force":
+            command_z = loads.z_at(t) - motion.drum_center_z0
+        else:
+            command_z = motion.drum_z(t) - motion.drum_center_z0
         command_angle = fea_driver.spin_ramp_angle(motion, t, args.spin_ramp_time)
         descent_error = abs(float(linear.GetMotorPos()) - command_z)
         angle_error = abs(float(motor.GetMotorAngle()) - command_angle)
         if descent_error > 2.0e-4 or angle_error > 2.0e-2:
+            source = "recorded force-mode trajectory" if run.descent_mode == "force" else "FEA motion"
             raise SystemExit(
-                f"spindle kinematics are not tracking the command at t={t:g} s: "
+                f"spindle kinematics are not tracking the {source} at t={t:g} s: "
                 f"descent error={descent_error:.3g} m, spin error={angle_error:.3g} rad. "
                 "Use --solver sparse-lu; GMRES is not accurate enough for this constrained system."
             )
@@ -752,6 +857,9 @@ def main() -> int:
             "max_von_mises_raw_pa": f"{raw_stress:.6g}",
             "hot_element_volume_m3": f"{element_volume:.6g}",
         }
+        if run.descent_mode == "force":
+            row.update(loads.telemetry_at(t))
+            row["recorded_trajectory_error_m"] = f"{descent_error:.6g}"
         if writer is not None:
             writer.writerow(row)
             state_file.flush()

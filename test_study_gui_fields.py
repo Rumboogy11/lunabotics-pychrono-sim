@@ -535,5 +535,69 @@ class ReverseSpinToggleTest(IsolatedGuiDefaultsTest):
         self.assertEqual(reverse.omega, -forward.omega)
 
 
+class ForceDescentGuiFieldsTest(IsolatedGuiDefaultsTest):
+    def test_force_fields_default_to_kinematic_and_generate_flags(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        import study_gui as gui
+
+        defaults = gui.shipped_defaults()
+        self.assertEqual(defaults["descent_mode"], "kinematic")
+        self.assertEqual(defaults["descent_force_n"], "1.0")
+        self.assertEqual(defaults["descent_force_ramp_s"], "0.0")
+        fields = {row[1] for _, rows in gui.DEFAULT_GROUPS for row in rows}
+        self.assertTrue({"descent_mode", "descent_force_n", "descent_force_ramp_s"} <= fields)
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+            labels = [
+                child.cget("text")
+                for child in app.pages[2].winfo_children()
+                if isinstance(child, (tk.Label, ttk.Label))
+            ]
+            for label in ("Descent mode", "Descent force (N; force mode)",
+                          "Descent force ramp (s; force mode)"):
+                self.assertIn(label, labels)
+
+            with tempfile.TemporaryDirectory(prefix="force_gui_", dir="/tmp/opencode") as tmp:
+                app.vars["output_dir"].set(tmp)
+                kinematic = app._collect_cfg()
+                self.assertEqual(kinematic["descent_mode"], "kinematic")
+
+                app.vars["descent_mode"].set("force")
+                app.vars["descent_speed"].set("0")
+                app.vars["descent_force_n"].set("2.5")
+                app.vars["descent_force_ramp_s"].set("0.1")
+                forced = app._collect_cfg()
+                self.assertEqual(forced["descent_mode"], "force")
+                self.assertAlmostEqual(forced["descent_force_n"], 2.5)
+                self.assertAlmostEqual(forced["descent_force_ramp_s"], 0.1)
+
+                with patch.object(gui.wiz, "measured_geometry_for_cfg", return_value=None):
+                    kinematic_steps = gui.wiz.build_commands(kinematic)
+                    forced_steps = gui.wiz.build_commands(forced)
+                for name in ("rigid-CRM", "one-way-FEA"):
+                    kin_cmd = next(s["command"] for s in kinematic_steps if s["name"] == name)
+                    force_cmd = next(s["command"] for s in forced_steps if s["name"] == name)
+                    self.assertNotIn("--descent-mode", kin_cmd)
+                    self.assertEqual(force_cmd[force_cmd.index("--descent-mode") + 1], "force")
+                    self.assertEqual(force_cmd[force_cmd.index("--descent-force") + 1], "2.5")
+
+                app.vars["descent_mode"].set("kinematic")
+                app._apply_config({
+                    "descent_mode": "force",
+                    "descent_force_n": 3.0,
+                    "descent_force_ramp_s": 0.2,
+                })
+                self.assertEqual(app.vars["descent_mode"].get(), "force")
+                self.assertEqual(app.vars["descent_force_n"].get(), "3.0")
+                self.assertEqual(app.vars["descent_force_ramp_s"].get(), "0.2")
+        finally:
+            root.destroy()
+
+
 if __name__ == "__main__":
     unittest.main()

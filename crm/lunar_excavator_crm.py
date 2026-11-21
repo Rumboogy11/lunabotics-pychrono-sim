@@ -110,6 +110,9 @@ class CrmRunParams:
     particle_writers: int = 4            # background processes for per-frame particle CSV writes
     settle_time: float = MOTION_DEFAULT.settle_time
     descent_speed: float = MOTION_DEFAULT.lower_speed
+    descent_mode: str = "kinematic"          # "kinematic" or "force"
+    descent_force_n: float = 1.0             # downward actuator force in force mode
+    descent_force_ramp_s: float = 0.0        # linear ramp from 0 to descent_force_n
     omega: float = MOTION_DEFAULT.drum_omega
     reverse_spin: bool = False
     bed_height: float = MOTION_DEFAULT.bed_height
@@ -132,11 +135,23 @@ class CrmRunParams:
     proximity_steps: int = 4             # steps between neighbor-list updates
 
     def __post_init__(self) -> None:
-        for name in ("spacing", "dt", "duration", "fps", "loads_fps", "particle_fps", "descent_speed",
-                     "bed_height", "drum_radius", "drum_half_length", "inner_radius",
-                     "max_velocity", "d0_multiplier", "free_surface_threshold"):
+        if self.descent_mode not in {"kinematic", "force"}:
+            raise ValueError("descent_mode must be 'kinematic' or 'force'")
+        if self.descent_mode == "force":
+            if self.descent_force_n <= 0.0:
+                raise ValueError("descent_force_n must be positive")
+            if self.descent_force_ramp_s < 0.0:
+                raise ValueError("descent_force_ramp_s must be non-negative")
+        positive = ["spacing", "dt", "duration", "fps", "loads_fps", "particle_fps",
+                    "bed_height", "drum_radius", "drum_half_length", "inner_radius",
+                    "max_velocity", "d0_multiplier", "free_surface_threshold"]
+        for name in positive:
             if getattr(self, name) <= 0.0:
                 raise ValueError(f"{name} must be positive")
+        # Zero is valid in kinematic mode (constant height) and in force mode
+        # (speed is unused there); only a negative lowering command is invalid.
+        if self.descent_speed < 0.0:
+            raise ValueError("descent_speed cannot be negative")
         if self.particle_writers < 1:
             raise ValueError("particle_writers must be at least 1")
         if self.omega == 0.0:
@@ -197,6 +212,24 @@ LOAD_FIELDS = [
     "torque_z_nm",
 ]
 
+# Extra telemetry is written only for explicit force-driven runs, so the
+# default CSV schema stays byte-for-byte compatible with earlier studies.
+FORCE_METRIC_FIELDS = [
+    "descent_mode",
+    "descent_state",
+    "actuator_force_n",
+    "vertical_speed_m_s",
+]
+FORCE_LOAD_FIELDS = list(FORCE_METRIC_FIELDS)
+
+
+def metric_fields(run: CrmRunParams) -> list[str]:
+    return METRIC_FIELDS + (FORCE_METRIC_FIELDS if run.descent_mode == "force" else [])
+
+
+def load_fields(run: CrmRunParams) -> list[str]:
+    return LOAD_FIELDS + (FORCE_LOAD_FIELDS if run.descent_mode == "force" else [])
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -222,7 +255,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--settle-time", type=float, default=None,
                    help="seconds before spin/descent begins")
     p.add_argument("--descent-speed", type=float, default=None,
-                   help="drum descent speed in m/s (default: 0.0015)")
+                   help="drum descent speed in m/s for kinematic mode (default: 0.0015)")
+    p.add_argument("--descent-mode", choices=("kinematic", "force"), default=None,
+                   help="descent control mode (default: kinematic)")
+    p.add_argument("--descent-force", type=float, default=None,
+                   help="downward actuator force in N for --descent-mode force (default: 1.0)")
+    p.add_argument("--descent-force-ramp", type=float, default=None,
+                   help="linear force ramp duration in s for force descent (default: 0)")
     p.add_argument("--omega", type=float, default=None,
                    help="drum spin rate magnitude in rad/s (default: shared config)")
     p.add_argument("--reverse-spin", action="store_true",
@@ -493,6 +532,9 @@ def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -
         "spacing": args.spacing,
         "settle_time": args.settle_time,
         "descent_speed": args.descent_speed,
+        "descent_mode": getattr(args, "descent_mode", None),
+        "descent_force_n": getattr(args, "descent_force", None),
+        "descent_force_ramp_s": getattr(args, "descent_force_ramp", None),
         "omega": args.omega,
         "reverse_spin": getattr(args, "reverse_spin", None),
         "bed_height": args.bed_height,
@@ -788,19 +830,154 @@ def axis_vector(chrono, axis: str):
     raise ValueError(f"unsupported spin axis: {axis!r}")
 
 
-def set_drum_state(chrono, drum, motion, t: float) -> None:
-    """Impose the analytic kinematic drum pose (spin about the global axis)."""
+def build_descent_force_function(chrono, run: CrmRunParams, t_end: float):
+    """Downward actuator force sequence: hold, ramp, then constant force.
+
+    Chrono's linear-force motor applies +Z for a positive function value, so a
+    downward actuator is negative.  During the settle interval the hold motor
+    is active instead, but the sequence still starts at zero for clarity.
+    """
+    seq = chrono.ChFunctionSequence()
+    if hasattr(seq, "SetClamped"):
+        seq.SetClamped(True)
+    settle = max(0.0, float(run.settle_time))
+    ramp = max(0.0, float(run.descent_force_ramp_s))
+    force = -abs(float(run.descent_force_n))
+    end = max(float(t_end), settle + ramp, 1.0)
+
+    # Each segment is written in absolute force units, so C0 offsets must stay
+    # disabled.  In particular, asking Chrono to smooth a zero-force settle
+    # segment into a full-force step would offset the command back to zero.
+    if settle > 0.0:
+        seq.InsertFunct(chrono.ChFunctionConst(0.0), settle, 1.0, False)
+    if ramp > 0.0:
+        seq.InsertFunct(chrono.ChFunctionRamp(0.0, force / ramp), ramp, 1.0, False)
+    remaining = max(0.0, end - settle - ramp)
+    if remaining > 0.0:
+        seq.InsertFunct(chrono.ChFunctionConst(force), remaining, 1.0, False)
+    return seq
+
+
+def create_force_descent(chrono, system, body, motion, run: CrmRunParams, t_end: float,
+                         *, prismatic: bool = False, ground=None, force_function=None) -> dict:
+    """Attach a Z force actuator plus a position hold to ``body``.
+
+    The force motor supplies downward load.  A position motor holds the initial
+    height until ``settle_time`` and holds ``z_target`` after the descent, so
+    the drum cannot drift past its designed final clearance.  ``prismatic=True``
+    is used by the nested FEA spindle; the rigid CRM uses a spherical guide so
+    its prescribed spin remains free.
+    """
+    force_guide = (
+        chrono.ChLinkMotorLinearForce.GuideConstraint_PRISMATIC if prismatic
+        else chrono.ChLinkMotorLinearForce.GuideConstraint_SPHERICAL
+    )
+    hold_guide = (
+        chrono.ChLinkMotorLinearPosition.GuideConstraint_PRISMATIC if prismatic
+        else chrono.ChLinkMotorLinearPosition.GuideConstraint_SPHERICAL
+    )
+    if ground is None:
+        ground = chrono.ChBody()
+        ground.SetName("descent_guide_ground")
+        ground.SetFixed(True)
+        ground.SetPos(chrono.ChVector3d(0.0, 0.0, motion.drum_center_z0))
+        system.Add(ground)
+
+    frame = chrono.ChFramed(
+        chrono.ChVector3d(0.0, 0.0, motion.drum_center_z0),
+        chrono.ChQuaterniond(1.0, 0.0, 0.0, 0.0),
+    )
+
+    force_motor = chrono.ChLinkMotorLinearForce()
+    force_motor.Initialize(body, ground, frame)
+    force_motor.SetGuideConstraint(force_guide)
+    force_motor.SetForceFunction(
+        force_function if force_function is not None
+        else build_descent_force_function(chrono, run, t_end)
+    )
+    force_motor.SetDisabled(True)
+    system.Add(force_motor)
+
+    hold_motor = chrono.ChLinkMotorLinearPosition()
+    hold_motor.Initialize(body, ground, frame)
+    hold_motor.SetGuideConstraint(hold_guide)
+    hold_motor.SetMotionFunction(chrono.ChFunctionConst(0.0))
+    system.Add(hold_motor)
+
+    return {
+        "chrono": chrono,
+        "body": body,
+        "clamp_bodies": [body],
+        "ground": ground,
+        "force_motor": force_motor,
+        "hold_motor": hold_motor,
+        "state": "hold",
+    }
+
+
+def _clamp_force_descent_to_target(drive: dict, motion) -> None:
+    """Undo any step overshoot before the position hold takes effect."""
+    chrono = drive["chrono"]
+    target = float(motion.z_target)
+    for body in drive.get("clamp_bodies", []):
+        if not hasattr(body, "GetPos") or not hasattr(body, "SetPos"):
+            continue
+        x, y, _z = vec_parts(body.GetPos())
+        body.SetPos(chrono.ChVector3d(x, y, target))
+        if hasattr(body, "GetPosDt") and hasattr(body, "SetPosDt"):
+            vx, vy, _vz = vec_parts(body.GetPosDt())
+            body.SetPosDt(chrono.ChVector3d(vx, vy, 0.0))
+
+
+def update_force_descent(drive: dict, motion, run: CrmRunParams, t: float, z: float,
+                         *, velocity: float | None = None, dt: float | None = None) -> None:
+    """Advance the force/hold state machine using the current drum height.
+
+    ``velocity`` and ``dt`` allow the handoff to happen at the *predicted*
+    crossing, before the solver takes the step that would pass ``z_target``.
+    Otherwise a coarse step can undershoot, then the position motor snaps the
+    body upward and the undershoot is written into the load history.
+    """
+    if drive["state"] == "hold" and t >= max(0.0, run.settle_time):
+        drive["force_motor"].SetDisabled(False)
+        drive["hold_motor"].SetDisabled(True)
+        drive["state"] = "descend"
+    if drive["state"] != "descend":
+        # Guard against step-to-step drift even after the target hold is active.
+        if drive["state"] == "target" and z < motion.z_target:
+            _clamp_force_descent_to_target(drive, motion)
+        return
+
+    predicted = z
+    if velocity is not None and dt is not None and velocity < 0.0:
+        predicted = z + velocity * max(0.0, dt)
+    if z <= motion.z_target or predicted <= motion.z_target:
+        drive["force_motor"].SetDisabled(True)
+        # GetMotionFunction() returns the generic ChFunction base, which has no
+        # SetConstant binding, so replace the function with a new constant one.
+        drive["hold_motor"].SetMotionFunction(
+            drive["chrono"].ChFunctionConst(motion.z_target - motion.drum_center_z0)
+        )
+        drive["hold_motor"].SetDisabled(False)
+        drive["state"] = "target"
+        if z < motion.z_target:
+            _clamp_force_descent_to_target(drive, motion)
+
+
+def set_drum_state(chrono, drum, motion, t: float, *, impose_translation: bool = True) -> None:
+    """Impose the analytic drum spin and, in kinematic mode, its Z descent."""
     omega = motion.drum_omega_at(t)
-    z = motion.drum_z(t)
     axis = axis_vector(chrono, motion.drum_spin_axis)
     q0 = initial_chrono_quat(chrono, motion)
     spin_angle = omega * max(0.0, t - motion.settle_time)
     q_spin = chrono.QuatFromAngleAxis(spin_angle, axis)
 
-    drum.SetPos(chrono.ChVector3d(0.0, 0.0, z))
+    if impose_translation:
+        z = motion.drum_z(t)
+        drum.SetPos(chrono.ChVector3d(0.0, 0.0, z))
+        moving = t >= motion.settle_time and z > motion.z_target
+        drum.SetPosDt(chrono.ChVector3d(0.0, 0.0, -motion.lower_speed if moving else 0.0))
     drum.SetRot(q_spin * q0)
-    moving = t >= motion.settle_time and z > motion.z_target
-    drum.SetPosDt(chrono.ChVector3d(0.0, 0.0, -motion.lower_speed if moving else 0.0))
     omega_vec = (omega, 0.0, 0.0) if motion.drum_spin_axis.upper() == "X" else (
         (0.0, omega, 0.0) if motion.drum_spin_axis.upper() == "Y" else (0.0, 0.0, omega)
     )
@@ -825,8 +1002,9 @@ def create_drum(chrono, system, terrain, motion, mesh: Path):
     drum.SetRot(q0)
     system.Add(drum)
 
-    # Keep the body dynamic: CRMTerrain then reports the FSI reaction torque,
-    # while set_drum_state() overrides its pose at every step to keep it kinematic.
+    # Keep the body dynamic: CRMTerrain then reports the FSI reaction torque.
+    # Kinematic mode overrides its pose each step; force mode lets the Chrono
+    # solver integrate the actuator, gravity, and FSI reaction.
     terrain.AddRigidBody(drum, geometry, False)
     return drum
 
@@ -1021,8 +1199,14 @@ def main() -> int:
                 f"drum: mesh={mesh.name}, R={motion.drum_radius:g} m, "
                 f"half-length={motion.drum_half_length:g} m, "
                 f"spin={motion.drum_spin_axis.upper()}, omega={run.omega:g} rad/s",
-                f"descent: {run.descent_speed:g} m/s, z0={motion.drum_center_z0:.4f} m -> "
-                f"{motion.z_target:.4f} m, bed surface z={surface_z:.4f} m",
+                (
+                    f"descent: force {run.descent_force_n:g} N downward "
+                    f"(ramp={run.descent_force_ramp_s:g} s), z0={motion.drum_center_z0:.4f} m -> "
+                    f"hold at {motion.z_target:.4f} m"
+                    if run.descent_mode == "force"
+                    else f"descent: {run.descent_speed:g} m/s, z0={motion.drum_center_z0:.4f} m -> "
+                    f"{motion.z_target:.4f} m"
+                ) + f", bed surface z={surface_z:.4f} m",
                 f"soil bed: {2.0 * motion.bed_x_half:.4g} x {2.0 * motion.bed_y_half:.4g} m "
                 f"(padding {run.bed_padding:g} R), height={motion.bed_height:.4g} m",
                 f"active SPH box: {run.active_box} (body frame, follows drum)",
@@ -1070,6 +1254,14 @@ def main() -> int:
     configure_sph(fsi, terrain, run)
 
     drum = create_drum(chrono, system, terrain, motion, mesh)
+    force_drive = None
+    if run.descent_mode == "force":
+        force_drive = create_force_descent(chrono, system, drum, motion, run, run.duration)
+        print(
+            f"Force descent: {run.descent_force_n:g} N downward, "
+            f"ramp={run.descent_force_ramp_s:g} s, hold until t={run.settle_time:g} s",
+            flush=True,
+        )
 
     box_size = chrono.ChVector3d(
         2.0 * motion.bed_x_half, 2.0 * motion.bed_y_half, motion.bed_height
@@ -1114,7 +1306,7 @@ def main() -> int:
             capacity_volume, particle_mass, mass_source, comp_domain,
         )
         state_file = (out_dir / "summary.csv").open("w", newline="", encoding="utf-8")
-        writer = csv.DictWriter(state_file, fieldnames=METRIC_FIELDS)
+        writer = csv.DictWriter(state_file, fieldnames=metric_fields(run))
         writer.writeheader()
 
     loads_file = None
@@ -1123,7 +1315,7 @@ def main() -> int:
         loads_path = args.loads_file.resolve()
         loads_path.parent.mkdir(parents=True, exist_ok=True)
         loads_file = loads_path.open("w", newline="", encoding="utf-8")
-        loads_writer = csv.DictWriter(loads_file, fieldnames=LOAD_FIELDS)
+        loads_writer = csv.DictWriter(loads_file, fieldnames=load_fields(run))
         loads_writer.writeheader()
         print(f"Soil wrench: {loads_path} @ {run.loads_fps:g} Hz", flush=True)
 
@@ -1140,6 +1332,21 @@ def main() -> int:
 
     last_load_time = -1.0
 
+    def descent_status(t: float) -> tuple[str, float, float]:
+        z = vec_parts(drum.GetPos())[2]
+        if force_drive is None:
+            moving = t >= run.settle_time and z > motion.z_target
+            return "kinematic", 0.0, -run.descent_speed if moving else 0.0
+        state = force_drive["state"]
+        # Chrono's motor sign is negative for downward travel; report a
+        # positive downward magnitude so CSV consumers need no sign knowledge.
+        actuator = (
+            abs(float(force_drive["force_motor"].GetMotorForce()))
+            if state == "descend" else 0.0
+        )
+        vertical_speed = vec_parts(drum.GetPosDt())[2] if hasattr(drum, "GetPosDt") else 0.0
+        return state, actuator, vertical_speed
+
     def write_loads(t: float, force=None, torque=None) -> None:
         nonlocal last_load_time
         if loads_writer is None:
@@ -1148,16 +1355,26 @@ def main() -> int:
             force = vec_parts(terrain.GetFsiBodyForce(drum)) if hasattr(terrain, "GetFsiBodyForce") else (0.0, 0.0, 0.0)
         if torque is None:
             torque = vec_parts(terrain.GetFsiBodyTorque(drum)) if hasattr(terrain, "GetFsiBodyTorque") else (0.0, 0.0, 0.0)
-        loads_writer.writerow({
+        z = vec_parts(drum.GetPos())[2]
+        descent_state, actuator_force, vertical_speed = descent_status(t)
+        row = {
             "time_s": f"{t:.9g}",
-            "drum_z_m": f"{vec_parts(drum.GetPos())[2]:.9g}",
+            "drum_z_m": f"{z:.9g}",
             "force_x_n": f"{force[0]:.9g}",
             "force_y_n": f"{force[1]:.9g}",
             "force_z_n": f"{force[2]:.9g}",
             "torque_x_nm": f"{torque[0]:.9g}",
             "torque_y_nm": f"{torque[1]:.9g}",
             "torque_z_nm": f"{torque[2]:.9g}",
-        })
+        }
+        if run.descent_mode == "force":
+            row.update({
+                "descent_mode": run.descent_mode,
+                "descent_state": descent_state,
+                "actuator_force_n": f"{actuator_force:.9g}",
+                "vertical_speed_m_s": f"{vertical_speed:.9g}",
+            })
+        loads_writer.writerow(row)
         last_load_time = t
 
     peak_fill = 0.0
@@ -1203,6 +1420,14 @@ def main() -> int:
             "work_j": f"{work_j:.6g}",
             "specific_energy_j_kg": f"{work_j / max(metrics['excavated_mass_kg'], 1e-12):.6g}",
         }
+        if run.descent_mode == "force":
+            state, actuator, _speed = descent_status(t)
+            row.update({
+                "descent_mode": run.descent_mode,
+                "descent_state": state,
+                "actuator_force_n": f"{actuator:.6g}",
+                "vertical_speed_m_s": f"{vec_parts(drum.GetPosDt())[2] if hasattr(drum, 'GetPosDt') else 0.0:.6g}",
+            })
         if writer is not None:
             writer.writerow(row)
             state_file.flush()
@@ -1227,8 +1452,11 @@ def main() -> int:
             flush=True,
         )
 
-    # Initial state.
-    set_drum_state(chrono, drum, motion, 0.0)
+    # Initial state.  Force mode keeps Z free for the solver; only spin is set.
+    impose_translation = force_drive is None
+    set_drum_state(chrono, drum, motion, 0.0, impose_translation=impose_translation)
+    if force_drive is not None:
+        update_force_descent(force_drive, motion, run, 0.0, vec_parts(drum.GetPos())[2])
     last_torque_x = 0.0
     last_power = 0.0
     record(0.0, 0.0, 0.0)
@@ -1240,11 +1468,17 @@ def main() -> int:
     try:
         while t < run.duration - 1.0e-12:
             h = min(run.dt, run.duration - t)
-            set_drum_state(chrono, drum, motion, t)
+            set_drum_state(chrono, drum, motion, t, impose_translation=impose_translation)
+            if force_drive is not None:
+                z = vec_parts(drum.GetPos())[2]
+                vz = vec_parts(drum.GetPosDt())[2] if hasattr(drum, "GetPosDt") else 0.0
+                update_force_descent(force_drive, motion, run, t, z, velocity=vz, dt=h)
             terrain.Synchronize(t)
             terrain.Advance(h)
             t += h
-            set_drum_state(chrono, drum, motion, t)
+            set_drum_state(chrono, drum, motion, t, impose_translation=impose_translation)
+            if force_drive is not None:
+                update_force_descent(force_drive, motion, run, t, vec_parts(drum.GetPos())[2])
 
             omega_vec = (
                 (run.omega, 0.0, 0.0) if run.spin_axis.upper() == "X"

@@ -52,7 +52,22 @@ Runners select `chrono-env/bin/python` automatically when `PYTHON` is unset and 
 
 Keep the same soil block and motion schedule across variants. Useful options include `--spacing`, `--dt` (spacing-dependent default), `--omega`/`--reverse-spin`, `--spin-axis`, `--bed-height`, `--bed-padding` (soil margin around the drum as a fraction of radius), `--drum-radius`, `--drum-half-length`, `--inner-radius`/`--capacity-volume`, `--save-particles`, `--export-vtk`, `--paraview-stride`, and `--paraview-particle-render-stride` (render every Nth particle in each frame).
 
-### 2. One-way CRM → FEA (structural screening)
+### 2. Force-driven descent (opt-in)
+
+All three drivers default to the original constant-speed kinematic descent. Add `--descent-mode force` to let a downward actuator drive the rigid drum or coupled FEA slider:
+
+```bash
+./crm/run.sh --descent-mode force --descent-force 1.0 --descent-force-ramp 0.2 \
+  --duration 60 --loads-file Output_Force/crm/soil_loads.csv \
+  --output-dir Output_Force/crm
+
+./crm/run_oneway_fea.sh --descent-mode force \
+  --loads Output_Force/crm/soil_loads.csv --output-dir Output_Force/fea
+```
+
+The CRM force motor is active only after `--settle-time`, then the position motor holds the final `z_target` once reached; spin remains prescribed. Gravity and SPH soil reaction also act on the drum, so descent time is force-dependent and `--descent-speed` is ignored except for wizard/GUI duration guidance (`0` is allowed). Force runs add `descent_mode`, `descent_state`, `actuator_force_n` (positive magnitude), and `vertical_speed_m_s` to `summary.csv`/`soil_loads.csv`; `recorded_trajectory_error_m` is also added to one-way FEA output. Kinematic CSV schemas are unchanged. The one-way path replays the recorded CRM Z trajectory with a position motor because it has no SPH reaction to balance the force; it rejects a loads file recorded with a different mode. The coupled diagnostic FEA path applies the force motor directly to the slider. Use the same force options in every stage; the wizard/GUI expose `descent_mode`, `descent_force_n`, and `descent_force_ramp_s` and emit the flags only for force studies.
+
+### 3. One-way CRM → FEA (structural screening)
 
 ```bash
 # Record rigid soil wrench
@@ -68,7 +83,7 @@ Keep the same soil block and motion schedule across variants. Useful options inc
 
 Use identical motion settings in both stages. The replay reports stable stress/displacement estimates relative to rigid-CRM loads but is **not** two-way FSI.
 
-### 3. STEP-to-study and result viewing
+### 4. STEP-to-study and result viewing
 
 The wizard can convert a STEP model into CRM/FEA meshes, auto-scale derived geometry/motion/SPH defaults (editable), and run both one-way stages:
 
@@ -135,7 +150,7 @@ Local build/env directories (`chrono-src/`, `chrono-build/`, `chrono-install/`, 
 
 - **Soil model:** defaults in `crm/crm_soil.py` are independent best-estimate parameters and should be calibrated/frozen for comparisons.
 - **Timesteps:** CRM defaults are spacing-dependent; explicitly unsafe `--dt` values are rejected unless overridden.
-- **Geometry:** use full-detail meshes for production; some simplified meshes may close holes. Generated studies validate that the editable outer radius/half-length still match the CAD/mesh actually loaded. With auto geometry enabled (the default), an edited radius/length is restored to the measured CAD/mesh value, a cavity too large for an SPH particle is reset, and a run shorter than the full descent is extended; each change is printed and recorded as `geometry_corrections` in `study_config.json`. Turn auto geometry off only when you deliberately want a custom radius with a matching mesh. The fill detector itself and SPH/BCE counts are unchanged.
+- **Geometry:** use full-detail meshes for production; some simplified meshes may close holes. Generated studies validate that the editable outer radius/half-length still match the CAD/mesh actually loaded. With auto geometry enabled (the default), an edited radius/length is restored to the measured CAD/mesh value, a cavity too large for an SPH particle is reset, and a kinematic run shorter than the full descent is extended (force mode has no analytic descent time, so that correction is skipped); each change is printed and recorded as `geometry_corrections` in `study_config.json`. Turn auto geometry off only when you deliberately want a custom radius with a matching mesh. The fill detector itself and SPH/BCE counts are unchanged.
 - **Part-aware hub/interior coarsening (recommended, on by default in the wizard/GUI):** `step_to_chrono_fea.py --part-aware-simplify` keeps all exterior/screw-flight faces of a given surface bit-for-bit unchanged and decimates only faces wholly inside `--part-aware-radius` (default 0.05 m) with a fixed boundary and topology preservation. On `geometry/spikey/Assembly 1.step` with the current production surface settings, this changed 81,606 nodes / 352,278 tets / 24,174 hub nodes to 62,939 nodes / 252,638 tets / 5,569 hub nodes (−23% nodes, −28% tets, −77% constraint rows) while leaving the outer radial bands' surface area unchanged and improving volume error from 0.442% to 0.259%. Use `--no-part-aware-simplify` only for comparison; the generated JSON records eligibility, achieved reduction, boundary preservation, and volume error. This path is incompatible with legacy MeshFix order `after`.
 - **Two-way FEA:** current flex-BCE coupling results are unstable/inconsistent; do not use for design validation.
 
