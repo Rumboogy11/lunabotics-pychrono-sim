@@ -8,11 +8,13 @@ import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "crm"))
 
+import lunar_excavator_crm_fea as fea_driver  # noqa: E402
 import lunar_excavator_oneway as oneway  # noqa: E402
 
 
@@ -86,6 +88,143 @@ class FeaVtkExportTest(unittest.TestCase):
             self.assertFalse((vtk_dir / "frame_000000.vtu").exists())
             self.assertFalse((vtk_dir / "fea.pvd").exists())
             self.assertTrue(keep.exists())
+
+
+class _FakeConst:
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+
+class _FakeRamp:
+    def __init__(self, start: float, slope: float) -> None:
+        self.start = start
+        self.slope = slope
+
+
+class _FakeSequence:
+    def __init__(self) -> None:
+        self.segments: list[tuple[object, float, float, bool]] = []
+
+    def InsertFunct(self, function, duration, offset, continuous) -> None:  # noqa: N802
+        self.segments.append((function, duration, offset, continuous))
+
+
+class _FakeChrono:
+    ChFunctionSequence = _FakeSequence
+    ChFunctionConst = _FakeConst
+    ChFunctionRamp = _FakeRamp
+
+    class ChVector3d:
+        def __init__(self, *values) -> None:
+            self.values = values
+
+    class ChQuaterniond:
+        def __init__(self, *values) -> None:
+            self.values = values
+
+    class ChFramed:
+        def __init__(self, pos, rot) -> None:
+            self.pos = pos
+            self.rot = rot
+
+    class _Motor:
+        GuideConstraint_PRISMATIC = "prismatic"
+        SpindleConstraint_REVOLUTE = "revolute"
+
+        def Initialize(self, body1, body2, frame) -> None:  # noqa: N802
+            self.bodies = (body1, body2)
+            self.frame = frame
+
+        def SetGuideConstraint(self, value) -> None:  # noqa: N802
+            self.guide = value
+
+        def SetSpindleConstraint(self, value) -> None:  # noqa: N802
+            self.spindle = value
+
+        def SetMotionFunction(self, value) -> None:  # noqa: N802
+            self.motion = value
+
+        def SetSpeedFunction(self, value) -> None:  # noqa: N802
+            self.speed = value
+
+    ChLinkMotorLinearPosition = _Motor
+    ChLinkMotorRotationSpeed = _Motor
+
+    @staticmethod
+    def QuatFromAngleAxis(angle, axis):  # noqa: N802
+        return _FakeChrono.ChQuaterniond(angle, *axis.values)
+
+
+class _FakeBody:
+    def SetPos(self, value) -> None:  # noqa: N802
+        self.pos = value
+
+    def SetPosDt(self, value) -> None:  # noqa: N802
+        self.pos_dt = value
+
+    def SetRot(self, value) -> None:  # noqa: N802
+        self.rot = value
+
+    def SetAngVelParent(self, value) -> None:  # noqa: N802
+        self.ang_vel = value
+
+
+class _FakeSystem:
+    def __init__(self) -> None:
+        self.items = []
+
+    def Add(self, item) -> None:  # noqa: N802
+        self.items.append(item)
+
+
+class FeaSpindleDirectionTest(unittest.TestCase):
+    def _speed_profile(self, omega: float):
+        motion = SimpleNamespace(settle_time=0.0, drum_omega=omega)
+        return fea_driver.build_spin_speed_function(
+            _FakeChrono(), motion, ramp_time=0.5, t_end=2.0).segments
+
+    def test_reverse_omega_keeps_negative_motor_speed(self) -> None:
+        segments = self._speed_profile(-3.14)
+
+        ramp = segments[0][0]
+        plateau = segments[1][0]
+        self.assertIsInstance(ramp, _FakeRamp)
+        self.assertIsInstance(plateau, _FakeConst)
+        self.assertAlmostEqual(ramp.slope, -3.14 / 0.5)
+        self.assertAlmostEqual(plateau.value, -3.14)
+
+    def test_forward_omega_keeps_positive_motor_speed(self) -> None:
+        segments = self._speed_profile(2.5)
+
+        ramp = segments[0][0]
+        plateau = segments[1][0]
+        self.assertAlmostEqual(ramp.slope, 2.5 / 0.5)
+        self.assertAlmostEqual(plateau.value, 2.5)
+
+    def test_motor_is_initialized_spindle_first(self) -> None:
+        import math
+
+        motion = SimpleNamespace(
+            settle_time=0.001,
+            drum_center_z0=0.3,
+            z_target=0.1,
+            lower_speed=0.001,
+            drum_omega=-3.14,
+            t_max=1.0,
+            drum_spin_axis="X",
+            initial_quaternion_xyzw=lambda: (0.0, math.sqrt(0.5), 0.0, math.sqrt(0.5)),
+        )
+        drive = {
+            "ground": _FakeBody(),
+            "slider": _FakeBody(),
+            "spindle": _FakeBody(),
+        }
+
+        fea_driver.configure_spindle_drive(
+            _FakeChrono(), _FakeSystem(), motion, drive, 0.0, 1.0)
+
+        self.assertEqual(drive["rotation_motor"].bodies,
+                         (drive["spindle"], drive["slider"]))
 
 
 if __name__ == "__main__":

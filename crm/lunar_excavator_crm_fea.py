@@ -317,7 +317,13 @@ def build_descent_position_function(chrono, motion, t_end: float):
 
 
 def build_spin_speed_function(chrono, motion, ramp_time: float, t_end: float):
-    """Angular speed function about the spindle axis (rad/s)."""
+    """Angular speed function about the spindle axis (rad/s).
+
+    ``configure_spindle_drive()`` initializes the revolute motor as
+    ``(spindle, slider)`` so Chrono's motor angle is the spindle rotation, not
+    its negative.  The speed function therefore uses ``motion.drum_omega``
+    directly, matching the rigid CRM and exported ``excavator.pvd`` drum.
+    """
     seq = chrono.ChFunctionSequence()
     settle = max(0.0, motion.settle_time)
     omega = motion.drum_omega
@@ -360,11 +366,14 @@ def configure_spindle_drive(chrono, system, motion, drive, ramp_time: float, t_e
     system.Add(lin)
 
     # Rotation motor: spindle rotates about configured axis relative to slider.
+    # Chrono measures body1 relative to body2, so put the spindle first.  The
+    # previous (slider, spindle) order made a negative command rotate the FEA
+    # drum positively, opposite to the rigid CRM and ParaView's excavator.pvd.
     axis = spin_axis_tuple(motion)
     q_axis = _axis_quat_align_z(chrono, axis)
     spin_frame = chrono.ChFramed(chrono.ChVector3d(0.0, 0.0, z0), q_axis)
     rot = chrono.ChLinkMotorRotationSpeed()
-    rot.Initialize(slider, spindle, spin_frame)
+    rot.Initialize(spindle, slider, spin_frame)
     rot.SetSpindleConstraint(chrono.ChLinkMotorRotationSpeed.SpindleConstraint_REVOLUTE)
     rot.SetSpeedFunction(build_spin_speed_function(chrono, motion, ramp_time, max(t_end, motion.t_max, 1.0)))
     system.Add(rot)

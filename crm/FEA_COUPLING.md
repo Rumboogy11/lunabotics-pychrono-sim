@@ -126,7 +126,11 @@ Driver and SPH-coupling fixes applied in the local source/runtime:
   (ground guide -> prismatic linear-position descent motor -> slider -> revolute
   rotation-speed motor -> spindle), instead of per-step state overrides on a
   fixed/free body; FEA hub nodes remain tied to the spindle with
-  `ChLinkNodeFrame`;
+  `ChLinkNodeFrame`. The revolute motor is initialized as `(spindle, slider)`
+  because Chrono measures body1 relative to body2; the previous `(slider,
+  spindle)` order made the FEA drum rotate opposite to the commanded
+  `drum_omega`. This keeps the FEA VTU/Warp-by-Vector drum rotating in the same
+  direction as the rigid `excavator.pvd` drum and the signed CRM `spin_deg`;
 - default two-way FEA spin-up uses a `0.5 s` linear speed ramp and FEA nodal
   masses are floored by default (`1e-6 kg`) to stabilize sliver nodes; the
   zero-ramp spin segment used by the one-way replay no longer inherits a
