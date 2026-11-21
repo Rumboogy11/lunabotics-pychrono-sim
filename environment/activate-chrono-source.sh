@@ -23,6 +23,17 @@ export CHRONO_INSTALL="$(chrono_realpath "$PROJECT_ROOT/chrono-install")"
 
 export PATH="$CHRONO_ENV/bin:$PATH"
 
+# Use half of the available logical CPUs for OpenMP work by default. An explicit
+# OMP_NUM_THREADS from the caller always wins.
+if [[ -z "${OMP_NUM_THREADS:-}" ]]; then
+  _chrono_cpu_count="$(nproc 2>/dev/null || printf '1\n')"
+  [[ "$_chrono_cpu_count" =~ ^[0-9]+$ ]] || _chrono_cpu_count=1
+  OMP_NUM_THREADS=$(( _chrono_cpu_count / 2 ))
+  (( OMP_NUM_THREADS < 1 )) && OMP_NUM_THREADS=1
+  export OMP_NUM_THREADS
+fi
+unset _chrono_cpu_count
+
 # CUDA 12.9 toolkit lives inside chrono-env, so the driver is not needed at
 # build time (only a compatible NVIDIA driver is needed to run simulations).
 export CUDA_HOME="$CHRONO_ENV"

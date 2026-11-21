@@ -45,29 +45,19 @@ CLEAN=0
 SKIP_BUILD=0
 SKIP_PATCH=0
 
-# Chrono's Eigen-heavy translation units use several GB each. Too much
-# parallel pressure can exhaust memory and destabilize even a healthy compiler.
+# Chrono's Eigen-heavy translation units need a lot of memory, but the default
+# build parallelism is deliberately half the available threads. Users on smaller
+# hosts can pick a lower value explicitly with --jobs (for example --jobs 1).
 cap_build_jobs() {
-  local available_kb mem_jobs thread_jobs safe_jobs
-  available_kb="$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)"
-  if [[ -n "$available_kb" && "$available_kb" =~ ^[0-9]+$ ]]; then
-    mem_jobs=$(( available_kb / 1024 / 1024 / 4 ))
-    (( mem_jobs < 1 )) && mem_jobs=1
-  else
-    mem_jobs=4
-  fi
-
+  local thread_jobs
   thread_jobs="$(nproc 2>/dev/null || printf '1\n')"
   [[ "$thread_jobs" =~ ^[0-9]+$ ]] || thread_jobs=1
   thread_jobs=$(( thread_jobs / 2 ))
   (( thread_jobs < 1 )) && thread_jobs=1
 
-  safe_jobs="$thread_jobs"
-  (( mem_jobs < safe_jobs )) && safe_jobs="$mem_jobs"
-  if (( build_jobs > safe_jobs )); then
-    warn "Reducing Chrono build parallelism from $build_jobs to $safe_jobs"
-    warn "Using at most half the available threads, with a memory-based safety cap."
-    build_jobs="$safe_jobs"
+  if (( build_jobs > thread_jobs )); then
+    warn "Reducing Chrono build parallelism from $build_jobs to $thread_jobs (half of $(nproc) threads)"
+    build_jobs="$thread_jobs"
   fi
 }
 
@@ -120,6 +110,10 @@ build_jobs="$JOBS"
 command -v git >/dev/null 2>&1 || die "git is required but not found"
 command -v curl >/dev/null 2>&1 || die "curl is required but not found"
 command -v tar >/dev/null 2>&1 || die "tar is required but not found"
+command -v bzip2 >/dev/null 2>&1 || die "bzip2 is required to unpack micromamba but not found"
+command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required to verify micromamba but not found"
+command -v nproc >/dev/null 2>&1 || die "nproc is required to size the build but not found"
+command -v awk >/dev/null 2>&1 || die "awk is required by the installer but not found"
 
 if [[ -n "$WORK_ROOT_OVERRIDE" ]]; then
   WORK_ROOT="$WORK_ROOT_OVERRIDE"
@@ -263,7 +257,8 @@ create_environment() {
 
   local detected=""
   if [[ -z "$CUDA_ARCH" ]] && command -v nvidia-smi >/dev/null 2>&1; then
-    detected="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' .' || true)"
+    detected="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 || true)"
+    detected="$(printf '%s' "$detected" | tr -cd '0-9')"
   fi
   if [[ -z "$CUDA_ARCH" ]]; then
     if [[ -n "$detected" ]]; then
@@ -274,6 +269,7 @@ create_environment() {
       warn "Pass --cuda-arch NNN if your GPU differs."
     fi
   fi
+  [[ "$CUDA_ARCH" =~ ^[0-9]+$ ]] || die "Invalid CUDA architecture: $CUDA_ARCH"
   mkdir -p "$ENV_DIR/etc"
   printf '%s\n' "$CUDA_ARCH" > "$ENV_DIR/etc/chrono-cuda-arch"
   log "Chrono CUDA architecture: sm_$CUDA_ARCH"
@@ -299,20 +295,30 @@ verify_chrono_source() {
     die "Chrono source at $SRC_DIR is not a git checkout; move it aside or pass --work-root"
   fi
 
-  local head
+  local head expected
   head="$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || true)"
   [[ -n "$head" ]] || die "Could not determine Chrono source revision at $SRC_DIR"
-  if [[ "$head" == "$CHRONO_REF" ]]; then
+
+  # A commit SHA can be resolved locally, but branch/tag names need the remote
+  # because the checkout is shallow and has no local ref for them.
+  if git -C "$SRC_DIR" rev-parse --verify -q "${CHRONO_REF}^{commit}" >/dev/null 2>&1; then
+    expected="$(git -C "$SRC_DIR" rev-parse "${CHRONO_REF}^{commit}")"
+  else
+    expected="$(git ls-remote "$CHRONO_REPO" "$CHRONO_REF" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+    [[ -n "$expected" ]] || die "Could not resolve Chrono ref $CHRONO_REF"
+    expected="$(git -C "$SRC_DIR" rev-parse "${expected}^{commit}" 2>/dev/null || printf '%s' "$expected")"
+  fi
+
+  if [[ "$head" == "$expected" ]]; then
     return
   fi
 
-  if git -C "$SRC_DIR" cat-file -e "${CHRONO_REF}^{commit}" 2>/dev/null \
-    && git -C "$SRC_DIR" merge-base --is-ancestor "$CHRONO_REF" HEAD 2>/dev/null; then
+  if git -C "$SRC_DIR" merge-base --is-ancestor "$expected" HEAD 2>/dev/null; then
     log "Chrono source is a descendant of $CHRONO_REF"
     return
   fi
 
-  die "Chrono source at $SRC_DIR is at $head, expected $CHRONO_REF"
+  die "Chrono source at $SRC_DIR is at $head, expected $CHRONO_REF ($expected)"
 }
 
 apply_chrono_patch() {
@@ -405,4 +411,3 @@ verify_environment
 log "Done. Activate the environment with:"
 printf '  source %s\n' "$PROJECT_ROOT/environment/activate-chrono-source.sh"
 printf '  %s --help\n' "$PROJECT_ROOT/run_study.sh"
-                                                   

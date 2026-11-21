@@ -28,7 +28,7 @@ Common options:
 | `--no-system-packages` | Skip `pacman`/`apt`; use tools already on `PATH` |
 | `--with-paraview` | Also install ParaView with the system package manager |
 | `--cuda-arch NNN` | Override GPU arch (e.g. `86`, `89`, `120`); auto-detected otherwise |
-| `--jobs N` | Request parallel build jobs (default: `nproc`; capped by available memory for the Chrono build) |
+| `--jobs N` | Request parallel build jobs (default/ceiling: half of `nproc`) |
 | `--clean` | Remove `chrono-build/` and `chrono-install/` before rebuilding |
 | `--skip-build` | Install env/source/deps only, do not compile Chrono |
 | `--skip-patch` | Do not apply the local SPH patch to the Chrono checkout |
@@ -62,10 +62,11 @@ build uses `-O2`; set `CHRONO_CXX_RELEASE_FLAGS='-O3 -DNDEBUG'` only if you
 change the toolchain to one that has been tested with that setting.
 
 Chrono's Eigen-heavy sources need several GB of memory per compiler process.
-The installer caps build parallelism at half the machine's available threads
-(at least one), and may lower it further to one job per 4 GiB of available
-memory. Use `--jobs 1` for the most conservative build. The cap applies only to
-the Chrono build.
+The installer uses half of the machine's available threads for the Chrono build
+(at least one), and the activated environment also defaults `OMP_NUM_THREADS`
+to half of the available threads. Use `--jobs 1` for the most conservative
+build. An explicit `OMP_NUM_THREADS` is never overridden. The build-job cap
+applies only to the Chrono build.
 
 The PyPI/conda-forge `pychrono` package is deliberately **not** used: it lacks
 `pychrono.fsi`/`pychrono.vehicle`, and its shared libraries conflict with the
