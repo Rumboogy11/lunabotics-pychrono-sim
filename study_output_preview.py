@@ -12,7 +12,9 @@ spheres; grid, drum, axis, and timeline line widths are adjustable too.  Every
 row in a displayed frame is read (to report the true simulation particle
 count), then at most the configured number of points is reservoir-sampled for
 drawing.  The 3D view is a plain perspective/orthographic projection with mouse
-orbit and zoom; it needs no NumPy, VTK, PIL, or file conversion.
+orbit and zoom; it needs no NumPy, VTK, PIL, or file conversion.  The 3D drum
+wireframe carries an asymmetric index mark driven by signed ``spin_deg`` so the
+preview shows drum reversal as well as the recorded particle motion.
 """
 
 from __future__ import annotations
@@ -44,6 +46,10 @@ PARTICLE_COLORS = {
     "inside": "#4FC3F7",
     "excavated": "#FF7043",
 }
+
+# Distinct from the symmetric drum wire: one radial index mark makes the sign
+# of the recorded drum spin visible in the lightweight 3D preview.
+DRUM_MARKER_COLOR = "#FF8A65"
 
 CRM_SERIES = (
     ("fill_ratio_mass", "fill ratio", "#42A5F5", 1.0, ""),
@@ -237,6 +243,30 @@ def _axis_vector(axis: str) -> tuple[float, float, float]:
     if axis == "Z":
         return 0.0, 0.0, 1.0
     return 1.0, 0.0, 0.0
+
+
+def _rotate_about_axis(
+    point: tuple[float, float, float],
+    center: tuple[float, float, float],
+    axis: tuple[float, float, float],
+    angle_deg: float,
+) -> tuple[float, float, float]:
+    """Rotate ``point`` around ``center`` with the exporter's spin convention.
+
+    This is the Rodrigues form of :func:`export_study_vtk.axis_angle_matrix`,
+    implemented with ``math`` only so the preview stays dependency-free.
+    """
+    angle = math.radians(angle_deg)
+    c, s = math.cos(angle), math.sin(angle)
+    p = tuple(point[i] - center[i] for i in range(3))
+    cross = (
+        axis[1] * p[2] - axis[2] * p[1],
+        axis[2] * p[0] - axis[0] * p[2],
+        axis[0] * p[1] - axis[1] * p[0],
+    )
+    dot = sum(axis[i] * p[i] for i in range(3))
+    return tuple(center[i] + p[i] * c + cross[i] * s + axis[i] * dot * (1.0 - c)
+                 for i in range(3))
 
 
 def _time_of(rows: list[dict[str, float]], index: int, fallback_fps: float) -> float:
@@ -804,6 +834,7 @@ class OutputPreview:
         inner = _to_float(self.config.get("inner_radius")) or 0.0
         half_len = _to_float(self.config.get("drum_half_length")) or radius / 2.0
         axis = _axis_vector(str(self.config.get("spin_axis") or "X"))
+        spin = _to_float(summary_row.get("spin_deg") if summary_row else None) or 0.0
         if abs(axis[2]) < 0.9:
             norm = math.hypot(axis[0], axis[1]) or 1.0
             basis_u = (axis[1] / norm, -axis[0] / norm, 0.0)
@@ -817,37 +848,62 @@ class OutputPreview:
 
         center = (0.0, 0.0, center_z)
 
+        def rotate(point: tuple[float, float, float]) -> tuple[float, float, float]:
+            return _rotate_about_axis(point, center, axis, spin)
+
         def ring(r: float, end: float, segments: int = 32) -> list[tuple[float, float, float]]:
             points = []
             for i in range(segments + 1):
                 theta = 2.0 * math.pi * i / segments
                 cos_t, sin_t = math.cos(theta), math.sin(theta)
-                points.append((
+                points.append(rotate((
                     center[0] + axis[0] * end * half_len
                     + basis_u[0] * cos_t * r + basis_v[0] * sin_t * r,
                     center[1] + axis[1] * end * half_len
                     + basis_u[1] * cos_t * r + basis_v[1] * sin_t * r,
                     center[2] + axis[2] * end * half_len
                     + basis_u[2] * cos_t * r + basis_v[2] * sin_t * r,
-                ))
+                )))
             return points
 
-        wire = ring(radius, -1.0) + ring(radius, 1.0)
+        outer_near = ring(radius, -1.0)
+        outer_far = ring(radius, 1.0)
+        inner_near: list[tuple[float, float, float]] = []
+        inner_far: list[tuple[float, float, float]] = []
         if 0.0 < inner < radius:
-            wire += ring(inner, -1.0) + ring(inner, 1.0)
-        for theta in (0.0, math.pi / 2.0, math.pi, 3.0 * math.pi / 2.0):
-            for sign in (-1.0, 1.0):
-                offset = (basis_u[0] * math.cos(theta) + basis_v[0] * math.sin(theta),
-                          basis_u[1] * math.cos(theta) + basis_v[1] * math.sin(theta),
-                          basis_u[2] * math.cos(theta) + basis_v[2] * math.sin(theta))
-                for end in (-1.0, 1.0):
-                    wire.append((
-                        center[0] + axis[0] * end * half_len + offset[0] * radius,
-                        center[1] + axis[1] * end * half_len + offset[1] * radius,
-                        center[2] + axis[2] * end * half_len + offset[2] * radius,
-                    ))
+            inner_near = ring(inner, -1.0)
+            inner_far = ring(inner, 1.0)
 
-        all_points = [(p[0], p[1], p[2]) for p in self.particles] + wire + [center]
+        spokes: list[tuple[tuple[float, float, float], tuple[float, float, float]]] = []
+        for theta in (0.0, math.pi / 2.0, math.pi, 3.0 * math.pi / 2.0):
+            offset = (basis_u[0] * math.cos(theta) + basis_v[0] * math.sin(theta),
+                      basis_u[1] * math.cos(theta) + basis_v[1] * math.sin(theta),
+                      basis_u[2] * math.cos(theta) + basis_v[2] * math.sin(theta))
+            start = tuple(center[i] - axis[i] * half_len + offset[i] * radius
+                          for i in range(3))
+            end = tuple(center[i] + axis[i] * half_len + offset[i] * radius
+                        for i in range(3))
+            spokes.append((rotate(start), rotate(end)))
+
+        # One radial spoke at each end cap is intentionally asymmetric: a full
+        # circle plus quarter spokes looks identical at +90 and -90 degrees,
+        # so it cannot show that Reverse spin changed the drum direction.
+        markers: list[tuple[tuple[float, float, float], tuple[float, float, float]]] = []
+        for end_sign in (-1.0, 1.0):
+            start = tuple(center[i] + axis[i] * end_sign * half_len
+                          for i in range(3))
+            tip = tuple(center[i] + axis[i] * end_sign * half_len
+                        + basis_u[i] * radius for i in range(3))
+            markers.append((rotate(start), rotate(tip)))
+
+        wire_groups = [outer_near, outer_far]
+        if inner_near:
+            wire_groups += [inner_near, inner_far]
+        wire_points = [point for group in wire_groups for point in group]
+        for segment in spokes + markers:
+            wire_points.extend(segment)
+
+        all_points = [(p[0], p[1], p[2]) for p in self.particles] + wire_points + [center]
         min_x, max_x = min(p[0] for p in all_points), max(p[0] for p in all_points)
         min_y, max_y = min(p[1] for p in all_points), max(p[1] for p in all_points)
         min_z, max_z = min(p[2] for p in all_points), max(p[2] for p in all_points)
@@ -864,7 +920,9 @@ class OutputPreview:
             return _project_point(point, view_center, yaw, pitch, focal)
 
         projected = [project((p[0], p[1], p[2])) for p in self.particles]
-        projected_wire = [project(p) for p in wire]
+        projected_groups = [[project(p) for p in group] for group in wire_groups]
+        projected_spokes = [[project(p) for p in segment] for segment in spokes]
+        projected_markers = [[project(p) for p in segment] for segment in markers]
         projected_axes = [project((view_center[0] + d[0] * span * 0.35,
                                    view_center[1] + d[1] * span * 0.35,
                                    view_center[2] + d[2] * span * 0.35))
@@ -895,20 +953,21 @@ class OutputPreview:
             x1, y1 = screen(projected_axes[index + 3])
             canvas.create_line(x0, y0, x1, y1, fill=color, width=self.line_width)
 
-        # Drum envelope: outer rings solid, cavity rings dashed.
-        inner_offset = 66 if 0.0 < inner < radius else 0
-        for start, count, color, dash in (
-            (0, 33, "#FFD54F", None),
-            (33, 33, "#FFD54F", None),
-            (66, 33, "#90A4AE", (3, 2)),
-            (99, 33, "#90A4AE", (3, 2)),
-        ):
-            if inner_offset == 0 and start >= 66:
-                continue
-            if start + count > len(projected_wire):
-                continue
+        # Drum envelope: outer rings solid, cavity rings dashed.  Rings are
+        # rotation-invariant, so the spokes and index marks below carry the
+        # visible spin direction.
+        ring_styles = [
+            (projected_groups[0], "#FFD54F", None),
+            (projected_groups[1], "#FFD54F", None),
+        ]
+        if inner_near:
+            ring_styles.extend((
+                (projected_groups[2], "#90A4AE", (3, 2)),
+                (projected_groups[3], "#90A4AE", (3, 2)),
+            ))
+        for points, color, dash in ring_styles:
             coords: list[float] = []
-            for point in projected_wire[start:start + count]:
+            for point in points:
                 sx, sy = screen(point)
                 coords.extend((sx, sy))
             options = {"fill": color, "width": self.line_width}
@@ -916,9 +975,9 @@ class OutputPreview:
                 options["dash"] = dash
             canvas.create_line(*coords, **options)
 
-        for start in range(66 + inner_offset, len(projected_wire) - 1, 2):
-            x0, y0 = screen(projected_wire[start])
-            x1, y1 = screen(projected_wire[start + 1])
+        for segment in projected_spokes:
+            x0, y0 = screen(segment[0])
+            x1, y1 = screen(segment[1])
             canvas.create_line(x0, y0, x1, y1, fill="#FFD54F", width=self.line_width)
 
         depths = [point[2] for point in projected]
@@ -940,7 +999,20 @@ class OutputPreview:
                                fill=_shade(color, palette["field"], 0.45 * shade),
                                outline="")
 
-        spin = _to_float(summary_row.get("spin_deg") if summary_row else None) or 0.0
+        # Draw the asymmetric index marks last so they remain readable when
+        # particles overlap the drum.  Their direction comes from signed
+        # spin_deg, so Reverse spin changes the visible pose in this view.
+        marker_width = max(2, self.line_width)
+        marker_radius = max(3.0, dot_radius)
+        for segment in projected_markers:
+            x0, y0 = screen(segment[0])
+            x1, y1 = screen(segment[1])
+            canvas.create_line(x0, y0, x1, y1, fill=DRUM_MARKER_COLOR,
+                               width=marker_width)
+            canvas.create_oval(x1 - marker_radius, y1 - marker_radius,
+                               x1 + marker_radius, y1 + marker_radius,
+                               fill=DRUM_MARKER_COLOR, outline="")
+
         caption = (f"sampled {len(self.particles):,} of {self.particle_total:,} sim particles | "
                    f"limit {self.particle_limit:,} | "
                    f"yaw {self.yaw_deg:.0f}°, pitch {self.pitch_deg:.0f}° | "
@@ -949,7 +1021,8 @@ class OutputPreview:
                            fill=palette["text"], font="TkSmallCaptionFont")
         canvas.create_text(width - 8, height - 8, anchor="se",
                            text=("3D perspective" if perspective else "3D orthographic")
-                                + " | drag to orbit, wheel to zoom",
+                                + " | drag to orbit, wheel to zoom"
+                                + " | orange mark = drum index",
                            fill=palette["text"], font="TkSmallCaptionFont")
 
     def _draw_timeline(

@@ -406,5 +406,60 @@ class PreviewStyleSettingsTest(unittest.TestCase):
             gui.SETTINGS_FILE = original
 
 
+class ReverseSpinToggleTest(IsolatedGuiDefaultsTest):
+    def test_toggle_flips_signed_omega_and_command_flags(self) -> None:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+            app.vars["omega"].set("3.14")
+            with tempfile.TemporaryDirectory(prefix="reverse_spin_", dir="/tmp/opencode") as tmp:
+                app.vars["output_dir"].set(tmp)
+
+                app.vars["reverse_spin"].set(False)
+                forward = app._collect_cfg()
+                forward_steps = gui.wiz.build_commands(forward)
+                app.vars["reverse_spin"].set(True)
+                reverse = app._collect_cfg()
+                reverse_steps = gui.wiz.build_commands(reverse)
+
+                self.assertGreater(forward["omega"], 0.0)
+                self.assertFalse(forward["reverse_spin"])
+                self.assertLess(reverse["omega"], 0.0)
+                self.assertTrue(reverse["reverse_spin"])
+                self.assertEqual(reverse["omega"], -forward["omega"])
+
+                for step_name in ("rigid-CRM", "one-way-FEA"):
+                    fwd_cmd = next(s["command"] for s in forward_steps if s["name"] == step_name)
+                    rev_cmd = next(s["command"] for s in reverse_steps if s["name"] == step_name)
+                    self.assertNotIn("--reverse-spin", fwd_cmd)
+                    self.assertIn("--reverse-spin", rev_cmd)
+                    self.assertEqual(
+                        fwd_cmd[fwd_cmd.index("--omega") + 1],
+                        rev_cmd[rev_cmd.index("--omega") + 1],
+                    )
+        finally:
+            root.destroy()
+
+    def test_crm_driver_applies_reverse_flag_to_omega(self) -> None:
+        sys.path.insert(0, str(ROOT / "crm"))
+        try:
+            import lunar_excavator_crm as crm
+        finally:
+            sys.path.remove(str(ROOT / "crm"))
+
+        forward = crm.make_run_params(
+            crm.build_parser().parse_args(["--omega", "3.14"]))
+        reverse = crm.make_run_params(
+            crm.build_parser().parse_args(["--omega", "3.14", "--reverse-spin"]))
+        self.assertGreater(forward.omega, 0.0)
+        self.assertLess(reverse.omega, 0.0)
+        self.assertEqual(reverse.omega, -forward.omega)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from study_output_preview import (
+    DRUM_MARKER_COLOR,
     LINE_WIDTH_DEFAULT,
     LINE_WIDTH_MAX,
     LINE_WIDTH_MIN,
@@ -21,6 +22,7 @@ from study_output_preview import (
     PARTICLE_SIZE_MIN,
     OutputPreview,
     _project_point,
+    _rotate_about_axis,
     load_particle_sample,
 )
 
@@ -178,6 +180,62 @@ class PreviewStyleTest(unittest.TestCase):
             self.assertTrue(filled)
             coords = preview.particle_canvas.coords(filled[0])
             self.assertAlmostEqual(coords[2] - coords[0], 6.0)
+        finally:
+            root.destroy()
+
+
+class DrumSpinPreviewTest(unittest.TestCase):
+    def test_rotation_helper_uses_signed_right_hand_rule(self) -> None:
+        center = (0.0, 0.0, 0.0)
+        axis = (1.0, 0.0, 0.0)
+        point = (0.0, -1.0, 0.0)
+
+        forward = _rotate_about_axis(point, center, axis, 90.0)
+        reverse = _rotate_about_axis(point, center, axis, -90.0)
+
+        self.assertAlmostEqual(forward[1], 0.0, places=6)
+        self.assertLess(forward[2], -0.99)
+        self.assertAlmostEqual(reverse[1], 0.0, places=6)
+        self.assertGreater(reverse[2], 0.99)
+
+    def test_3d_preview_index_mark_follows_signed_spin(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        import study_output_preview as preview_module
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            parent = ttk.Frame(root)
+            parent.pack()
+            preview = preview_module.OutputPreview(parent, root, "", lambda: {})
+            root.update()
+            preview.config = {
+                "drum_radius": 0.06,
+                "inner_radius": 0.03,
+                "drum_half_length": 0.03,
+                "spin_axis": "X",
+            }
+            preview.particles = []
+
+            def marker_segments(spin: float) -> list[tuple[float, ...]]:
+                preview.particle_canvas.delete("all")
+                preview._draw_particles_3d(
+                    preview.particle_canvas, preview._palette(), 320, 200,
+                    {"spin_deg": spin}, 0.06, False)
+                return [tuple(preview.particle_canvas.coords(item))
+                        for item in preview.particle_canvas.find_all()
+                        if preview.particle_canvas.type(item) == "line"
+                        and preview.particle_canvas.itemcget(item, "fill")
+                        == DRUM_MARKER_COLOR]
+
+            forward = marker_segments(90.0)
+            reverse = marker_segments(-90.0)
+
+            self.assertEqual(len(forward), 2)
+            self.assertEqual(len(reverse), 2)
+            self.assertNotEqual(forward, reverse)
         finally:
             root.destroy()
 
