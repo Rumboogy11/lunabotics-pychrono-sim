@@ -255,6 +255,8 @@ class Full3dFeaToggleTest(IsolatedGuiDefaultsTest):
             tool_labels = [child.cget("text") for child in descendants(app.tools_tab)
                            if isinstance(child, (tk.Label, ttk.Checkbutton))]
             self.assertIn("Load 3D FEA stress/deformation in ParaView (if valid)", tool_labels)
+            self.assertIn("Show one-way FEA scalar/deformation history charts", tool_labels)
+            self.assertFalse(app.tools_show_fea_charts.get())
 
             with tempfile.TemporaryDirectory(prefix="vtk_toggle_", dir="/tmp/opencode") as tmp:
                 app.vars["output_dir"].set(tmp)
@@ -277,7 +279,7 @@ class Full3dFeaToggleTest(IsolatedGuiDefaultsTest):
 
 
 class ParaViewFeaLoadTest(IsolatedGuiDefaultsTest):
-    def test_paraview_button_requests_fea_without_manifest(self) -> None:
+    def test_paraview_button_hides_charts_and_clears_inherited_env(self) -> None:
         import tkinter as tk
 
         import study_gui as gui
@@ -287,6 +289,7 @@ class ParaViewFeaLoadTest(IsolatedGuiDefaultsTest):
         try:
             app = gui.StudyGUI(root)
             self.assertTrue(app.tools_show_fea_3d.get())
+            self.assertFalse(app.tools_show_fea_charts.get())
             with tempfile.TemporaryDirectory(prefix="pv_fea_", dir="/tmp/opencode") as tmp:
                 app.tools_study_dir.set(tmp)
                 calls = []
@@ -298,7 +301,8 @@ class ParaViewFeaLoadTest(IsolatedGuiDefaultsTest):
                     calls.append((cmd, kwargs))
                     return FakeProc()
 
-                with patch.object(gui.shutil, "which",
+                with patch.dict(os.environ, {"PYCHRONO_FEA_CHARTS": "1"}), \
+                     patch.object(gui.shutil, "which",
                                   side_effect=lambda name: None if name == "paraview" else "/usr/bin/pvpython"), \
                      patch.object(gui.subprocess, "Popen", fake_popen), \
                      patch.object(gui.threading, "Thread"):
@@ -307,6 +311,42 @@ class ParaViewFeaLoadTest(IsolatedGuiDefaultsTest):
                 self.assertEqual(calls[0][1]["env"]["PYCHRONO_WITH_FEA"], "1")
                 self.assertNotIn("PYCHRONO_FEA_CHARTS", calls[0][1]["env"])
                 self.assertNotIn("--show-fea-charts", calls[0][0])
+        finally:
+            root.destroy()
+
+    def test_paraview_button_chart_toggle_opts_in(self) -> None:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+            app.tools_show_fea_charts.set(True)
+            app.tools_show_fea_3d.set(False)
+            with tempfile.TemporaryDirectory(prefix="pv_fea_charts_", dir="/tmp/opencode") as tmp:
+                app.tools_study_dir.set(tmp)
+                calls = []
+
+                class FakeProc:
+                    stdout = None
+
+                def fake_popen(cmd, **kwargs):
+                    calls.append((cmd, kwargs))
+                    return FakeProc()
+
+                with patch.dict(os.environ, {"PYCHRONO_FEA_CHARTS": ""}), \
+                     patch.object(gui.shutil, "which",
+                                  side_effect=lambda name: None if name == "paraview" else "/usr/bin/pvpython"), \
+                     patch.object(gui.subprocess, "Popen", fake_popen), \
+                     patch.object(gui.threading, "Thread"):
+                    app._tool_paraview()
+                self.assertTrue(calls)
+                self.assertEqual(calls[0][1]["env"]["PYCHRONO_FEA_CHARTS"], "1")
+                self.assertEqual(calls[0][1]["env"]["PYCHRONO_WITH_FEA"], "0")
+                self.assertIn("--show-fea-charts", calls[0][0])
+                self.assertNotIn("--with-fea", calls[0][0])
         finally:
             root.destroy()
 
@@ -325,7 +365,8 @@ class WizardParaViewLaunchTest(IsolatedGuiDefaultsTest):
                 calls.append((cmd, kwargs))
                 return type("Proc", (), {})()
 
-            with patch.object(wiz.shutil, "which", return_value="/usr/bin/paraview"), \
+            with patch.dict(os.environ, {"PYCHRONO_FEA_CHARTS": "1"}), \
+                 patch.object(wiz.shutil, "which", return_value="/usr/bin/paraview"), \
                  patch.object(wiz.subprocess, "Popen", fake_popen):
                 ok = wiz.launch_paraview_viewer(
                     ROOT / "view_study_paraview.py", paraview_dir, study_dir)
@@ -333,11 +374,73 @@ class WizardParaViewLaunchTest(IsolatedGuiDefaultsTest):
             self.assertTrue(calls)
             env = calls[0][1]["env"]
             self.assertEqual(env["PYCHRONO_WITH_FEA"], "1")
-            self.assertNotIn("PYCHRONO_FEA_CHARTS", env)
+            self.assertEqual(env["PYCHRONO_FEA_CHARTS"], "1")
             self.assertNotIn("--show-fea-charts", calls[0][0])
             self.assertEqual(env["PYCHRONO_PARAVIEW_GUI"], "1")
             self.assertEqual(env["PYCHRONO_EXPORT_DIR"], str(paraview_dir))
             self.assertEqual(env["PYCHRONO_SCRIPT_DIR"], str(ROOT))
+
+    def test_after_run_launch_chart_state_overrides_inherited_env(self) -> None:
+        import study_wizard as wiz
+
+        with tempfile.TemporaryDirectory(prefix="wiz_pv_charts_", dir="/tmp/opencode") as tmp:
+            study_dir = Path(tmp)
+            paraview_dir = study_dir / "paraview"
+            paraview_dir.mkdir()
+            calls = []
+
+            def fake_popen(cmd, **kwargs):
+                calls.append((cmd, kwargs))
+                return type("Proc", (), {})()
+
+            with patch.dict(os.environ, {"PYCHRONO_FEA_CHARTS": "1"}), \
+                 patch.object(wiz.shutil, "which", return_value="/usr/bin/paraview"), \
+                 patch.object(wiz.subprocess, "Popen", fake_popen):
+                self.assertTrue(wiz.launch_paraview_viewer(
+                    ROOT / "view_study_paraview.py", paraview_dir, study_dir,
+                    show_fea_charts=False))
+                self.assertTrue(wiz.launch_paraview_viewer(
+                    ROOT / "view_study_paraview.py", paraview_dir, study_dir,
+                    show_fea_charts=True))
+            self.assertEqual(len(calls), 2)
+            self.assertNotIn("PYCHRONO_FEA_CHARTS", calls[0][1]["env"])
+            self.assertEqual(calls[1][1]["env"]["PYCHRONO_FEA_CHARTS"], "1")
+
+
+class GuiAfterRunParaViewLaunchTest(IsolatedGuiDefaultsTest):
+    def _launch_once(self, *, show_charts: bool) -> dict:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+            app.tools_show_fea_charts.set(show_charts)
+            with tempfile.TemporaryDirectory(prefix="gui_after_pv_", dir="/tmp/opencode") as tmp:
+                out_dir = Path(tmp)
+                (out_dir / "paraview").mkdir()
+                cfg = {"output_dir": out_dir, "open_paraview": True}
+                app.log_queue.put(("done", "ok"))
+                with patch.object(app, "_collect_cfg", return_value=cfg), \
+                     patch.object(app, "_refresh_output_preview"), \
+                     patch.object(app.root, "after"), \
+                     patch.object(gui.wiz, "launch_paraview_viewer",
+                                  return_value=True) as launch:
+                    app._drain_log()
+                self.assertEqual(launch.call_count, 1)
+                args, kwargs = launch.call_args
+                self.assertEqual(args[0], ROOT / "view_study_paraview.py")
+                self.assertEqual(args[1], out_dir / "paraview")
+                self.assertEqual(args[2], out_dir)
+                return kwargs
+        finally:
+            root.destroy()
+
+    def test_after_run_launch_follows_chart_toggle(self) -> None:
+        self.assertFalse(self._launch_once(show_charts=False)["show_fea_charts"])
+        self.assertTrue(self._launch_once(show_charts=True)["show_fea_charts"])
 
 
 class MeshPreviewToolTest(IsolatedGuiDefaultsTest):

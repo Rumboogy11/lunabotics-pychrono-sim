@@ -167,7 +167,8 @@ PARAM_INFO: dict[str, str] = {
     "save_particles": "Write CRM particle positions as CSV at the particle output FPS. Needed for ParaView particle spheres; uses disk space.",
     "fea_export_vtk": "Write the full 3D FEA stress/deformation animation as per-frame VTU files (fea/vtk/fea.pvd). This adds a stress scan and file write per recorded frame and can dominate runtime/disk, so it is off by default. Scalar FEA summaries are always written.",
     "fea_vtk_stride": "Export every Nth recorded FEA frame to the 3D VTU animation. 1 means every frame (full animation); the final frame is always included. Higher values reduce cost.",
-    "tools_show_fea_3d": "Load the validated 3D FEA stress/deformation PVD in ParaView when the study produced one. On by default; uncheck to view only CRM particles. One-way FEA history charts are opt-in and hidden by default. Requires the 'Export full 3D FEA stress animation' option (or an older complete fea.pvd).",
+    "tools_show_fea_3d": "Load the validated 3D FEA stress/deformation PVD in ParaView when the study produced one. On by default; uncheck to view only CRM particles. This is the 3D overlay only; it does not enable the one-way FEA history charts. Requires the 'Export full 3D FEA stress animation' option (or an older complete fea.pvd).",
+    "tools_show_fea_charts": "Display the one-way FEA scalar stress and deformation history XY charts in ParaView. Off by default; check to opt in. Unchecking clears an inherited PYCHRONO_FEA_CHARTS setting. This is independent of the 3D FEA overlay, and --no-fea still suppresses all FEA views.",
     "export_vtk": "Create separate ParaView series (crm_particles.pvd, excavator.pvd, optional fea.pvd) plus combined.pvd and a manifest after the run.",
     "paraview_stride": "Export every Nth CRM frame for both particles and excavator. Use 1 for all frames; all series stay time-aligned.",
     "paraview_particle_stride": "Export every Nth CRM particle frame independently of the excavator series. Use 0 to follow the general ParaView export stride, or >1 to reduce the much larger particle series.",
@@ -1253,6 +1254,17 @@ class StudyGUI:
                    command=lambda: self._show_info("Load 3D FEA stress", PARAM_INFO["tools_show_fea_3d"])).grid(
                        row=r, column=3, sticky=W, padx=6)
         r += 1
+        # One-way FEA history charts are deliberately opt-in: the default false
+        # state also clears PYCHRONO_FEA_CHARTS inherited from the environment.
+        self.tools_show_fea_charts = BooleanVar(value=False)
+        ttk.Checkbutton(p, text="Show one-way FEA scalar/deformation history charts",
+                        variable=self.tools_show_fea_charts).grid(
+                            row=r, column=0, columnspan=2, sticky=W, padx=8, pady=4)
+        ttk.Button(p, text="Info", width=6,
+                   command=lambda: self._show_info("Show FEA history charts",
+                                                   PARAM_INFO["tools_show_fea_charts"])).grid(
+                       row=r, column=3, sticky=W, padx=6)
+        r += 1
 
         ttk.Separator(p).grid(row=r, column=0, columnspan=4, sticky="ew", pady=8); r += 1
         ttk.Label(p, text="ParaView notes:", font=SECTION_FONT).grid(row=r, column=0, sticky=W, padx=8); r += 1
@@ -1264,7 +1276,7 @@ class StudyGUI:
             "• pvpython fallback: pvpython view_study_paraview.py <study>/paraview stays open until its render window is closed.\n"
             "• 'Preview STEP mesh' runs the current Geometry settings through the exact full-run mesher into geometry_checks/, then opens the STEP-vs-mesh comparison tool. Active study outputs are untouched.\n"
             "• Particles are rendered as 3D sphere point sprites (glyph fallback). Excavator is a separate source.\n"
-            "• One-way FEA scalar/deformation XY charts are hidden by default; pass --show-fea-charts to opt in. A validated per-frame stress/deformation PVD is loaded by default; uncheck 'Load 3D FEA stress' to skip it.\n"
+            "• One-way FEA scalar/deformation XY charts are hidden by default; check 'Show one-way FEA scalar/deformation history charts' to opt in (or pass --show-fea-charts to the viewer). A validated per-frame stress/deformation PVD is loaded by default; uncheck 'Load 3D FEA stress' to skip it.\n"
             "• The lightweight Output Preview tab reads CRM/FEA CSVs directly and draws a bounded 3D point cloud with editable particle/frame strides."
         )
         ttk.Label(p, text=notes, justify=LEFT).grid(row=r, column=0, columnspan=4, sticky=W, padx=8, pady=4); r += 1
@@ -2457,7 +2469,7 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                         try:
                             cfg = self._collect_cfg()
                             # print summary paths in log
-                            out_dir = Path(self._g("output_dir")).expanduser().resolve()
+                            out_dir = Path(cfg["output_dir"]).expanduser().resolve()
                             self.log_text.insert(END, f"\nResults folder: {out_dir}\n")
                             if (out_dir / "paraview").is_dir():
                                 self.log_text.insert(
@@ -2465,6 +2477,23 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                                     f"ParaView 3D: QT_QPA_PLATFORM=xcb PYCHRONO_EXPORT_DIR={out_dir/'paraview'} "
                                     f"paraview --script={ROOT/'view_study_paraview.py'}\n",
                                 )
+                                if cfg.get("open_paraview"):
+                                    show_fea_charts = bool(
+                                        getattr(self, "tools_show_fea_charts", None)
+                                        and self.tools_show_fea_charts.get()
+                                    )
+                                    if wiz.launch_paraview_viewer(
+                                        ROOT / "view_study_paraview.py",
+                                        out_dir / "paraview",
+                                        out_dir,
+                                        show_fea_charts=show_fea_charts,
+                                    ):
+                                        self.log_text.insert(END, "Opened ParaView visualization.\n")
+                                    else:
+                                        self.log_text.insert(
+                                            END,
+                                            "Could not launch ParaView automatically; run the command above.\n",
+                                        )
                             self.log_text.see(END)
                             self._refresh_output_preview()
                         except Exception:
@@ -2626,15 +2655,25 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         pdir = d / "paraview" if (d / "paraview").is_dir() else d
         script = str(ROOT / "view_study_paraview.py")
         show_fea_3d = bool(getattr(self, "tools_show_fea_3d", None) and self.tools_show_fea_3d.get())
+        show_fea_charts = bool(getattr(self, "tools_show_fea_charts", None)
+                               and self.tools_show_fea_charts.get())
         env = os.environ.copy()
+        if show_fea_charts:
+            env["PYCHRONO_FEA_CHARTS"] = "1"
+        else:
+            # An unchecked GUI toggle is authoritative: do not let an inherited
+            # shell setting silently enable the one-way history charts.
+            env.pop("PYCHRONO_FEA_CHARTS", None)
         env["PYCHRONO_EXPORT_DIR"] = str(pdir)
         env["PYCHRONO_STUDY_DIR"] = str(d)
         # ParaView's --script runner does not define __file__; the viewer uses
         # these to locate its local fea_summary helper.
         env["PYCHRONO_SCRIPT_DIR"] = str(ROOT)
         env["PYCHRONO_ROOT"] = str(ROOT)
-        self._tool_log("# viewer loads fea/summary.csv scalar charts when available "
-                       "(--no-fea suppresses them); 3D FEA follows the Tools toggle")
+        chart_state = "enabled by the Tools chart toggle" if show_fea_charts else \
+                      "hidden by default (check the Tools chart toggle to opt in)"
+        self._tool_log(f"# one-way FEA scalar/deformation history charts: {chart_state}; "
+                       "--no-fea suppresses all FEA views")
 
         # Make invalid/cancelled 3D FEA exports explicit before the viewer opens.
         manifest_path = pdir / "export_manifest.json"
@@ -2646,9 +2685,10 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             manifest = {}
         if manifest:
             if manifest.get("has_fea_summary"):
-                self._tool_log("# FEA scalar charts: available from fea_summary.csv")
+                self._tool_log("# FEA scalar history: available from fea_summary.csv "
+                               "(displayed only with the chart opt-in)")
             else:
-                self._tool_log("# FEA scalar charts: no summary found")
+                self._tool_log("# FEA scalar history: no summary found")
         # The manifest can be stale.  Let the viewer validate the actual PVD
         # and frame files so a usable partial run still loads from the GUI.
         fea_pvd, fea_status = pvview.find_valid_fea_pvd(pdir, manifest)
@@ -2715,6 +2755,8 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         cmd = [pvpython_bin, script, str(pdir)]
         if show_fea_3d:
             cmd.append("--with-fea")
+        if show_fea_charts:
+            cmd.append("--show-fea-charts")
         self._tool_log("$ " + shlex.join(cmd))
         try:
             proc = subprocess.Popen(

@@ -1952,9 +1952,18 @@ def open_path(path: Path) -> bool:
         return False
 
 
-def launch_paraview_viewer(paraview_script: Path, paraview_dir: Path, study_dir: Path) -> bool:
-    """Open the preconfigured ParaView scene in the full GUI (pvpython fallback)."""
+def launch_paraview_viewer(paraview_script: Path, paraview_dir: Path, study_dir: Path,
+                           *, show_fea_charts: bool | None = None) -> bool:
+    """Open the preconfigured ParaView scene in the full GUI (pvpython fallback).
+
+    ``show_fea_charts`` is tri-state: ``True`` opts in, ``False`` clears an
+    inherited setting, and ``None`` preserves the caller's environment.
+    """
     env = os.environ.copy()
+    if show_fea_charts is True:
+        env["PYCHRONO_FEA_CHARTS"] = "1"
+    elif show_fea_charts is False:
+        env.pop("PYCHRONO_FEA_CHARTS", None)
     env["PYCHRONO_EXPORT_DIR"] = str(paraview_dir)
     env["PYCHRONO_STUDY_DIR"] = str(study_dir)
     # --script does not define __file__, so the viewer needs its helper path.

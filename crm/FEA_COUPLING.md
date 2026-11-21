@@ -141,7 +141,11 @@ The viewer derives the table on demand for older studies, so re-running the
 exporter is optional. One-way FEA history charts are hidden by default: add
 `--show-fea-charts` (or `PYCHRONO_FEA_CHARTS=1` with `paraview --script=...`) to
 show them, `--fea-series COL1,COL2` to select other columns, or `--no-fea` to
-suppress all FEA views.
+suppress all FEA views. In the GUI, the Tools tab's **Show one-way FEA
+scalar/deformation history charts** checkbox is off by default and controls
+both the manual ParaView launch and "Open ParaView after run"; unchecking it
+clears an inherited `PYCHRONO_FEA_CHARTS` value. The separate "Load 3D FEA
+stress/deformation in ParaView" checkbox remains the 3D overlay control only.
 
 For a full 3D animation, enable the UI toggle before running FEA (wizard
 equivalents: `--fea-export-vtk` and optional `--vtk-stride N`, default `1`).
