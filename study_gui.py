@@ -108,7 +108,7 @@ PARAM_INFO: dict[str, str] = {
     "auto_geometry": "Measure the selected CAD/mesh and refresh suggested drum, bed, domain, spacing, and mesh values. All values remain editable.",
     # Geometry
     "step_file": "CAD input (.step/.stp) used only when Geometry source is 'step'. New models use rotation axis Y in STEP space.",
-    "fill_detector_step": "Optional closed STEP surface that is the negative of the drum interior. It is converted separately to a local-frame, metre-scale OBJ, follows the excavator pose exactly, and is used for excavated/fill classification with a monotonic latch; blank keeps the analytic eroded-cylinder detector.",
+    "fill_detector_step": "Optional closed STEP surface that is the negative of the drum interior. It is converted separately to a local-frame, metre-scale OBJ, follows the excavator pose exactly, and classifies excavated/fill particles by current mesh containment only; blank keeps the analytic eroded-cylinder detector.",
     "crm_obj": "Triangulated drum surface for rigid Chrono::CRM contact. For production use the promoted coarse OBJ, not a full-detail mesh.",
     "fea_node": "TetGen node file for the solid drum mesh used in one-way FEA.",
     "fea_ele": "TetGen element file paired with the FEA .node mesh.",

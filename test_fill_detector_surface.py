@@ -198,7 +198,7 @@ class FillDetectorSurfaceTest(unittest.TestCase):
                 with_flags=True,
             )
             # The 0.05 m half-width detector eroded by rp=0.01 rejects the
-            # 0.049 m centre; fill follows that exact, latched excavated set.
+            # 0.049 m centre; fill follows that exact, instantaneous excavated set.
             self.assertEqual(metrics["sph_particles"], 2)
             np.testing.assert_array_equal(
                 flags, np.array([[1, 1], [0, 0]], dtype=np.uint8))

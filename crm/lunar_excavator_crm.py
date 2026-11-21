@@ -26,10 +26,9 @@ tolerance and either:
 
 The optional mesh follows the excavator's exact rotation and translation and is
 never expanded into a revolved envelope, so it cannot protrude outside the
-physical geometry.  Excavation is latched: a particle captured by the rotating
-mesh stays counted while elevated and clears when it settles back to the bed.
-That removes the old fill/non-fill sweep without changing the supplied surface.
-Fill uses exactly the excavated set::
+physical geometry.  Classification is instantaneous: a particle is counted only
+while it is inside the current mesh pose and above the initial bed, and loses
+the flag when it leaves the mesh.  Fill uses exactly this excavated set::
 
     retained_mass = n_excavated * particle_mass
     capacity_mass = bulk_density * pi * inner_radius**2 * drum_length
@@ -84,7 +83,6 @@ sys.path.insert(0, str(CRM_DIR))
 
 from crm_soil import DEFAULT_SOIL, CrmSoilParams  # noqa: E402
 from fill_detector import (  # noqa: E402
-    ExcavatedState,
     FillDetector,
     FillSurfaceError,
     detector_definition,
@@ -306,7 +304,7 @@ def build_parser(*, include_drum_gravity: bool = True) -> argparse.ArgumentParse
     p.add_argument("--fill-detector-obj", type=Path, default=None,
                    help="watertight OBJ surface in drum-local metres representing the negative "
                         "interior of the excavator; follows the full drum pose and defines "
-                        "excavated/fill particles with monotonic latching")
+                        "excavated/fill particles by current containment only")
     p.add_argument("--active-box", type=str, default=None,
                    help="active SPH domain full size X,Y,Z in metres (default: padded bed + 2 drum "
                         "diameters laterally; bed + initial height + 2 diameters + padding vertically)")
@@ -1034,8 +1032,7 @@ def create_drum(chrono, system, terrain, motion, mesh: Path):
 def compute_metrics(positions: np.ndarray, drum, run: CrmRunParams, motion,
                     soil: CrmSoilParams, particle_mass: float,
                     capacity_volume: float, surface_z: float,
-                    with_flags: bool = False,
-                    excavated_state: ExcavatedState | None = None):
+                    with_flags: bool = False):
     pos = np.asarray(positions, dtype=np.float64)
     if pos.ndim == 1 and pos.size % 3 == 0:
         pos = pos.reshape(-1, 3)
@@ -1064,11 +1061,9 @@ def compute_metrics(positions: np.ndarray, drum, run: CrmRunParams, motion,
     detector = load_fill_detector(run.fill_detector_obj)
     if detector is not None:
         # Exact containment in the supplied negative-interior mesh, transformed
-        # by the drum's live pose.  The latch prevents the same fixed particle
-        # from reverting to non-fill when the cavity rotates away from it.
-        # Callers may pass an explicit state; otherwise the detector's own state
-        # keeps the guarantee for every compute_metrics() invocation.
-        excavated = detector.excavated_mask(local, rp, lifted, excavated_state)
+        # by the drum's live pose.  This is instantaneous: leaving the mesh
+        # clears the flag on the next metrics call.
+        excavated = detector.contains_with_margin(local, rp) & lifted
     else:
         excavated = (
             (radial2 <= r_outer2)
@@ -1205,14 +1200,6 @@ def main() -> int:
         fill_detector = load_fill_detector(run.fill_detector_obj)
     except FillSurfaceError as exc:
         raise SystemExit(str(exc)) from exc
-    if fill_detector is not None:
-        # load_fill_detector() caches geometry but returns a fresh latch.  Keep
-        # this one state for the whole driver run and pass it on every frame;
-        # otherwise each metrics call would start a new excavation history.
-        fill_detector.reset_excavation()
-    excavated_state = (
-        fill_detector.excavated_state if fill_detector is not None else None
-    )
 
     if args.print_soil:
         print(soil.summary())
@@ -1461,7 +1448,6 @@ def main() -> int:
         metrics, flags = compute_metrics(
             positions, drum, run, motion, soil, particle_mass,
             capacity_volume, surface_z, with_flags=with_flags,
-            excavated_state=excavated_state,
         )
         peak_fill = max(peak_fill, metrics["fill_ratio_mass"])
         angle = math.degrees(run.omega * max(0.0, t - run.settle_time))

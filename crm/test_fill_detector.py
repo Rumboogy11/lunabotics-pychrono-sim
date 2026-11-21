@@ -141,10 +141,9 @@ class FillDetectorContainmentTest(unittest.TestCase):
         # The capacity denominator is still the nominal, un-eroded cylinder.
         self.assertEqual(metrics["capacity_m3"], self.capacity)
 
-    def test_fill_is_stable_while_the_drum_rotates(self):
+    def test_fill_flags_follow_current_mesh_containment(self):
         # A fixed soil particle enters and leaves a non-axisymmetric cavity once
-        # per revolution.  The raw mesh test must actually alternate; the
-        # excavation latch must still keep that particle counted while elevated.
+        # per revolution.  Its fill flags must follow the mesh at each instant.
         with tempfile.TemporaryDirectory(prefix="fill_rotation_", dir="/tmp/opencode") as tmp:
             detector_path = Path(tmp) / "rect.obj"
             write_rect_box_obj(detector_path, half_x=0.07, half_y=0.03, half_z=0.03)
@@ -152,7 +151,6 @@ class FillDetectorContainmentTest(unittest.TestCase):
             detector = fill_detector.load_fill_detector(detector_path)
             self.assertIsNotNone(detector)
             assert detector is not None
-            state = fill_detector.ExcavatedState()
 
             local0 = np.array([[0.045, 0.0, 0.0]])
             world = local_to_world(local0, self.origin, self.quat)
@@ -176,45 +174,34 @@ class FillDetectorContainmentTest(unittest.TestCase):
                     metrics, flags = crm.compute_metrics(
                         world, drum, run, self.motion, DEFAULT_SOIL,
                         DEFAULT_SOIL.density * run.spacing**3, self.capacity,
-                        self.surface_z, with_flags=True, excavated_state=state,
+                        self.surface_z, with_flags=True,
                     )
-                    np.testing.assert_array_equal(flags, np.ones((1, 2), dtype=np.uint8))
-                    self.assertEqual(metrics["inside_drum"], 1)
-                    self.assertEqual(metrics["excavated"], 1)
+                    expected_flag = int(inside_mesh)
+                    np.testing.assert_array_equal(
+                        flags, np.array([[expected_flag, expected_flag]], dtype=np.uint8))
+                    self.assertEqual(metrics["inside_drum"], expected_flag)
+                    self.assertEqual(metrics["excavated"], expected_flag)
 
-            # Settling back to the bed clears the latch; a later rotation cannot
-            # resurrect a particle that is no longer elevated.
+            # Revisiting an earlier pose restores the flag; there is no latch.
+            metrics, flags = crm.compute_metrics(
+                world, drums[0], run, self.motion, DEFAULT_SOIL,
+                DEFAULT_SOIL.density * run.spacing**3, self.capacity,
+                self.surface_z, with_flags=True,
+            )
+            np.testing.assert_array_equal(flags, np.ones((1, 2), dtype=np.uint8))
+            self.assertEqual(metrics["inside_drum"], 1)
+
+            # Settling back to the bed clears the flag while still in the mesh.
             settled = world.copy()
             settled[0, 2] = self.surface_z + self.rp - 1.0e-9
             metrics, flags = crm.compute_metrics(
                 settled, drums[0], run, self.motion, DEFAULT_SOIL,
                 DEFAULT_SOIL.density * run.spacing**3, self.capacity,
-                self.surface_z, with_flags=True, excavated_state=state,
+                self.surface_z, with_flags=True,
             )
             np.testing.assert_array_equal(flags, np.zeros((1, 2), dtype=np.uint8))
             self.assertEqual(metrics["inside_drum"], 0)
             self.assertEqual(metrics["excavated"], 0)
-
-    def test_excavated_state_reset_and_shape_change(self):
-        state = fill_detector.ExcavatedState()
-        np.testing.assert_array_equal(
-            state.update(np.array([True, False]), np.array([True, True])),
-            np.array([True, False]),
-        )
-        # First capture is monotonic while elevated, even without mesh contact.
-        np.testing.assert_array_equal(
-            state.update(np.array([False, False]), np.array([True, True])),
-            np.array([True, False]),
-        )
-        np.testing.assert_array_equal(
-            state.update(np.array([True, True]), np.array([True, False])),
-            np.array([True, False]),
-        )
-        state.reset()
-        np.testing.assert_array_equal(
-            state.update(np.array([True, True]), np.array([True, False])),
-            np.array([True, False]),
-        )
 
     def test_lifted_tolerance_stays_at_particle_radius(self):
         locals_ = np.array([[0.0, 0.0, 0.0]])
