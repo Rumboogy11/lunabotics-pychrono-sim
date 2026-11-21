@@ -86,6 +86,8 @@ class ExcavatorParams:
         axis = self.drum_spin_axis.upper()
         if axis not in {"X", "Y", "Z"}:
             raise ValueError("drum_spin_axis must be X, Y, or Z")
+        if not math.isfinite(self.gravity):
+            raise ValueError("gravity must be finite")
 
         # Bed footprint includes padding around the drum so ejected soil hits
         # the reflective BCE walls before it can hit (or freeze inside) the

@@ -41,6 +41,10 @@ PYTHON="$CHRONO_ENV/bin/python" ./crm/run.sh \
 
 Runners select `chrono-env/bin/python` automatically when `PYTHON` is unset and the local environment is present.
 
+### Gravity settings
+
+`--gravity` (or the GUI's **Gravity Z (m/s^2)** field) sets one signed global Z acceleration, default `-9.81` m/s². It always drives CRM soil and the drums in both FEA paths. Rigid CRM's drum is a separate choice: **Apply gravity to CRM drum** / `--drum-gravity` defaults off, so older force-descent runs keep their original actuator-plus-soil-response behavior. Enable it when the drum's own weight should contribute to descent.
+
 ## Typical workflows
 
 ### 1. Rigid CRM geometry comparison (recommended for design)
@@ -65,7 +69,7 @@ All three drivers default to the original constant-speed kinematic descent. Add 
   --loads Output_Force/crm/soil_loads.csv --output-dir Output_Force/fea
 ```
 
-The CRM force motor is active only after `--settle-time`, then the position motor holds the final `z_target` once reached; spin remains prescribed. Gravity and SPH soil reaction also act on the drum, so descent time is force-dependent and `--descent-speed` is ignored except for wizard/GUI duration guidance (`0` is allowed). Force runs add `descent_mode`, `descent_state`, `actuator_force_n` (positive magnitude), and `vertical_speed_m_s` to `summary.csv`/`soil_loads.csv`; `recorded_trajectory_error_m` is also added to one-way FEA output. Kinematic CSV schemas are unchanged. The one-way path replays the recorded CRM Z trajectory with a position motor because it has no SPH reaction to balance the force; it rejects a loads file recorded with a different mode. The coupled diagnostic FEA path applies the force motor directly to the slider. Use the same force options in every stage; the wizard/GUI expose `descent_mode`, `descent_force_n`, and `descent_force_ramp_s` and emit the flags only for force studies.
+The CRM force motor is active only after `--settle-time`, then the position motor holds the final `z_target` once reached; spin remains prescribed. SPH soil reaction always acts on the drum. Global gravity is always applied to CRM soil and FEA drums; the rigid CRM drum only gets it when `--drum-gravity` is passed (default off to preserve earlier force-descent behavior). Kinematic descent overrides the drum pose either way, so this toggle mainly changes force-mode dynamics. `--descent-speed` is ignored in force mode except for wizard/GUI duration guidance (`0` is allowed). Force runs add `descent_mode`, `descent_state`, `actuator_force_n` (positive magnitude), and `vertical_speed_m_s` to `summary.csv`/`soil_loads.csv`; `recorded_trajectory_error_m` is also added to one-way FEA output. Kinematic CSV schemas are unchanged. The one-way path replays the recorded CRM Z trajectory with a position motor because it has no SPH reaction to balance the force; it rejects a loads file recorded with a different mode. The coupled diagnostic FEA path applies the force motor directly to the slider. Use the same force and gravity options in every stage; the wizard/GUI expose `descent_mode`, `descent_force_n`, `descent_force_ramp_s`, `gravity`, and `drum_gravity`, emitting `--drum-gravity` only for rigid CRM.
 
 ### 3. One-way CRM → FEA (structural screening)
 

@@ -114,7 +114,7 @@ def fea_metric_fields(run) -> list[str]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = rigid.build_parser()
+    p = rigid.build_parser(include_drum_gravity=False)
     p.description = __doc__
     # The rigid driver's OBJ switches do not apply to this solid-FEA model.
     for action in list(p._actions):
@@ -831,6 +831,7 @@ def write_fea_config(path: Path, soil, run, pla: PlaParams, motion, node_path: P
         "soil": asdict(soil),
         "friction_angle_deg": soil.friction_angle_deg,
         "run": {**asdict(run), "active_box": list(run.active_box)},
+        "gravity_m_s2": run.gravity,
         "pla": asdict(pla),
         "spin_ramp_time_s": spin_ramp_time,
         "fea": {
@@ -893,6 +894,7 @@ def main() -> int:
         settle_time=run.settle_time,
         lower_speed=run.descent_speed,
         drum_omega=run.omega,
+        gravity=run.gravity,
         bed_height=run.bed_height,
         bed_padding=run.bed_padding,
         drum_spin_axis=run.spin_axis,
@@ -927,6 +929,7 @@ def main() -> int:
                 ) + f", bed surface z={surface_z:.4f} m",
                 f"active SPH box: {run.active_box}, capacity={capacity_volume:.6g} m^3 "
                 f"({capacity_volume * soil.density:.4f} kg)",
+                f"gravity: gz={run.gravity:g} m/s^2 on soil and FEA drum",
                 f"spin-up ramp: {args.spin_ramp_time:g} s",
             ]
         ),
@@ -949,9 +952,7 @@ def main() -> int:
     # threaded sparse/dense kernels.  Keep Bullet collision processing serial:
     # the FEA/CRM coupling does not rely on multicore collision detection.
     system.SetNumThreads(args.num_threads, 1, args.num_threads)
-    system.SetGravitationalAcceleration(
-        chrono.ChVector3d(0.0, 0.0, MOTION_DEFAULT.gravity)
-    )
+    system.SetGravitationalAcceleration(chrono.ChVector3d(0.0, 0.0, run.gravity))
     if hasattr(system, "SetCollisionSystemType") and hasattr(chrono, "ChCollisionSystem"):
         system.SetCollisionSystemType(chrono.ChCollisionSystem.Type_BULLET)
     if args.timestepper == "hht":
@@ -981,7 +982,7 @@ def main() -> int:
 
     terrain = veh.CRMTerrain(system, run.spacing)
     terrain.SetVerbose(False)
-    terrain.SetGravitationalAcceleration(chrono.ChVector3d(0.0, 0.0, MOTION_DEFAULT.gravity))
+    terrain.SetGravitationalAcceleration(chrono.ChVector3d(0.0, 0.0, run.gravity))
     terrain.SetStepSizeCFD(run.dt)
     if hasattr(terrain, "SetStepsizeMBD"):
         terrain.SetStepsizeMBD(run.dt)

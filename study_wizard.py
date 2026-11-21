@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import re
 import shlex
@@ -654,6 +655,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--active-box", default=None, help="SPH domain size X,Y,Z in metres")
     p.add_argument("--settle-time", type=float, default=None,
                    help="bed settle time before spin/descent (default: 0.001 s)")
+    p.add_argument("--gravity", type=float, default=None,
+                   help="global Z gravitational acceleration in m/s^2 (default: -9.81)")
+    p.add_argument("--drum-gravity", action=argparse.BooleanOptionalAction, default=None,
+                   help="apply global gravity to the rigid CRM drum (default: off; FEA drums always use it)")
     p.add_argument("--descent-speed", type=float, default=None,
                    help="drum descent speed in m/s for kinematic mode")
     p.add_argument("--descent-mode", choices=("kinematic", "force"), default=None,
@@ -1344,6 +1349,21 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         detail="Time to let the bed settle before excavation motion begins. Longer settling can "
                "reduce the first-bite pressure transient that flings soil upward.",
     )
+    gravity = args.gravity if args.gravity is not None else prompt_float(
+        "Gravitational acceleration Z (m/s^2)", -9.81,
+        detail="Signed global vertical acceleration. Negative is downward. Applied to CRM soil "
+               "and FEA drums; the rigid CRM drum needs 'Apply gravity to CRM drum'.",
+    )
+    if not math.isfinite(float(gravity)):
+        raise SystemExit("--gravity must be finite")
+    if args.drum_gravity is not None:
+        drum_gravity = bool(args.drum_gravity)
+    else:
+        drum_gravity = prompt_bool(
+            "Apply gravity to CRM drum?", False,
+            detail="Rigid CRM only. Off preserves the old force-descent response where only the "
+                   "actuator and soil reaction acted on the drum. FEA drums always follow gravity.",
+        )
     descent_mode = args.descent_mode if args.descent_mode is not None else prompt_choice(
         "Descent mode", ("kinematic", "force"), "kinematic",
         detail="Kinematic prescribes a constant lowering speed. Force mode applies a downward "
@@ -1549,11 +1569,13 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             f"SPH:          spacing={spacing:g} m, dt={dt_text}, "
             f"est. particles ~{estimate_sph_particles(drum_radius=drum_radius, drum_half_length=drum_half_length, bed_height=bed_height, spacing=spacing, spin_axis=spin_axis, bed_padding=bed_padding):,}",
             f"Bed:          height={bed_height:g} m, padding={bed_padding:g} R, "
-            f"box={','.join(f'{v:g}' for v in active_box)} m, "
-            + (
-                f"descent=force {descent_force_n:g} N (ramp {descent_force_ramp_s:g} s)"
+            f"box={','.join(f'{v:g}' for v in active_box)} m",
+            f"Gravity:      gz={gravity:g} m/s^2, rigid CRM drum="
+            f"{'on' if drum_gravity else 'off'}, FEA drums=on",
+            (
+                f"Descent:      force {descent_force_n:g} N (ramp {descent_force_ramp_s:g} s)"
                 if descent_mode == "force"
-                else f"descent={descent_speed:g} m/s"
+                else f"Descent:      {descent_speed:g} m/s"
             ),
             f"FEA:          dt={fea_dt:g} s, solver={solver}, threads={num_threads} "
             f"(3D stress VTU: {'stride ' + str(fea_vtk_stride) if fea_export_vtk else 'off'})",
@@ -1617,6 +1639,8 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "bed_padding": bed_padding,
         "active_box": active_box,
         "settle_time": settle_time,
+        "gravity": float(gravity),
+        "drum_gravity": bool(drum_gravity),
         "descent_mode": descent_mode,
         "descent_speed": descent_speed,
         "descent_force_n": float(descent_force_n),
@@ -1652,6 +1676,10 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     auto_correct_study_geometry(cfg)
     for warning in validate_study_geometry(cfg):
         print(f"WARNING: {warning}", file=sys.stderr)
+    gravity = float(cfg.get("gravity", -9.81))
+    if not math.isfinite(gravity):
+        raise StudyConfigError("gravity must be finite")
+    drum_gravity = bool(cfg.get("drum_gravity", False))
     out_dir: Path = cfg["output_dir"]
     crm_dir = out_dir / "crm"
     fea_dir = out_dir / "fea"
@@ -1673,6 +1701,7 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         "--bed-padding", f"{cfg.get('bed_padding', BED_PADDING_RADIUS_FRACTION):g}",
         "--active-box", ",".join(f"{v:g}" for v in cfg["active_box"]),
         "--settle-time", f"{cfg['settle_time']:g}",
+        "--gravity", f"{gravity:g}",
         "--descent-speed", f"{cfg['descent_speed']:g}",
         "--omega", f"{abs(cfg['omega']):g}",
         *(['--reverse-spin'] if cfg.get('reverse_spin') else []),
@@ -1693,6 +1722,8 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         crm_cmd.extend(["--capacity-volume", f"{cfg['capacity_volume']:g}"])
     if cfg["save_particles"]:
         crm_cmd.append("--save-particles")
+    if drum_gravity:
+        crm_cmd.append("--drum-gravity")
     if is_force_descent(cfg):
         crm_cmd.extend([
             "--descent-mode", "force",
@@ -1722,6 +1753,7 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         "--bed-height", f"{cfg['bed_height']:g}",
         "--bed-padding", f"{cfg.get('bed_padding', BED_PADDING_RADIUS_FRACTION):g}",
         "--settle-time", f"{cfg['settle_time']:g}",
+        "--gravity", f"{gravity:g}",
         "--descent-speed", f"{cfg['descent_speed']:g}",
         "--omega", f"{abs(cfg['omega']):g}",
         *(['--reverse-spin'] if cfg.get('reverse_spin') else []),

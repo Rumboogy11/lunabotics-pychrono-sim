@@ -548,6 +548,7 @@ def write_config(path: Path, args, run, pla, motion, node_path: Path, ele_path: 
         "spin_ramp_time_s": args.spin_ramp_time,
         "soil": asdict(rigid.make_soil(args)),
         "run": asdict(run),
+        "gravity_m_s2": run.gravity,
         "pla": asdict(pla),
         "motion": asdict(motion),
         "fea_mesh": {"node": str(node_path), "ele": str(ele_path),
@@ -611,6 +612,7 @@ def main() -> int:
         settle_time=run.settle_time,
         lower_speed=run.descent_speed,
         drum_omega=run.omega,
+        gravity=run.gravity,
         bed_height=run.bed_height,
         drum_spin_axis=run.spin_axis,
         drum_radius=run.drum_radius,
@@ -638,6 +640,7 @@ def main() -> int:
         f"{args.load_radius_fraction * motion.drum_radius:.4g} m, scale={args.load_scale:g}\n"
         f"spindle: omega={run.omega:g} rad/s about {run.spin_axis.upper()}, "
         f"spin ramp={args.spin_ramp_time:g} s\n"
+        f"gravity: gz={run.gravity:g} m/s^2 on the FEA drum\n"
         + (
             "descent: replaying force-driven CRM trajectory from the loads file"
             if run.descent_mode == "force"
@@ -671,7 +674,7 @@ def main() -> int:
 
     system = chrono.ChSystemNSC()
     system.SetNumThreads(args.num_threads, 1, args.num_threads)
-    system.SetGravitationalAcceleration(chrono.ChVector3d(0.0, 0.0, MOTION_DEFAULT.gravity))
+    system.SetGravitationalAcceleration(chrono.ChVector3d(0.0, 0.0, run.gravity))
     if hasattr(system, "SetCollisionSystemType") and hasattr(chrono, "ChCollisionSystem"):
         system.SetCollisionSystemType(chrono.ChCollisionSystem.Type_BULLET)
     if args.timestepper == "hht":

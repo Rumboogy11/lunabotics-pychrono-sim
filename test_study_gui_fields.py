@@ -584,5 +584,71 @@ class ForceDescentGuiFieldsTest(IsolatedGuiDefaultsTest):
             root.destroy()
 
 
+class GravityGuiFieldsTest(IsolatedGuiDefaultsTest):
+    def test_gravity_fields_are_editable_and_reach_generated_commands(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        import study_gui as gui
+
+        defaults = gui.shipped_defaults()
+        self.assertEqual(defaults["gravity"], "-9.81")
+        self.assertFalse(defaults["drum_gravity"])
+        fields = {row[1] for _, rows in gui.DEFAULT_GROUPS for row in rows}
+        self.assertTrue({"gravity", "drum_gravity"} <= fields)
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+            labels = [
+                child.cget("text")
+                for child in app.pages[2].winfo_children()
+                if isinstance(child, (tk.Label, ttk.Label))
+            ]
+            self.assertIn("Gravity Z (m/s^2)", labels)
+            self.assertIn("Apply gravity to CRM drum", labels)
+
+            with tempfile.TemporaryDirectory(prefix="gravity_gui_", dir="/tmp/opencode") as tmp:
+                app.vars["output_dir"].set(tmp)
+                app.vars["gravity"].set("-1.62")
+                app.vars["drum_gravity"].set(True)
+                cfg = app._collect_cfg()
+                self.assertAlmostEqual(cfg["gravity"], -1.62)
+                self.assertTrue(cfg["drum_gravity"])
+
+                with patch.object(gui.wiz, "measured_geometry_for_cfg", return_value=None):
+                    steps = gui.wiz.build_commands(cfg)
+                crm_cmd = next(s["command"] for s in steps if s["name"] == "rigid-CRM")
+                fea_cmd = next(s["command"] for s in steps if s["name"] == "one-way-FEA")
+                self.assertEqual(crm_cmd[crm_cmd.index("--gravity") + 1], "-1.62")
+                self.assertIn("--drum-gravity", crm_cmd)
+                self.assertEqual(fea_cmd[fea_cmd.index("--gravity") + 1], "-1.62")
+                self.assertNotIn("--drum-gravity", fea_cmd)
+
+                app._apply_config({"gravity": -9.81, "drum_gravity": False})
+                self.assertEqual(app.vars["gravity"].get(), "-9.81")
+                self.assertFalse(app.vars["drum_gravity"].get())
+        finally:
+            root.destroy()
+
+    def test_nonfinite_gravity_is_rejected_before_generating_commands(self) -> None:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+            with tempfile.TemporaryDirectory(prefix="gravity_gui_bad_", dir="/tmp/opencode") as tmp:
+                app.vars["output_dir"].set(tmp)
+                app.vars["gravity"].set("nan")
+                with self.assertRaisesRegex(ValueError, "Gravity Z must be finite"):
+                    app._collect_cfg()
+        finally:
+            root.destroy()
+
+
 if __name__ == "__main__":
     unittest.main()

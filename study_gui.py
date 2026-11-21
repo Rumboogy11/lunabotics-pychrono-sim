@@ -66,6 +66,7 @@ def _maybe_reexec_for_display():
 _maybe_reexec_for_display()
 
 import json
+import math
 import queue
 import re
 import shlex
@@ -148,9 +149,11 @@ PARAM_INFO: dict[str, str] = {
                   "Defaults to the padded bed plus 2 excavator diameters laterally, and bed height + initial "
                   "excavator height + 2 diameters + padding vertically, so flung particles are not deactivated.",
     "settle_time": "Time to let the bed settle before excavation motion begins. Longer settling can reduce the first-bite pressure transient that flings soil upward.",
+    "gravity": "Signed global vertical gravitational acceleration in m/s^2 (negative is downward). Always applied to CRM soil and FEA drums; -9.81 is Earth gravity.",
+    "drum_gravity": "Rigid CRM only: also apply global gravity to the drum body. Off preserves older force-descent behavior; FEA drums always follow global gravity. Kinematic descent overrides the drum pose either way.",
     "descent_mode": "Kinematic prescribes a constant lowering speed. Force applies a downward actuator after settling, holds at the final target, and makes the FEA replay follow the recorded trajectory. Spin stays prescribed in both modes.",
     "descent_speed": "Vertical lowering speed of the drum into the bed in kinematic mode. 0 keeps it at constant height; ignored by force descent except for duration guidance.",
-    "descent_force_n": "Downward actuator force in newtons after settling in force mode. Gravity and soil reaction also act on the drum.",
+    "descent_force_n": "Downward actuator force in newtons after settling in force mode. Soil reaction always acts on the drum; global gravity adds to it only when 'Apply gravity to CRM drum' is enabled.",
     "descent_force_ramp_s": "Linear ramp from zero to the descent actuator force in force mode. 0 applies full force immediately after settling.",
     "omega": "Drum angular speed magnitude about the spin axis (~3.14 rad/s = 30 rpm). Sign is controlled by Reverse spin.",
     "reverse_spin": "Flip rotation direction if the CAD excavator spins the wrong way. Signed omega is written as negative.",
@@ -382,6 +385,8 @@ def shipped_defaults() -> dict[str, object]:
         "bed_padding": f"{wiz.BED_PADDING_RADIUS_FRACTION:g}",
         "active_box": "0.631333,0.687407,0.86637",
         "settle_time": "0.001",
+        "gravity": "-9.81",
+        "drum_gravity": False,
         "descent_mode": "kinematic",
         "descent_speed": "0.0015",
         "descent_force_n": "1.0",
@@ -456,6 +461,8 @@ DEFAULT_GROUPS: list[tuple[str, list[tuple[str, str, dict]]]] = [
         ("Bed padding (fraction of radius)", "bed_padding", {}),
         ("Active box X,Y,Z (m)", "active_box", {}),
         ("Settle time (s)", "settle_time", {}),
+        ("Gravity Z (m/s^2)", "gravity", {}),
+        ("Apply gravity to CRM drum", "drum_gravity", {"check": True}),
         ("Descent mode", "descent_mode", {"combo": ["kinematic", "force"]}),
         ("Descent speed (m/s; kinematic)", "descent_speed", {}),
         ("Descent force (N; force mode)", "descent_force_n", {}),
@@ -935,6 +942,8 @@ class StudyGUI:
         r += 1
         r = self._row(p, r, "Active box X,Y,Z (m)", "active_box")
         r = self._row(p, r, "Settle time (s)", "settle_time")
+        r = self._row(p, r, "Gravity Z (m/s^2)", "gravity")
+        r = self._row(p, r, "Apply gravity to CRM drum", "drum_gravity", check=True)
         r = self._row(p, r, "Descent mode", "descent_mode", combo=["kinematic", "force"])
         r = self._row(p, r, "Descent speed (m/s; kinematic)", "descent_speed")
         r = self._row(p, r, "Descent force (N; force mode)", "descent_force_n")
@@ -2007,6 +2016,10 @@ class StudyGUI:
             raise ValueError("Bed padding fraction must be non-negative")
         active_box = self._parse_active_box(self._g("active_box"))
         settle_time = float(self._g("settle_time"))
+        gravity = float(self._g("gravity"))
+        if not math.isfinite(gravity):
+            raise ValueError("Gravity Z must be finite")
+        drum_gravity = self._gb("drum_gravity")
         descent_mode = self._g("descent_mode").strip().lower()
         if descent_mode not in {"kinematic", "force"}:
             raise ValueError("Descent mode must be kinematic or force")
@@ -2076,6 +2089,8 @@ class StudyGUI:
             "bed_padding": bed_padding,
             "active_box": active_box,
             "settle_time": settle_time,
+            "gravity": gravity,
+            "drum_gravity": drum_gravity,
             "descent_mode": descent_mode,
             "descent_speed": descent_speed,
             "descent_force_n": descent_force_n,
@@ -2275,12 +2290,12 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                   "drum_radius", "drum_half_length", "inner_radius", "capacity_volume", "duration",
                   "fea_duration", "spacing", "d0_multiplier", "artificial_viscosity",
                    "shifting_ppst_push", "crm_fps", "fea_fps", "fea_dt",
-                  "bed_height", "bed_padding", "settle_time", "descent_speed", "descent_force_n", "descent_force_ramp_s", "omega", "num_threads",
+                  "bed_height", "bed_padding", "settle_time", "gravity", "descent_speed", "descent_force_n", "descent_force_ramp_s", "omega", "num_threads",
                   "load_radius_fraction", "raw_stress_every", "export_workers",
                   "fea_vtk_stride", "paraview_stride", "paraview_particle_stride",
                   "paraview_particle_render_stride"]:
             setv(k, data.get(k))
-        for k in ["reverse_spin", "save_particles", "fea_export_vtk", "export_vtk", "open_results", "open_paraview", "auto_geometry",
+        for k in ["reverse_spin", "drum_gravity", "save_particles", "fea_export_vtk", "export_vtk", "open_results", "open_paraview", "auto_geometry",
                   "part_aware_simplify"]:
             if k in data:
                 setv(k, data.get(k))

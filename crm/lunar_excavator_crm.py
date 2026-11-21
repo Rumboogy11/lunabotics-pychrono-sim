@@ -100,6 +100,8 @@ class CrmRunParams:
     descent_mode: str = "kinematic"          # "kinematic" or "force"
     descent_force_n: float = 1.0             # downward actuator force in force mode
     descent_force_ramp_s: float = 0.0        # linear ramp from 0 to descent_force_n
+    gravity: float = MOTION_DEFAULT.gravity   # global Z acceleration for SPH/FEA [m/s^2]
+    drum_gravity: bool = False                # rigid CRM drum also follows global gravity
     omega: float = MOTION_DEFAULT.drum_omega
     reverse_spin: bool = False
     bed_height: float = MOTION_DEFAULT.bed_height
@@ -124,6 +126,8 @@ class CrmRunParams:
     def __post_init__(self) -> None:
         if self.descent_mode not in {"kinematic", "force"}:
             raise ValueError("descent_mode must be 'kinematic' or 'force'")
+        if not math.isfinite(self.gravity):
+            raise ValueError("gravity must be finite")
         if self.descent_mode == "force":
             if self.descent_force_n <= 0.0:
                 raise ValueError("descent_force_n must be positive")
@@ -218,7 +222,7 @@ def load_fields(run: CrmRunParams) -> list[str]:
     return LOAD_FIELDS + (FORCE_LOAD_FIELDS if run.descent_mode == "force" else [])
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(*, include_drum_gravity: bool = True) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -249,6 +253,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="downward actuator force in N for --descent-mode force (default: 1.0)")
     p.add_argument("--descent-force-ramp", type=float, default=None,
                    help="linear force ramp duration in s for force descent (default: 0)")
+    p.add_argument("--gravity", type=float, default=None,
+                   help="global Z gravitational acceleration in m/s^2 (default: -9.81). "
+                        "Always applied to CRM soil and FEA drums; use --drum-gravity for the rigid CRM drum")
+    if include_drum_gravity:
+        p.add_argument("--drum-gravity", action=argparse.BooleanOptionalAction, default=False,
+                       help="also apply global gravity to the rigid CRM drum (default: off; "
+                            "FEA drums always follow global gravity)")
     p.add_argument("--omega", type=float, default=None,
                    help="drum spin rate magnitude in rad/s (default: shared config)")
     p.add_argument("--reverse-spin", action="store_true",
@@ -464,7 +475,12 @@ def fit_computational_domain(run: CrmRunParams, motion,
                     abs(container_min[1]) + bce_margin, abs(container_max[1]) + bce_margin)
     z_min = min(motion.floor_z - wall_margin, container_min[2] - bce_margin)
     crest_z = motion.drum_center_z0 + run.drum_radius
-    ballistic_rise = run.max_velocity**2 / (2.0 * abs(float(MOTION_DEFAULT.gravity)))
+    gravity = abs(run.gravity)
+    ballistic_rise = (
+        run.max_velocity**2 / (2.0 * gravity)
+        if gravity > 0.0
+        else run.max_velocity * run.duration
+    )
     z_max = max(crest_z + 4.0 * run.drum_radius + ballistic_rise + wall_margin,
                 container_max[2] + bce_margin)
     return ((-lateral_x, -lateral_y, z_min), (lateral_x, lateral_y, z_max))
@@ -522,6 +538,8 @@ def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -
         "descent_mode": getattr(args, "descent_mode", None),
         "descent_force_n": getattr(args, "descent_force", None),
         "descent_force_ramp_s": getattr(args, "descent_force_ramp", None),
+        "gravity": getattr(args, "gravity", None),
+        "drum_gravity": getattr(args, "drum_gravity", None),
         "omega": args.omega,
         "reverse_spin": getattr(args, "reverse_spin", None),
         "bed_height": args.bed_height,
@@ -1094,6 +1112,8 @@ def write_config(path: Path, soil: CrmSoilParams, run: CrmRunParams,
         "soil": asdict(soil),
         "friction_angle_deg": soil.friction_angle_deg,
         "run": {**asdict(run), "active_box": list(run.active_box)},
+        "gravity_m_s2": run.gravity,
+        "drum_gravity": run.drum_gravity,
         "computational_domain": {
             "min_m": list(computational_domain[0]),
             "max_m": list(computational_domain[1]),
@@ -1143,6 +1163,7 @@ def main() -> int:
         settle_time=run.settle_time,
         lower_speed=run.descent_speed,
         drum_omega=run.omega,
+        gravity=run.gravity,
         bed_height=run.bed_height,
         bed_padding=run.bed_padding,
         drum_spin_axis=run.spin_axis,
@@ -1187,6 +1208,8 @@ def main() -> int:
                 f"soil bed: {2.0 * motion.bed_x_half:.4g} x {2.0 * motion.bed_y_half:.4g} m "
                 f"(padding {run.bed_padding:g} R), height={motion.bed_height:.4g} m",
                 f"active SPH box: {run.active_box} (body frame, follows drum)",
+                f"gravity: gz={run.gravity:g} m/s^2 on soil; "
+                f"rigid drum gravity={'on' if run.drum_gravity else 'off'}",
                 f"SPH tuning: artificial_viscosity={run.artificial_viscosity:g}, "
                 f"PPST push={run.shifting_ppst_push:g}, settle_time={run.settle_time:g} s",
                 f"solid reflective container: interior min={container_bounds[0]}, "
@@ -1209,6 +1232,11 @@ def main() -> int:
     chrono.SetChronoOutputPath(str(out_dir) + "/")
 
     system = chrono.ChSystemNSC()
+    # Terrain gravity is set separately below and always drives the SPH soil.
+    # System gravity is what acts on Chrono bodies such as the rigid drum.
+    system.SetGravitationalAcceleration(
+        chrono.ChVector3d(0.0, 0.0, run.gravity if run.drum_gravity else 0.0)
+    )
     if hasattr(system, "SetCollisionSystemType") and hasattr(chrono, "ChCollisionSystem"):
         system.SetCollisionSystemType(chrono.ChCollisionSystem.Type_BULLET)
     system.SetTimestepperType(chrono.ChTimestepper.Type_EULER_IMPLICIT_LINEARIZED)
@@ -1217,7 +1245,7 @@ def main() -> int:
 
     terrain = veh.CRMTerrain(system, run.spacing)
     terrain.SetVerbose(False)
-    terrain.SetGravitationalAcceleration(chrono.ChVector3d(0.0, 0.0, MOTION_DEFAULT.gravity))
+    terrain.SetGravitationalAcceleration(chrono.ChVector3d(0.0, 0.0, run.gravity))
     terrain.SetComputationalDomain(computational_domain_aabb(chrono, comp_domain), fsi.BC_NONE)
     terrain.SetStepSizeCFD(run.dt)
     if hasattr(terrain, "SetStepsizeMBD"):
