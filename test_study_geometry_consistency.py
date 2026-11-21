@@ -119,7 +119,7 @@ class StudyGeometryConsistencyTest(unittest.TestCase):
             with self.assertRaises(wiz.StudyConfigError):
                 wiz.build_commands(cfg)
 
-    def test_legacy_detector_config_is_ignored_and_capacity_is_unchanged(self) -> None:
+    def test_detector_config_is_forwarded_to_crm_only_and_capacity_is_unchanged(self) -> None:
         with tempfile.TemporaryDirectory(prefix="detector_cfg_", dir="/tmp/opencode") as tmp:
             cfg = consistent_cfg(Path(tmp))
             cfg["auto_geometry"] = False
@@ -130,11 +130,14 @@ class StudyGeometryConsistencyTest(unittest.TestCase):
             crm_cmd = next(s["command"] for s in steps if s["name"] == "rigid-CRM")
             fea_cmd = next(s["command"] for s in steps if s["name"] == "one-way-FEA")
 
-            self.assertNotIn("--fill-detector-obj", crm_cmd)
+            self.assertEqual(
+                crm_cmd[crm_cmd.index("--fill-detector-obj") + 1],
+                str(cfg["fill_detector_obj"]),
+            )
             self.assertNotIn("--fill-detector-obj", fea_cmd)
             self.assertEqual(crm_cmd[crm_cmd.index("--capacity-volume") + 1], "0.0123")
 
-    def test_deprecated_detector_step_generates_no_extra_steps(self) -> None:
+    def test_detector_step_generates_surface_conversion_steps(self) -> None:
         with tempfile.TemporaryDirectory(prefix="detector_wizard_", dir="/tmp/opencode") as tmp:
             detector_step = Path(tmp) / "cavity.step"
             detector_step.write_text("ISO-10303-21;\nEND-ISO-10303-21;\n", encoding="utf-8")
@@ -157,13 +160,25 @@ class StudyGeometryConsistencyTest(unittest.TestCase):
             with patch.object(wiz, "INTERACTIVE", False):
                 cfg = wiz.collect_settings(args)
             self.assertEqual(cfg["fill_detector_step"], detector_step.resolve())
-            self.assertIsNone(cfg["fill_detector_obj"])
-            names = [step["name"] for step in cfg["mesh_steps"]]
-            self.assertNotIn("generate-fill-detector-surface", names)
-            self.assertNotIn("make-fill-detector-OBJ", names)
-            steps = wiz.build_commands(cfg)
-            crm_cmd = next(s["command"] for s in steps if s["name"] == "rigid-CRM")
-            self.assertNotIn("--fill-detector-obj", crm_cmd)
+            self.assertEqual(
+                cfg["fill_detector_obj"],
+                Path(tmp) / "mesh" / "cavity_detector_surface.obj",
+            )
+            steps = cfg["mesh_steps"]
+            names = [step["name"] for step in steps]
+            self.assertIn("generate-fill-detector-surface", names)
+            self.assertIn("make-fill-detector-OBJ", names)
+            surface_cmd = next(s["command"] for s in steps
+                               if s["name"] == "generate-fill-detector-surface")
+            self.assertIn("--surface-only", surface_cmd)
+            commands = wiz.build_commands(cfg)
+            crm_cmd = next(s["command"] for s in commands if s["name"] == "rigid-CRM")
+            fea_cmd = next(s["command"] for s in commands if s["name"] == "one-way-FEA")
+            self.assertEqual(
+                crm_cmd[crm_cmd.index("--fill-detector-obj") + 1],
+                str(cfg["fill_detector_obj"]),
+            )
+            self.assertNotIn("--fill-detector-obj", fea_cmd)
 
 
 if __name__ == "__main__":

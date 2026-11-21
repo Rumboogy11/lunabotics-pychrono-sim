@@ -166,7 +166,7 @@ class FillDetectorSurfaceTest(unittest.TestCase):
             with self.assertRaisesRegex(fill_detector.FillSurfaceError, "watertight"):
                 fill_detector.load_fill_detector(path)
 
-    def test_compute_metrics_ignores_legacy_detector(self) -> None:
+    def test_compute_metrics_uses_active_detector(self) -> None:
         with tempfile.TemporaryDirectory(prefix="fill_metrics_", dir="/tmp/opencode") as tmp:
             path = Path(tmp) / "detector.obj"
             write_box_obj(path, half=0.05)
@@ -197,12 +197,13 @@ class FillDetectorSurfaceTest(unittest.TestCase):
                 -0.02,
                 with_flags=True,
             )
-            # The old detector's 0.01 m full-particle margin would reject the
-            # second centre, but fill now follows excavated particles only.
+            # The 0.05 m half-width detector eroded by rp=0.01 rejects the
+            # 0.049 m centre; fill follows that exact, latched excavated set.
             self.assertEqual(metrics["sph_particles"], 2)
-            np.testing.assert_array_equal(flags, np.ones((2, 2), dtype=np.uint8))
-            self.assertEqual(metrics["inside_drum"], 2)
-            self.assertEqual(metrics["excavated"], 2)
+            np.testing.assert_array_equal(
+                flags, np.array([[1, 1], [0, 0]], dtype=np.uint8))
+            self.assertEqual(metrics["inside_drum"], 1)
+            self.assertEqual(metrics["excavated"], 1)
             self.assertEqual(metrics["capacity_m3"], 1.0)
 
 

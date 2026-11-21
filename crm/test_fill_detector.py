@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+import fill_detector
 import lunar_excavator_crm as crm
 from crm_soil import DEFAULT_SOIL
 from lunar_excavator_config import DEFAULT as MOTION_DEFAULT
@@ -34,6 +35,12 @@ def local_to_world(local, origin, quat_wxyz):
     """Apply the inverse of compute_metrics' world-to-local pose transform."""
     rotation = crm.quat_rotation_matrix(quat_wxyz)
     return np.asarray(local, dtype=float) @ rotation.T + np.asarray(origin, dtype=float)
+
+
+def world_to_local(world, origin, quat_wxyz):
+    """Mirror compute_metrics' exact world-to-local pose transform."""
+    rotation = crm.quat_rotation_matrix(crm.quat_conj(quat_wxyz))
+    return (np.asarray(world, dtype=float) - np.asarray(origin, dtype=float)) @ rotation.T
 
 
 def write_rect_box_obj(path: Path, half_x: float, half_y: float, half_z: float) -> None:
@@ -135,34 +142,79 @@ class FillDetectorContainmentTest(unittest.TestCase):
         self.assertEqual(metrics["capacity_m3"], self.capacity)
 
     def test_fill_is_stable_while_the_drum_rotates(self):
-        # A non-axisymmetric detector would accept this particle at one angle
-        # and reject it a quarter turn later.  Fill must stay with excavated.
+        # A fixed soil particle enters and leaves a non-axisymmetric cavity once
+        # per revolution.  The raw mesh test must actually alternate; the
+        # excavation latch must still keep that particle counted while elevated.
         with tempfile.TemporaryDirectory(prefix="fill_rotation_", dir="/tmp/opencode") as tmp:
-            detector = Path(tmp) / "rect.obj"
-            write_rect_box_obj(detector, half_x=0.07, half_y=0.03, half_z=0.03)
-            run = replace(self.run, fill_detector_obj=str(detector))
-            local = np.array([[0.045, 0.0, 0.0]])
-            world = local_to_world(local, self.origin, self.quat)
+            detector_path = Path(tmp) / "rect.obj"
+            write_rect_box_obj(detector_path, half_x=0.07, half_y=0.03, half_z=0.03)
+            run = replace(self.run, fill_detector_obj=str(detector_path))
+            detector = fill_detector.load_fill_detector(detector_path)
+            self.assertIsNotNone(detector)
+            assert detector is not None
+            state = fill_detector.ExcavatedState()
 
-            for deg in (0.0, 45.0, 90.0, 135.0, 180.0, 270.0):
-                with self.subTest(degrees=deg):
-                    half = math.radians(deg) * 0.5
-                    spin = (math.cos(half), 0.0, 0.0, math.sin(half))
-                    drum = FakeDrum(self.origin, crm.quat_mul(self.quat, spin))
+            local0 = np.array([[0.045, 0.0, 0.0]])
+            world = local_to_world(local0, self.origin, self.quat)
+            expected_raw = [True, False, False, False, True, False]
+            angles = (0.0, 45.0, 90.0, 135.0, 180.0, 270.0)
+            drums = []
+            for deg in angles:
+                half = math.radians(deg) * 0.5
+                spin = (math.cos(half), 0.0, 0.0, math.sin(half))
+                drums.append(FakeDrum(self.origin, crm.quat_mul(self.quat, spin)))
+
+            raw = [
+                bool(detector.contains_with_margin(
+                    world_to_local(world, drum.GetPos(), drum.GetRot()), self.rp)[0])
+                for drum in drums
+            ]
+            self.assertEqual(raw, expected_raw, "raw mesh containment must rotate")
+
+            for deg, drum, inside_mesh in zip(angles, drums, raw):
+                with self.subTest(degrees=deg, inside_mesh=inside_mesh):
                     metrics, flags = crm.compute_metrics(
-                        world,
-                        drum,
-                        run,
-                        self.motion,
-                        DEFAULT_SOIL,
-                        DEFAULT_SOIL.density * run.spacing**3,
-                        self.capacity,
-                        self.surface_z,
-                        with_flags=True,
+                        world, drum, run, self.motion, DEFAULT_SOIL,
+                        DEFAULT_SOIL.density * run.spacing**3, self.capacity,
+                        self.surface_z, with_flags=True, excavated_state=state,
                     )
                     np.testing.assert_array_equal(flags, np.ones((1, 2), dtype=np.uint8))
                     self.assertEqual(metrics["inside_drum"], 1)
                     self.assertEqual(metrics["excavated"], 1)
+
+            # Settling back to the bed clears the latch; a later rotation cannot
+            # resurrect a particle that is no longer elevated.
+            settled = world.copy()
+            settled[0, 2] = self.surface_z + self.rp - 1.0e-9
+            metrics, flags = crm.compute_metrics(
+                settled, drums[0], run, self.motion, DEFAULT_SOIL,
+                DEFAULT_SOIL.density * run.spacing**3, self.capacity,
+                self.surface_z, with_flags=True, excavated_state=state,
+            )
+            np.testing.assert_array_equal(flags, np.zeros((1, 2), dtype=np.uint8))
+            self.assertEqual(metrics["inside_drum"], 0)
+            self.assertEqual(metrics["excavated"], 0)
+
+    def test_excavated_state_reset_and_shape_change(self):
+        state = fill_detector.ExcavatedState()
+        np.testing.assert_array_equal(
+            state.update(np.array([True, False]), np.array([True, True])),
+            np.array([True, False]),
+        )
+        # First capture is monotonic while elevated, even without mesh contact.
+        np.testing.assert_array_equal(
+            state.update(np.array([False, False]), np.array([True, True])),
+            np.array([True, False]),
+        )
+        np.testing.assert_array_equal(
+            state.update(np.array([True, True]), np.array([True, False])),
+            np.array([True, False]),
+        )
+        state.reset()
+        np.testing.assert_array_equal(
+            state.update(np.array([True, True]), np.array([True, False])),
+            np.array([True, False]),
+        )
 
     def test_lifted_tolerance_stays_at_particle_radius(self):
         locals_ = np.array([[0.0, 0.0, 0.0]])

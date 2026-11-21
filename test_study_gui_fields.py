@@ -152,15 +152,15 @@ class SurfaceFitToleranceFieldTest(unittest.TestCase):
             self.assertEqual(mesh_cmd[mesh_cmd.index("--surface-fit-tolerance") + 1], "0.002")
 
 
-class LegacyFillDetectorConfigTest(IsolatedGuiDefaultsTest):
-    def test_detector_field_is_removed_and_old_config_is_ignored(self) -> None:
+class FillDetectorConfigTest(IsolatedGuiDefaultsTest):
+    def test_detector_field_is_editable_and_config_is_forwarded(self) -> None:
         import tkinter as tk
         from tkinter import ttk
 
         import study_gui as gui
 
         self.assertEqual(gui.shipped_defaults()["fill_detector_step"], "")
-        self.assertNotIn(
+        self.assertIn(
             "fill_detector_step",
             [key for _, key, _ in gui.DEFAULT_GROUPS[0][1]],
         )
@@ -179,12 +179,12 @@ class LegacyFillDetectorConfigTest(IsolatedGuiDefaultsTest):
                 child.cget("text") for child in descendants(app.pages[1])
                 if isinstance(child, (tk.Label, ttk.Label))
             ]
-            self.assertFalse(any("Fill-detector" in label for label in geom_labels))
+            self.assertTrue(any("Fill-detector" in label for label in geom_labels))
 
-            with tempfile.TemporaryDirectory(prefix="legacy_detector_gui_", dir="/tmp/opencode") as tmp:
-                # Deliberately nonexistent: legacy configs must not be validated,
-                # converted, or forwarded now that fill follows excavated soil.
+            with tempfile.TemporaryDirectory(prefix="detector_gui_", dir="/tmp/opencode") as tmp:
                 detector_step = Path(tmp) / "cavity.step"
+                detector_step.write_text(
+                    "ISO-10303-21;\nEND-ISO-10303-21;\n", encoding="utf-8")
                 app._apply_config({"fill_detector_step": str(detector_step)})
                 self.assertEqual(app._g("fill_detector_step"), str(detector_step))
 
@@ -195,18 +195,28 @@ class LegacyFillDetectorConfigTest(IsolatedGuiDefaultsTest):
                 app.vars["capacity_volume"].set("0.25")
                 cfg = app._collect_cfg()
                 self.assertEqual(cfg["fill_detector_step"], detector_step.resolve())
-                self.assertIsNone(cfg["fill_detector_obj"])
+                self.assertEqual(
+                    cfg["fill_detector_obj"],
+                    Path(tmp) / "mesh" / "cavity_detector_surface.obj",
+                )
 
                 steps = gui.wiz.build_commands(cfg)
                 names = [step["name"] for step in steps]
-                self.assertNotIn("generate-fill-detector-surface", names)
-                self.assertNotIn("make-fill-detector-OBJ", names)
+                self.assertIn("generate-fill-detector-surface", names)
+                self.assertIn("make-fill-detector-OBJ", names)
 
                 crm_cmd = next(step["command"] for step in steps if step["name"] == "rigid-CRM")
                 fea_cmd = next(step["command"] for step in steps if step["name"] == "one-way-FEA")
-                self.assertNotIn("--fill-detector-obj", crm_cmd)
+                self.assertEqual(
+                    crm_cmd[crm_cmd.index("--fill-detector-obj") + 1],
+                    str(cfg["fill_detector_obj"]),
+                )
                 self.assertNotIn("--fill-detector-obj", fea_cmd)
                 self.assertEqual(crm_cmd[crm_cmd.index("--capacity-volume") + 1], "0.25")
+
+                with self.assertRaisesRegex(ValueError, "not found"):
+                    app.vars["fill_detector_step"].set(str(Path(tmp) / "missing.step"))
+                    app._collect_cfg()
         finally:
             root.destroy()
 

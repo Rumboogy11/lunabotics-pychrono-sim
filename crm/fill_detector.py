@@ -2,16 +2,21 @@
 """Exact closed-mesh containment for CRM fill metrics.
 
 The optional fill-detector STEP is converted to a watertight, metre-scale OBJ
-in the drum's local frame (local +Z is the drum axis).  This module reads that
-surface and classifies SPH particle centres with two exact geometric tests:
+in the drum's local frame (local +Z is the drum axis).  At runtime it is
+transformed by the excavator's full position and rotation, so it behaves as the
+negative of the physical interior.  SPH particle centres are classified with
+two exact geometric tests:
 
 * odd ray/parity crossings against the closed triangle surface;
 * no triangle closer than the SPH particle radius ``rp``.
 
 Together those tests keep the existing "whole particle inside" rule: a centre
-must be inside the detector and at least ``rp`` away from its boundary.  The
-detector is used only for fill classification.  It never changes which
-particles the solver creates, SPH/BCE bookkeeping, or the capacity volume.
+must be inside the detector and at least ``rp`` away from its boundary.  Because
+a rotating non-axisymmetric cavity would otherwise flag the same fixed soil as
+fill once per revolution, an :class:`ExcavatedState` latch makes capture
+monotonic: a particle stays counted while elevated once it has entered the
+mesh, and clears when it settles back to the bed.  The detector never changes
+which particles the solver creates, SPH/BCE bookkeeping, or the capacity volume.
 
 Only NumPy is imported at module load time.  Point queries use a small in-tree
 AABB BVH so a fine STEP-derived surface stays practical at CRM frame rates.
@@ -376,14 +381,66 @@ class _Bvh:
         return near
 
 
-class FillDetector:
-    """Closed-surface particle containment in the drum-local frame."""
+class ExcavatedState:
+    """Monotonic per-particle excavation latch for a rotating detector mesh.
 
-    def __init__(self, vertices: np.ndarray, faces: np.ndarray) -> None:
-        validate_watertight(vertices, faces)
+    The supplied mesh is the negative of the drum interior and follows the
+    excavator pose exactly.  A fixed soil particle can therefore enter and
+    leave that cavity once per revolution.  A particle is captured the first
+    time it is both inside the eroded mesh and lifted above the initial bed,
+    then stays counted until it settles back to the bed.  This removes the
+    rotating fill/non-fill sweep without changing the mesh or adding any
+    spatial region outside the supplied surface.
+    """
+
+    def __init__(self) -> None:
+        self._seen = np.zeros(0, dtype=bool)
+
+    def update(self, inside_mesh: np.ndarray, lifted: np.ndarray) -> np.ndarray:
+        inside = np.asarray(inside_mesh, dtype=bool)
+        elevated = np.asarray(lifted, dtype=bool)
+        if inside.shape != elevated.shape:
+            raise ValueError("inside_mesh and lifted must have the same shape")
+        if self._seen.shape != inside.shape:
+            self._seen = np.zeros(inside.shape, dtype=bool)
+        # Settled soil leaves the excavated set; capture is otherwise permanent.
+        self._seen &= elevated
+        self._seen |= inside & elevated
+        return self._seen.copy()
+
+    def reset(self) -> None:
+        self._seen = np.zeros(0, dtype=bool)
+
+
+class FillDetector:
+    """Closed-surface particle containment in the drum-local frame.
+
+    The detector owns its :class:`ExcavatedState` so the monotonic latch is used
+    by every caller of ``compute_metrics``.  Chrono's SPH marker array keeps a
+    fixed particle count and stable index order for the whole run; the latch is
+    therefore keyed by that index.  No particle IDs are exposed by the Python
+    API, and re-ordering the marker array would be a breaking Chrono change.
+    """
+
+    def __init__(self, vertices: np.ndarray, faces: np.ndarray,
+                 bvh: _Bvh | None = None) -> None:
+        if bvh is None:
+            validate_watertight(vertices, faces)
+            bvh = _Bvh(vertices, faces)
         self.vertices = vertices
         self.faces = faces
-        self.bvh = _Bvh(vertices, faces)
+        self.bvh = bvh
+        self.excavated_state = ExcavatedState()
+
+    def with_fresh_state(self) -> "FillDetector":
+        """Return a detector sharing the cached BVH but with a new latch.
+
+        Geometry caching is important for a fine STEP-derived surface, but a
+        cached mutable latch would leak between independent ``compute_metrics``
+        calls.  A driver that needs persistence keeps the returned detector's
+        ``excavated_state`` and passes it on every frame.
+        """
+        return FillDetector(self.vertices, self.faces, self.bvh)
 
     def contains_with_margin(self, points: np.ndarray, margin: float = 0.0) -> np.ndarray:
         """True where a whole sphere of radius ``margin`` fits inside the surface."""
@@ -391,6 +448,17 @@ class FillDetector:
         if margin > 0.0:
             inside &= ~self.bvh.points_near_surface(points, margin)
         return inside
+
+    def excavated_mask(self, points: np.ndarray, margin: float,
+                       lifted: np.ndarray,
+                       state: ExcavatedState | None = None) -> np.ndarray:
+        """Latched excavated set for particles inside this rotating surface."""
+        active = self.excavated_state if state is None else state
+        return active.update(self.contains_with_margin(points, margin), lifted)
+
+    def reset_excavation(self) -> None:
+        """Forget prior captures (for a new run reusing a cached detector)."""
+        self.excavated_state.reset()
 
 
 @lru_cache(maxsize=8)
@@ -408,7 +476,9 @@ def load_fill_detector(path: Path | str | None) -> FillDetector | None:
         raise FillSurfaceError(f"fill detector OBJ not found: {obj}")
     stat = obj.stat()
     try:
-        return _load_cached(str(obj), (stat.st_mtime_ns, stat.st_size))
+        # Only geometry is cached.  Each load gets a fresh excavation latch so
+        # unrelated callers cannot inherit another run's captured particles.
+        return _load_cached(str(obj), (stat.st_mtime_ns, stat.st_size)).with_fresh_state()
     except FillSurfaceError:
         _load_cached.cache_clear()
         raise
@@ -416,8 +486,10 @@ def load_fill_detector(path: Path | str | None) -> FillDetector | None:
 
 def detector_definition(detector: FillDetector | None) -> str:
     return (
-        "ray/parity containment in optional STEP detector OBJ, eroded by one SPH "
-        "particle radius"
+        "exact ray/parity containment in the STEP detector OBJ following the "
+        "full excavator pose, eroded by one SPH particle radius, with monotonic "
+        "excavation latching and a lift gate"
         if detector is not None
-        else "nominal cylinder eroded by one SPH particle radius"
+        else "nominal cylinder eroded by one SPH particle radius, intersected "
+             "with the lift gate"
     )
