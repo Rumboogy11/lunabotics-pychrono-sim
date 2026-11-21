@@ -7,9 +7,12 @@ chrono-src/
 pychrono-env/
 
 # Simulation output and large generated result sets.
-Output_*/
+/Output*/
 output/
 geometry_checks/
+
+# Local CAD/geometry assets (not source-controlled).
+/geometry/
 
 # User-edited GUI defaults (workspace-local, regenerated from shipped values).
 study_gui_defaults.json
