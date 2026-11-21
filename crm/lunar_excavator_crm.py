@@ -14,29 +14,21 @@ Geometry and kinematics reuse the shared excavator dimensions from
 Fill-ratio definition
 ---------------------
 At each output time, SPH particles are transformed into the drum's local frame.
-The mesh's local Z axis is the long axis of the drum.  A particle is "retained"
-only when the *whole particle* is inside the nominal cylindrical cavity.  With
-SPH particle radius ``rp = 0.5 * spacing`` (Chrono ``d0 = spacing``), its centre
-must satisfy ``radial <= inner_radius - rp`` and
-``abs(local_z) <= drum_half_length - rp`` (bounds clamped at zero)::
+The mesh's local Z axis is the long axis of the drum.  With SPH particle radius
+``rp = 0.5 * spacing`` (Chrono ``d0 = spacing``), an "excavated" particle is
+fully inside the eroded outer drum envelope (``radial <= drum_radius - rp`` and
+``abs(local_z) <= drum_half_length - rp``, bounds clamped at zero) and above the
+initial bed surface by the ``rp`` lift tolerance.  Fill uses exactly this set::
 
-    retained_mass = n_retained * particle_mass
+    retained_mass = n_excavated * particle_mass
     capacity_mass = bulk_density * pi * inner_radius**2 * drum_length
     fill_ratio    = retained_mass / capacity_mass
 
 The cylindrical capacity denominator stays the nominal envelope; the screw
 flights displace some of it.  Pass ``--capacity-volume`` if a CAD-derived free
-volume is available.  "Excavated" particles must likewise be fully inside the
-eroded outer drum envelope (``drum_radius - rp`` and the same eroded axial
-half-length) and above the initial bed surface by the ``rp`` lift tolerance;
-they are used for specific energy.
-
-For a geometry-specific cavity, ``--fill-detector-obj`` selects a watertight,
-metre-scale surface in the same drum-local frame.  Containment then uses exact
-ray/parity classification against that closed surface, and a particle must also
-be at least ``rp`` from its boundary.  This changes only the retained-particle
-count: capacity, excavated/lifted predicates, and SPH/BCE bookkeeping stay as
-above.
+volume is available.  The old ``--fill-detector-obj`` option is accepted for
+compatibility but ignored; rotating cavity containment counted undisturbed soil
+as fill and let those particles revert to non-fill on the next rotation.
 
 Requirements
 ------------
@@ -82,11 +74,6 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(CRM_DIR))
 
 from crm_soil import DEFAULT_SOIL, CrmSoilParams  # noqa: E402
-from fill_detector import (  # noqa: E402
-    FillSurfaceError,
-    detector_definition,
-    load_fill_detector,
-)
 from crm_soil import _enum as fsi_enum  # noqa: E402
 from lunar_excavator_config import (  # noqa: E402
     BED_PADDING_RADIUS_FRACTION,
@@ -123,7 +110,7 @@ class CrmRunParams:
     drum_half_length: float = MOTION_DEFAULT.drum_half_length
     inner_radius: float = 0.055          # nominal cavity radius [m]
     capacity_volume: float | None = None  # override for CAD free volume [m^3]
-    fill_detector_obj: str | None = None  # optional local-frame watertight fill surface
+    fill_detector_obj: str | None = None  # deprecated: accepted for old configs, ignored
     active_box_x: float = 0.631333  # padded bed + 2 drum diameters (reference drum)
     active_box_y: float = 0.687407
     active_box_z: float = 0.866370  # bed + initial centre height + 2 diameters
@@ -290,8 +277,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--capacity-volume", type=float, default=None,
                    help="override nominal cavity volume in m^3 (for CAD-calibrated designs)")
     p.add_argument("--fill-detector-obj", type=Path, default=None,
-                   help="optional watertight OBJ surface in drum-local metres used only to "
-                        "classify retained SPH particles (exact ray/parity containment)")
+                   help="deprecated and ignored; accepted only so older study configs still run. "
+                        "Fill now follows the excavated-particle set")
     p.add_argument("--active-box", type=str, default=None,
                    help="active SPH domain full size X,Y,Z in metres (default: padded bed + 2 drum "
                         "diameters laterally; bed + initial height + 2 diameters + padding vertically)")
@@ -1030,28 +1017,24 @@ def compute_metrics(positions: np.ndarray, drum, run: CrmRunParams, motion,
 
     # Chrono's SPH initial spacing d0 is the particle diameter, so a particle
     # is only fully contained when its centre is at least rp (0.5*d0) inside
-    # every cavity wall.  Erode the inner radius, outer radius, and both axial
-    # endcaps by rp (clamped at zero) before classifying particles.
+    # the drum envelope.  Erode the outer radius and both axial endcaps by rp
+    # (clamped at zero) before classifying particles.
     rp = 0.5 * run.spacing
-    r_inner2 = max(0.0, run.inner_radius - rp) ** 2
     r_outer2 = max(0.0, run.drum_radius - rp) ** 2
     half_len_eff = max(0.0, run.drum_half_length - rp)
     lift_tol = rp
 
-    detector = load_fill_detector(run.fill_detector_obj)
-    if detector is not None:
-        # Exact ray/parity containment in the optional STEP-derived surface.
-        # The margin keeps the same whole-particle rule as the eroded cylinder:
-        # a centre must be at least rp from every detector boundary as well.
-        inside = detector.contains_with_margin(local, rp)
-    else:
-        inside = (radial2 <= r_inner2) & (lz <= half_len_eff)
     lifted = pos[:, 2] > surface_z + lift_tol
     excavated = (
         (radial2 <= r_outer2)
         & (lz <= half_len_eff)
         & lifted
     )
+
+    # The old cavity/detector mask rotates with the drum and therefore counts
+    # undisturbed soil that merely passes through the envelope.  Fill is the
+    # stable excavated set: lifted particles fully inside the drum envelope.
+    inside = excavated
 
     inside_count = int(np.count_nonzero(inside))
     lifted_count = int(np.count_nonzero(lifted))
@@ -1134,13 +1117,11 @@ def write_config(path: Path, soil: CrmSoilParams, run: CrmRunParams,
             "capacity_volume_m3": capacity_volume,
             "capacity_source": "user override" if run.capacity_volume else "pi*r_i^2*L",
             "fill_detector_obj": run.fill_detector_obj,
-            "fill_detector_definition": detector_definition(
-                load_fill_detector(run.fill_detector_obj)
-            ),
+            "fill_detector_definition": "deprecated and ignored; fill follows excavated particles",
         },
         "particle_mass_kg": particle_mass,
         "particle_mass_source": particle_mass_source,
-        "fill_ratio_definition": "retained SPH mass / (bulk density * nominal cavity volume)",
+        "fill_ratio_definition": "excavated SPH mass / (bulk density * nominal cavity volume)",
     }
     with path.open("w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2)
@@ -1151,10 +1132,6 @@ def main() -> int:
     args = build_parser().parse_args()
     soil = make_soil(args)
     run = make_run_params(args)
-    try:
-        fill_detector = load_fill_detector(run.fill_detector_obj)
-    except FillSurfaceError as exc:
-        raise SystemExit(str(exc)) from exc
 
     if args.print_soil:
         print(soil.summary())
@@ -1216,8 +1193,9 @@ def main() -> int:
                 f"max={container_bounds[1]}, padding={solid_container_padding(run):g} m",
                 f"world computational domain: min={comp_domain[0]}, max={comp_domain[1]}",
                 f"capacity={capacity_volume:.6g} m^3 ({capacity_volume * soil.density:.4f} kg)",
-                f"fill detector: {detector_definition(fill_detector)}"
-                + (f" ({run.fill_detector_obj})" if run.fill_detector_obj else ""),
+                "fill measure: excavated SPH mass / (bulk density * nominal cavity volume)"
+                + (" (--fill-detector-obj is deprecated and ignored)"
+                   if run.fill_detector_obj else ""),
             ]
         ),
         flush=True,

@@ -865,7 +865,7 @@ def write_fea_config(path: Path, soil, run, pla: PlaParams, motion, node_path: P
         },
         "particle_mass_kg": particle_mass,
         "particle_mass_source": particle_mass_source,
-        "fill_ratio_definition": "retained SPH mass / (bulk density * nominal cavity volume)",
+        "fill_ratio_definition": "excavated SPH mass / (bulk density * nominal cavity volume)",
     }
     with path.open("w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2)

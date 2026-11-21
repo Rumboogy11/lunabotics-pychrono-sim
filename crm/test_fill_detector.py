@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import math
+import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 
@@ -34,6 +36,30 @@ def local_to_world(local, origin, quat_wxyz):
     return np.asarray(local, dtype=float) @ rotation.T + np.asarray(origin, dtype=float)
 
 
+def write_rect_box_obj(path: Path, half_x: float, half_y: float, half_z: float) -> None:
+    """Write a watertight rectangular detector surface with duplicated vertices."""
+    v = [
+        (-half_x, -half_y, -half_z), (half_x, -half_y, -half_z),
+        (half_x, half_y, -half_z), (-half_x, half_y, -half_z),
+        (-half_x, -half_y, half_z), (half_x, -half_y, half_z),
+        (half_x, half_y, half_z), (-half_x, half_y, half_z),
+    ]
+    faces = [
+        (0, 2, 1), (0, 3, 2),  # bottom
+        (4, 5, 6), (4, 6, 7),  # top
+        (0, 1, 5), (0, 5, 4),  # -Y
+        (1, 2, 6), (1, 6, 5),  # +X
+        (2, 3, 7), (2, 7, 6),  # +Y
+        (3, 0, 4), (3, 4, 7),  # -X
+    ]
+    with path.open("w", encoding="utf-8") as handle:
+        for tri in faces:
+            for index in tri:
+                handle.write("v %.9g %.9g %.9g\n" % v[index])
+        for i in range(len(faces)):
+            handle.write("f %d %d %d\n" % (3 * i + 1, 3 * i + 2, 3 * i + 3))
+
+
 class FillDetectorContainmentTest(unittest.TestCase):
     def setUp(self):
         self.run = crm.CrmRunParams(
@@ -56,22 +82,23 @@ class FillDetectorContainmentTest(unittest.TestCase):
         self.drum = FakeDrum(self.origin, self.quat)
         self.capacity = math.pi * self.run.inner_radius**2 * (2.0 * self.run.drum_half_length)
 
-    def metrics(self, locals_, drum=None):
+    def metrics(self, locals_, drum=None, run=None):
         active = self.drum if drum is None else drum
+        active_run = self.run if run is None else run
         positions = local_to_world(locals_, active.GetPos(), active.GetRot())
         return crm.compute_metrics(
             positions,
             active,
-            self.run,
+            active_run,
             self.motion,
             DEFAULT_SOIL,
-            DEFAULT_SOIL.density * self.run.spacing**3,
+            DEFAULT_SOIL.density * active_run.spacing**3,
             self.capacity,
             self.surface_z,
             with_flags=True,
         )
 
-    def test_partly_inside_boundary_particles_are_rejected(self):
+    def test_fill_follows_excavated_envelope(self):
         eff_inner = self.run.inner_radius - self.rp
         eff_outer = self.run.drum_radius - self.rp
         eff_half = self.run.drum_half_length - self.rp
@@ -90,17 +117,52 @@ class FillDetectorContainmentTest(unittest.TestCase):
         ])
 
         metrics, flags = self.metrics(locals_)
-        expected_inside = [True, False, False, True, False, False, False]
         expected_excavated = [True, True, False, True, True, False, True]
 
-        for index, (inside, excavated) in enumerate(zip(expected_inside, expected_excavated)):
+        for index, excavated in enumerate(expected_excavated):
             with self.subTest(particle=index):
-                self.assertEqual(bool(flags[index, 0]), inside)
+                # The fill flag and both fill ratios now use this same set.
+                self.assertEqual(bool(flags[index, 0]), excavated)
                 self.assertEqual(bool(flags[index, 1]), excavated)
-        self.assertEqual(metrics["inside_drum"], sum(expected_inside))
+        self.assertEqual(metrics["inside_drum"], sum(expected_excavated))
         self.assertEqual(metrics["excavated"], sum(expected_excavated))
+        self.assertAlmostEqual(
+            metrics["fill_ratio_mass"],
+            sum(expected_excavated) * DEFAULT_SOIL.density * self.run.spacing**3 /
+            (DEFAULT_SOIL.density * self.capacity),
+        )
         # The capacity denominator is still the nominal, un-eroded cylinder.
         self.assertEqual(metrics["capacity_m3"], self.capacity)
+
+    def test_fill_is_stable_while_the_drum_rotates(self):
+        # A non-axisymmetric detector would accept this particle at one angle
+        # and reject it a quarter turn later.  Fill must stay with excavated.
+        with tempfile.TemporaryDirectory(prefix="fill_rotation_", dir="/tmp/opencode") as tmp:
+            detector = Path(tmp) / "rect.obj"
+            write_rect_box_obj(detector, half_x=0.07, half_y=0.03, half_z=0.03)
+            run = replace(self.run, fill_detector_obj=str(detector))
+            local = np.array([[0.045, 0.0, 0.0]])
+            world = local_to_world(local, self.origin, self.quat)
+
+            for deg in (0.0, 45.0, 90.0, 135.0, 180.0, 270.0):
+                with self.subTest(degrees=deg):
+                    half = math.radians(deg) * 0.5
+                    spin = (math.cos(half), 0.0, 0.0, math.sin(half))
+                    drum = FakeDrum(self.origin, crm.quat_mul(self.quat, spin))
+                    metrics, flags = crm.compute_metrics(
+                        world,
+                        drum,
+                        run,
+                        self.motion,
+                        DEFAULT_SOIL,
+                        DEFAULT_SOIL.density * run.spacing**3,
+                        self.capacity,
+                        self.surface_z,
+                        with_flags=True,
+                    )
+                    np.testing.assert_array_equal(flags, np.ones((1, 2), dtype=np.uint8))
+                    self.assertEqual(metrics["inside_drum"], 1)
+                    self.assertEqual(metrics["excavated"], 1)
 
     def test_lifted_tolerance_stays_at_particle_radius(self):
         locals_ = np.array([[0.0, 0.0, 0.0]])
@@ -112,8 +174,11 @@ class FillDetectorContainmentTest(unittest.TestCase):
 
         self.assertEqual(metrics_below["lifted"], 0)
         self.assertEqual(metrics_above["lifted"], 1)
-        self.assertEqual(int(flags_below[0, 1]), 0)
-        self.assertEqual(int(flags_above[0, 1]), 1)
+        for flag in (0, 1):
+            self.assertEqual(int(flags_below[0, flag]), 0)
+            self.assertEqual(int(flags_above[0, flag]), 1)
+        self.assertEqual(metrics_below["fill_ratio_mass"], 0.0)
+        self.assertGreater(metrics_above["fill_ratio_mass"], 0.0)
 
 
 if __name__ == "__main__":

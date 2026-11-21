@@ -420,12 +420,12 @@ def is_force_descent(cfg: dict[str, Any]) -> bool:
 
 
 def validate_study_geometry(cfg: dict[str, Any]) -> list[str]:
-    """Reject mixed geometry fields that make fill detection impossible.
+    """Reject mixed geometry fields that make the nominal cavity impossible.
 
-    The fill detector requires a particle centre to lie inside the nominal
-    cavity.  If the outer drum radius is edited without also replacing the
-    CAD/mesh and its derived cavity/schedule, that predicate can never be true.
-    This check leaves the detector and SPH/BCE counts untouched and only guards
+    Fill now follows the excavated set, but the nominal inner radius still
+    defines the capacity denominator.  Editing the outer drum radius without
+    replacing the CAD/mesh and its derived cavity/schedule can leave no usable
+    capacity cavity.  This check leaves SPH/BCE counts untouched and only guards
     the editable study configuration.
     """
     try:
@@ -493,7 +493,7 @@ def auto_correct_study_geometry(cfg: dict[str, Any]) -> list[str]:
     """Repair CAD/mesh-derived fields that were edited out of sync.
 
     This is intentionally limited to generated/default studies (``auto_geometry``
-    on).  It does not touch the fill detector, SPH/BCE bookkeeping, or spacing;
+    on).  It does not touch the fill measure, SPH/BCE bookkeeping, or spacing;
     it only restores the outer dimensions actually loaded by CRM, a cavity that
     can hold a particle, and a descent long enough to reach the soil.  Explicit
     configurations (``auto_geometry`` off) still fail in
@@ -673,8 +673,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--inner-radius", type=float, default=None, help="nominal drum cavity radius in m")
     p.add_argument("--capacity-volume", type=float, default=None, help="CAD-derived cavity volume override")
     p.add_argument("--fill-detector-step", type=Path, default=None,
-                   help="optional closed STEP surface used only for particle fill classification; "
-                        "converted separately to a local-frame, metre-scale OBJ (blank = analytic cylinder)")
+                   help="deprecated and ignored; accepted only so older study configs still run. "
+                        "Fill now follows excavated particles")
 
     p.add_argument("--density", type=float, default=None, help="soil bulk density in kg/m^3")
     p.add_argument("--youngs-modulus", type=float, default=None, help="soil Young's modulus in Pa")
@@ -1022,30 +1022,15 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             if not path.is_file():
                 raise SystemExit(f"missing {label}: {path}")
 
+    fill_detector_step: Path | None = None
     if args.fill_detector_step is not None:
-        fill_detector_step: Path | None = args.fill_detector_step.expanduser().resolve()
-        if not fill_detector_step.is_file():
-            raise SystemExit(f"missing fill-detector STEP file: {fill_detector_step}")
-    elif INTERACTIVE and not ACCEPT_DEFAULTS:
-        raw_detector = prompt_text(
-            "Optional particle fill-detector STEP file (Enter = analytic cylinder)",
-            None,
-            allow_empty=True,
-            detail="A closed STEP surface used only for fill counting. It is converted separately "
-                   "using the CAD axis/unit scale above; leave blank to keep the analytic cylinder.",
+        print(
+            "warning: --fill-detector-step is deprecated and ignored; "
+            "fill now follows excavated particles",
+            flush=True,
         )
-        fill_detector_step = Path(raw_detector).expanduser().resolve() if raw_detector else None
-        if fill_detector_step is not None and not fill_detector_step.is_file():
-            raise SystemExit(f"missing fill-detector STEP file: {fill_detector_step}")
-    else:
-        fill_detector_step = None
-    if step_file is not None and fill_detector_step == step_file:
-        raise SystemExit("--fill-detector-step must differ from --step-file")
+        fill_detector_step = args.fill_detector_step.expanduser().resolve()
     fill_detector_obj: Path | None = None
-    if fill_detector_step is not None:
-        fill_detector_obj = (
-            out_dir / "mesh" / f"{fill_detector_step.stem}_detector_surface.obj"
-        )
 
     geo = geometry_defaults(measured, auto=auto_geo)
     if geometry == "step":
@@ -1219,46 +1204,6 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             "name": "make-CRM-surface-OBJ",
             "command": [str(ROOT / "chrono-env" / "bin" / "python"),
                         str(ROOT / "stl_to_obj.py"), str(surface_stl)],
-        })
-
-    if fill_detector_step is not None and fill_detector_obj is not None:
-        detector_dir = out_dir / "mesh"
-        detector_dir.mkdir(parents=True, exist_ok=True)
-        detector_prefix = detector_dir / f"{fill_detector_step.stem}_detector"
-        detector_stl = Path(f"{detector_prefix}_surface.stl")
-        detector_cmd = [
-            str(ROOT / "chrono-env" / "bin" / "python"),
-            str(ROOT / "step_to_chrono_fea.py"),
-            str(fill_detector_step),
-            "--out-prefix", str(detector_prefix),
-            "--unit-scale", f"{unit_scale:g}",
-            "--mesh-size", f"{mesh_size:g}",
-            "--surface-target-faces", str(surface_faces),
-            "--surface-max-faces", str(surface_max_faces),
-            "--surface-fit-tolerance", f"{surface_fit_tolerance:g}",
-            "--min-solid-volume", f"{min_solid_volume:g}",
-            "--hub-radius", f"{hub_radius:g}",
-            "--axis", cad_axis,
-            "--surface-only",
-            "--time-stages",
-        ]
-        if part_aware_simplify:
-            detector_cmd.extend([
-                "--part-aware-simplify",
-                "--part-aware-radius", f"{part_aware_radius:g}",
-                "--part-aware-reduction", f"{part_aware_reduction:g}",
-                "--part-aware-min-faces", str(part_aware_min_faces),
-            ])
-        if surface_repair_order == "after":
-            detector_cmd.append("--repair-after-decimation")
-        mesh_steps.append({
-            "name": "generate-fill-detector-surface",
-            "command": detector_cmd,
-        })
-        mesh_steps.append({
-            "name": "make-fill-detector-OBJ",
-            "command": [str(ROOT / "chrono-env" / "bin" / "python"),
-                        str(ROOT / "stl_to_obj.py"), str(detector_stl)],
         })
 
     default_duration = max(20.0, float(geo["lowering_duration"]))
@@ -1595,7 +1540,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             f"FEA mesh:     {fea_node} / {fea_ele}"
             + (f" (interior coarsened within {part_aware_radius:g} m)"
                if part_aware_simplify else ""),
-            f"Fill mask:    {fill_detector_obj or 'analytic eroded cylinder'}",
+            "Fill measure: excavated particles (lifted, inside eroded drum envelope)",
             f"Duration:     CRM {duration:g} s, FEA {fea_duration:g} s",
             f"Cadence:      CRM summary {crm_fps:g} Hz, FEA summary {fea_fps:g} Hz, "
             f"loads {loads_fps:g} Hz, particles {particle_fps:g} Hz",
@@ -1746,8 +1691,6 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         crm_cmd.extend(["--dt", f"{cfg['crm_dt']:g}"])
     if cfg["capacity_volume"] is not None:
         crm_cmd.extend(["--capacity-volume", f"{cfg['capacity_volume']:g}"])
-    if cfg.get("fill_detector_obj") is not None:
-        crm_cmd.extend(["--fill-detector-obj", str(cfg["fill_detector_obj"])])
     if cfg["save_particles"]:
         crm_cmd.append("--save-particles")
     if is_force_descent(cfg):

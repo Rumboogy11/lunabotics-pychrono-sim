@@ -107,7 +107,7 @@ PARAM_INFO: dict[str, str] = {
     "auto_geometry": "Measure the selected CAD/mesh and refresh suggested drum, bed, domain, spacing, and mesh values. All values remain editable.",
     # Geometry
     "step_file": "CAD input (.step/.stp) used only when Geometry source is 'step'. New models use rotation axis Y in STEP space.",
-    "fill_detector_step": "Optional closed STEP surface used only for particle fill counting. It is converted separately to a local-frame, metre-scale OBJ; blank keeps the analytic eroded-cylinder detector.",
+    "fill_detector_step": "Deprecated and ignored; accepted only for old configs. Fill now follows excavated particles.",
     "crm_obj": "Triangulated drum surface for rigid Chrono::CRM contact. For production use the promoted coarse OBJ, not a full-detail mesh.",
     "fea_node": "TetGen node file for the solid drum mesh used in one-way FEA.",
     "fea_ele": "TetGen element file paired with the FEA .node mesh.",
@@ -417,7 +417,6 @@ DEFAULT_GROUPS: list[tuple[str, list[tuple[str, str, dict]]]] = [
         ("Geometry source", "geometry", {"combo": ["supplied", "step", "files"]}),
         ("Auto-scale from CAD/mesh", "auto_geometry", {"check": True}),
         ("STEP file", "step_file", {"width": 60, "browse": "file"}),
-        ("Fill-detector STEP (optional)", "fill_detector_step", {"width": 60, "browse": "file"}),
         ("CRM surface OBJ", "crm_obj", {"width": 60, "browse": "file"}),
         ("FEA .node", "fea_node", {"width": 60, "browse": "file"}),
         ("FEA .ele", "fea_ele", {"width": 60, "browse": "file"}),
@@ -890,8 +889,6 @@ class StudyGUI:
         ttk.Label(p, text="Geometry and mesh inputs (used according to geometry source).",
                   font=HEADER_FONT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8); r += 1
         r = self._row(p, r, "STEP file", "step_file", width=60, browse="file", help_text="CAD input for geometry=step.")
-        r = self._row(p, r, "Fill-detector STEP (optional)", "fill_detector_step", width=60, browse="file",
-                      help_text="Closed STEP cavity surface for exact fill counting; blank = analytic cylinder.")
         r = self._row(p, r, "CRM surface OBJ", "crm_obj", width=60, browse="file", help_text="Rigid CRM contact surface (geometry=files/supplied).")
         r = self._row(p, r, "FEA .node", "fea_node", width=60, browse="file")
         r = self._row(p, r, "FEA .ele", "fea_ele", width=60, browse="file")
@@ -1935,14 +1932,10 @@ class StudyGUI:
         out_dir = Path(self._g("output_dir")).expanduser().resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
         step_file = mesh["step_file"]
+        # Deprecated input: retained in study_config.json for compatibility but
+        # no longer validated, converted, or passed to CRM.
         fill_detector_step = mesh["fill_detector_step"]
-        if fill_detector_step is not None and not fill_detector_step.is_file():
-            raise ValueError(f"fill-detector STEP not found: {fill_detector_step}")
-        if step_file is not None and fill_detector_step == step_file:
-            raise ValueError("fill-detector STEP must differ from the primary STEP file")
         fill_detector_obj: Path | None = None
-        if fill_detector_step is not None:
-            fill_detector_obj = out_dir / "mesh" / f"{fill_detector_step.stem}_detector_surface.obj"
         crm_obj = Path(self._g("crm_obj")).expanduser().resolve()
         fea_node = Path(self._g("fea_node")).expanduser().resolve()
         fea_ele = Path(self._g("fea_ele")).expanduser().resolve()
@@ -1990,23 +1983,6 @@ class StudyGUI:
                 raise ValueError(f"FEA .node not found: {fea_node}")
             if not fea_ele.is_file():
                 raise ValueError(f"FEA .ele not found: {fea_ele}")
-
-        if fill_detector_step is not None and fill_detector_obj is not None:
-            detector_dir = out_dir / "mesh"
-            detector_dir.mkdir(parents=True, exist_ok=True)
-            detector_prefix = detector_dir / f"{fill_detector_step.stem}_detector"
-            detector_stl = Path(f"{detector_prefix}_surface.stl")
-            detector_cmd = self._mesh_command(detector_prefix, fill_detector_step, mesh)
-            detector_cmd.append("--surface-only")
-            mesh_steps.append({
-                "name": "generate-fill-detector-surface",
-                "command": detector_cmd,
-            })
-            mesh_steps.append({
-                "name": "make-fill-detector-OBJ",
-                "command": [str(ROOT / "chrono-env" / "bin" / "python"),
-                            str(ROOT / "stl_to_obj.py"), str(detector_stl)],
-            })
 
         duration = float(self._g("duration"))
         fea_duration = float(self._g("fea_duration"))

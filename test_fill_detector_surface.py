@@ -117,7 +117,7 @@ class FillDetectorSurfaceTest(unittest.TestCase):
             expected = brute_triangle_distance2(points, detector.bvh.tri)
             np.testing.assert_allclose(np.sqrt(actual), np.sqrt(expected), rtol=1e-10, atol=1e-12)
 
-    def test_default_analytic_detector_is_unchanged(self) -> None:
+    def test_fill_follows_excavated_particles_without_a_detector(self) -> None:
         run = crm.CrmRunParams(
             spacing=0.02,
             inner_radius=0.05,
@@ -133,7 +133,7 @@ class FillDetectorSurfaceTest(unittest.TestCase):
         positions = np.array([
             [0.0, 0.0, 0.0],
             [0.035, 0.0, 0.0],
-            [0.049, 0.0, 0.0],
+            [0.055, 0.0, 0.0],
         ])
         metrics, flags = crm.compute_metrics(
             positions,
@@ -144,12 +144,15 @@ class FillDetectorSurfaceTest(unittest.TestCase):
             DEFAULT_SOIL,
             DEFAULT_SOIL.density * run.spacing**3,
             1.0,
-            0.06,
+            -0.02,
             with_flags=True,
         )
-        # Without a detector the original eroded-cylinder rule still applies:
-        # rp=0.01 leaves a 0.04 m eroded cavity radius, so 0.049 m is rejected.
-        np.testing.assert_array_equal(flags[:, 0], np.array([1, 1, 0]))
+        # rp=0.01 leaves a 0.051 m eroded outer radius, so 0.055 m is outside;
+        # fill now follows that excavated predicate instead of the inner cavity.
+        expected = np.array([[1, 1], [1, 1], [0, 0]], dtype=np.uint8)
+        np.testing.assert_array_equal(flags, expected)
+        self.assertEqual(metrics["inside_drum"], 2)
+        self.assertEqual(metrics["excavated"], 2)
         self.assertEqual(metrics["sph_particles"], 3)
         self.assertEqual(metrics["capacity_m3"], 1.0)
 
@@ -163,7 +166,7 @@ class FillDetectorSurfaceTest(unittest.TestCase):
             with self.assertRaisesRegex(fill_detector.FillSurfaceError, "watertight"):
                 fill_detector.load_fill_detector(path)
 
-    def test_compute_metrics_uses_detector_without_changing_counts(self) -> None:
+    def test_compute_metrics_ignores_legacy_detector(self) -> None:
         with tempfile.TemporaryDirectory(prefix="fill_metrics_", dir="/tmp/opencode") as tmp:
             path = Path(tmp) / "detector.obj"
             write_box_obj(path, half=0.05)
@@ -191,13 +194,15 @@ class FillDetectorSurfaceTest(unittest.TestCase):
                 DEFAULT_SOIL,
                 DEFAULT_SOIL.density * run.spacing**3,
                 1.0,
-                0.06,
+                -0.02,
                 with_flags=True,
             )
-            # The analytic cylinder would accept both centres.  The detector's
-            # 0.01 m full-particle margin rejects the one near its wall.
+            # The old detector's 0.01 m full-particle margin would reject the
+            # second centre, but fill now follows excavated particles only.
             self.assertEqual(metrics["sph_particles"], 2)
-            np.testing.assert_array_equal(flags[:, 0], np.array([1, 0]))
+            np.testing.assert_array_equal(flags, np.ones((2, 2), dtype=np.uint8))
+            self.assertEqual(metrics["inside_drum"], 2)
+            self.assertEqual(metrics["excavated"], 2)
             self.assertEqual(metrics["capacity_m3"], 1.0)
 
 
