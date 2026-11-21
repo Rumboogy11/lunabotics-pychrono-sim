@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
@@ -54,6 +55,38 @@ class GravityRunConfigTest(unittest.TestCase):
                 self.assertAlmostEqual(run.gravity, -1.62)
                 with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     module.build_parser().parse_args(["--drum-gravity", *extra])
+
+
+class GravitySystemSetupTest(unittest.TestCase):
+    def test_drum_gravity_survives_terrain_gravity_propagation(self) -> None:
+        class FakeSystem:
+            def __init__(self) -> None:
+                self.gravity = None
+
+            def SetGravitationalAcceleration(self, gravity) -> None:  # noqa: N802
+                self.gravity = tuple(gravity)
+
+        class FakeTerrain:
+            def __init__(self, system: FakeSystem) -> None:
+                self.system = system
+                self.gravity = None
+
+            def SetGravitationalAcceleration(self, gravity) -> None:  # noqa: N802
+                self.gravity = tuple(gravity)
+                # Chrono's FSI system propagates this gravity to the multibody
+                # system as well, which used to erase the drum-gravity toggle.
+                self.system.SetGravitationalAcceleration(gravity)
+
+        fake_chrono = SimpleNamespace(ChVector3d=lambda x, y, z: (x, y, z))
+        for drum_gravity, expected_z in ((False, 0.0), (True, -1.62)):
+            with self.subTest(drum_gravity=drum_gravity):
+                run = replace(crm.CrmRunParams(), gravity=-1.62,
+                              drum_gravity=drum_gravity)
+                system = FakeSystem()
+                terrain = FakeTerrain(system)
+                crm.configure_gravity(fake_chrono, system, terrain, run)
+                self.assertEqual(terrain.gravity, (0.0, 0.0, -1.62))
+                self.assertEqual(system.gravity, (0.0, 0.0, expected_z))
 
 
 class GravityCommandGenerationTest(unittest.TestCase):

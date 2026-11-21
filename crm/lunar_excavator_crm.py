@@ -1175,6 +1175,28 @@ def write_config(path: Path, soil: CrmSoilParams, run: CrmRunParams,
         handle.write("\n")
 
 
+def system_gravity_vector(chrono, run: CrmRunParams):
+    """Gravity acting on the rigid drum; SPH soil always uses ``run.gravity``."""
+    return chrono.ChVector3d(0.0, 0.0, run.gravity if run.drum_gravity else 0.0)
+
+
+def apply_drum_gravity(chrono, system, run: CrmRunParams) -> None:
+    """Apply the drum-gravity toggle to the multibody system."""
+    system.SetGravitationalAcceleration(system_gravity_vector(chrono, run))
+
+
+def configure_gravity(chrono, system, terrain, run: CrmRunParams) -> None:
+    """Set SPH gravity and drum gravity in the order Chrono requires.
+
+    ``CRMTerrain.SetGravitationalAcceleration()`` propagates gravity to both the
+    SPH fluid and the shared multibody system.  Reapplying the drum setting
+    afterwards is what makes ``--drum-gravity`` effective in force mode.
+    """
+    apply_drum_gravity(chrono, system, run)
+    terrain.SetGravitationalAcceleration(chrono.ChVector3d(0.0, 0.0, run.gravity))
+    apply_drum_gravity(chrono, system, run)
+
+
 def main() -> int:
     args = build_parser().parse_args()
     soil = make_soil(args)
@@ -1270,11 +1292,6 @@ def main() -> int:
     chrono.SetChronoOutputPath(str(out_dir) + "/")
 
     system = chrono.ChSystemNSC()
-    # Terrain gravity is set separately below and always drives the SPH soil.
-    # System gravity is what acts on Chrono bodies such as the rigid drum.
-    system.SetGravitationalAcceleration(
-        chrono.ChVector3d(0.0, 0.0, run.gravity if run.drum_gravity else 0.0)
-    )
     if hasattr(system, "SetCollisionSystemType") and hasattr(chrono, "ChCollisionSystem"):
         system.SetCollisionSystemType(chrono.ChCollisionSystem.Type_BULLET)
     system.SetTimestepperType(chrono.ChTimestepper.Type_EULER_IMPLICIT_LINEARIZED)
@@ -1283,7 +1300,7 @@ def main() -> int:
 
     terrain = veh.CRMTerrain(system, run.spacing)
     terrain.SetVerbose(False)
-    terrain.SetGravitationalAcceleration(chrono.ChVector3d(0.0, 0.0, run.gravity))
+    configure_gravity(chrono, system, terrain, run)
     terrain.SetComputationalDomain(computational_domain_aabb(chrono, comp_domain), fsi.BC_NONE)
     terrain.SetStepSizeCFD(run.dt)
     if hasattr(terrain, "SetStepsizeMBD"):
@@ -1324,6 +1341,9 @@ def main() -> int:
     )
     print(f"Solid container BCE markers: {container_bce}", flush=True)
     terrain.Initialize()
+    # Defensive reassert: some Chrono builds synchronize system gravity during
+    # FSI initialization.  Soil gravity remains untouched on the terrain.
+    apply_drum_gravity(chrono, system, run)
 
     fluid = get_fluid_system(terrain, fsi)
     actual_domain = fluid.GetComputationalDomain()
