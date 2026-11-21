@@ -10,7 +10,7 @@ A two-way coupled FEA driver (`crm/lunar_excavator_crm_fea.py`) and a combined r
 
 > **Metric note:** soil/excavation metrics count SPH fluid markers only. Older comparisons that included BCE markers are invalid.
 
-> **Fill measure:** `inside_drum`, `fill_ratio_count`, and `fill_ratio_mass` use the same instantaneous `excavated` set: SPH particles lifted above the initial bed and fully inside the outer drum envelope eroded by one particle radius. The analytic cylinder follows the excavator's full live pose, and a particle loses its flag as soon as it leaves the current envelope or drops back to the bed. Capacity, the nominal `inner_radius` denominator, SPH/BCE counts, and particle CSV columns are unchanged.
+> **Fill measure:** `inside_drum`, `fill_ratio_count`, and `fill_ratio_mass` use the same instantaneous `excavated` set: SPH particles lifted above the initial bed and fully inside the analytical detector cylinder eroded by one particle radius. By default the cylinder is sized from the measured drum radius and full length; it may instead be sized manually. The cylinder follows the excavator's full live pose, and a particle loses its flag as soon as it leaves the current cylinder or drops back to the bed. Capacity, the nominal `inner_radius` denominator, SPH/BCE counts, and particle CSV columns are unchanged.
 
 ## Requirements
 
@@ -44,6 +44,28 @@ Runners select `chrono-env/bin/python` automatically when `PYTHON` is unset and 
 ### Gravity settings
 
 `--gravity` (or the GUI's **Gravity Z (m/s^2)** field) sets one signed global Z acceleration, default `-9.81` m/s². It always drives CRM soil and the drums in both FEA paths. Rigid CRM's drum is a separate choice: **Apply gravity to CRM drum** / `--drum-gravity` defaults off, so older force-descent runs keep their original actuator-plus-soil-response behavior. Enable it when the drum's own weight should contribute to descent.
+
+### Fill-detector sizing
+
+The fill cylinder is automatic by default: its nominal radius and full length follow the measured drum radius and length used by the rigid CRM run. To size it independently, pass:
+
+```bash
+./crm/run.sh --no-detector-auto-size \
+  --detector-radius 0.05 --detector-length 0.08 --output-dir Output_ManualDetector
+```
+
+`--detector-length` is the **full** axial length; the driver stores half-length internally. The wizard/GUI use the config keys `detector_auto_size`, `detector_radius`, and `detector_length`. On the GUI's **Geometry** page these appear as **Auto-size fill detector**, **Detector cylinder radius (m)**, and **Detector cylinder length (m)**; the manual fields are enabled only when auto sizing is unchecked. Geometry auto-correction still manages only the physical drum dimensions and never overwrites manual detector values. Detector flags are emitted only for rigid CRM; the one-way FEA replay does not accept them.
+
+For visual sizing, open **Tools → Live 3D fill-detector size adjuster** (or the **Open live 3D detector sizer** button on the Geometry page). The adjuster shows the STEP model (or converted CRM/FEA surface) at 50% opacity, an orange nominal detector cylinder, and a green wireframe of the classifier cylinder eroded by one SPH particle radius. Dragging the radius/length sliders updates both the 3D view and the GUI fields in real time; merely opening the viewer leaves auto mode unchanged. The standalone equivalent is:
+
+```bash
+./chrono-env/bin/python detector_size_tool.py \
+  --step geometry/MyDrum.step --radius 0.061037 --length 0.066 \
+  --spacing 0.002 --source-axis Y --unit-scale 0.001 \
+  --show --result-json /tmp/detector_size.json
+```
+
+`--surface`/`--fea-node` can be used when no STEP file is available. The viewer needs the local `chrono-env` Python (PyVista, trimesh, and OCP).
 
 ## Typical workflows
 
@@ -140,6 +162,7 @@ Launch the consolidated GUI with `./run_study_gui.sh`. Its **Settings** tab adju
 ├── study_output_preview.py         # CSV-only lightweight GUI preview widget
 ├── fea_summary.py                  # derive compact MPa/mm FEA chart tables from summary.csv
 ├── export_study_vtk.py             # export study outputs to ParaView datasets
+├── detector_size_tool.py           # live 3D fill-cylinder radius/length adjuster
 ├── view_study_paraview.py          # ParaView/PyVista viewer for exported studies
 ├── view_results.py                 # plot CRM/FEA summaries
 ├── view_geometry.py                # compare STEP CAD vs converted geometry

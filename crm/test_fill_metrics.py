@@ -153,6 +153,75 @@ class FillMetricTest(unittest.TestCase):
         self.assertEqual(metrics_below["fill_ratio_mass"], 0.0)
         self.assertGreater(metrics_above["fill_ratio_mass"], 0.0)
 
+    def test_auto_detector_follows_drum_dimensions(self):
+        run = replace(
+            self.run,
+            detector_auto_size=True,
+            detector_radius=0.02,
+            detector_half_length=0.01,
+        )
+        self.assertEqual(
+            run.detector_cylinder(),
+            (self.run.drum_radius, self.run.drum_half_length),
+        )
+
+    def test_manual_detector_is_independent_of_drum_dimensions(self):
+        run = replace(
+            self.run,
+            detector_auto_size=False,
+            detector_radius=0.05,
+            detector_half_length=0.035,
+        )
+        self.assertEqual(run.detector_cylinder(), (0.05, 0.035))
+
+        # 0.048 m radial is inside the auto drum envelope but outside the
+        # manual one; 0.024 m axial is outside the auto drum but inside the
+        # longer manual detector.
+        locals_ = np.array([
+            [0.048, 0.0, 0.0],
+            [0.035, 0.0, 0.0],
+            [0.0, 0.0, 0.015],
+            [0.0, 0.0, 0.024],
+        ])
+        _auto_metrics, auto_flags = self.metrics(locals_, run=self.run)
+        _manual_metrics, manual_flags = self.metrics(locals_, run=run)
+        np.testing.assert_array_equal(auto_flags[:, 0], [1, 1, 1, 0])
+        np.testing.assert_array_equal(manual_flags[:, 0], [0, 1, 1, 1])
+        np.testing.assert_array_equal(manual_flags[:, 1], manual_flags[:, 0])
+        self.assertEqual(_manual_metrics["inside_drum"], 3)
+        self.assertEqual(_manual_metrics["excavated"], 3)
+
+    def test_detector_cli_auto_and_full_length_conversion(self):
+        parser = crm.build_parser()
+        auto = crm.make_run_params(parser.parse_args(["--omega", "3.14"]))
+        self.assertEqual(
+            auto.detector_cylinder(), (auto.drum_radius, auto.drum_half_length))
+
+        manual = crm.make_run_params(parser.parse_args([
+            "--omega", "3.14",
+            "--no-detector-auto-size",
+            "--detector-radius", "0.05",
+            "--detector-length", "0.08",
+        ]))
+        self.assertEqual(manual.detector_radius, 0.05)
+        self.assertEqual(manual.detector_half_length, 0.04)
+        self.assertEqual(manual.detector_cylinder(), (0.05, 0.04))
+
+    def test_manual_detector_cli_requires_manual_mode(self):
+        args = crm.build_parser().parse_args([
+            "--omega", "3.14", "--detector-radius", "0.05",
+        ])
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            crm.make_run_params(args)
+
+    def test_manual_detector_rejects_nonpositive_radius(self):
+        args = crm.build_parser().parse_args([
+            "--omega", "3.14", "--no-detector-auto-size",
+            "--detector-radius", "-0.05",
+        ])
+        with self.assertRaisesRegex(ValueError, "detector_radius must be positive"):
+            crm.make_run_params(args)
+
     def test_mesh_detector_cli_option_is_removed(self) -> None:
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             crm.build_parser().parse_args([

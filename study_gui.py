@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -128,6 +129,9 @@ PARAM_INFO: dict[str, str] = {
     "drum_half_length": "Half the drum length along its axis; used for bed box and CRM placement.",
     "inner_radius": "Nominal cavity radius used to estimate fill ratio and capacity volume.",
     "capacity_volume": "Known internal cavity volume; leave blank to derive capacity from drum radii/length.",
+    "detector_auto_size": "Automatically size the fill-detector cylinder from the measured drum radius and full length. Uncheck to enter the cylinder radius and length manually; the 3D adjuster is also available below.",
+    "detector_radius": "Manual nominal fill-detector cylinder radius in metres. The SPH particle radius is eroded from it at runtime.",
+    "detector_length": "Manual nominal fill-detector cylinder full axial length in metres. The SPH particle radius is eroded from each end at runtime.",
     # Run & domain
     "duration": "Total rigid-CRM simulation time. In kinematic mode a full excavation takes about bed_height / descent_speed; force mode has a load-dependent duration.",
     "fea_duration": "One-way FEA replay length; cannot exceed the CRM load-history duration. FEA replays rigid CRM soil-wrench CSVs, not SPH contact.",
@@ -367,6 +371,9 @@ def shipped_defaults() -> dict[str, object]:
         "drum_half_length": "0.033",
         "inner_radius": "0.055",
         "capacity_volume": "",
+        "detector_auto_size": True,
+        "detector_radius": "0.061037",
+        "detector_length": "0.066",
         "duration": "20",
         "fea_duration": "20",
         "spacing": "0.002",
@@ -441,6 +448,9 @@ DEFAULT_GROUPS: list[tuple[str, list[tuple[str, str, dict]]]] = [
         ("Drum half-length (m)", "drum_half_length", {}),
         ("Inner/cavity radius (m)", "inner_radius", {}),
         ("Capacity volume override (m^3)", "capacity_volume", {}),
+        ("Auto-size fill detector", "detector_auto_size", {"check": True}),
+        ("Detector cylinder radius (m)", "detector_radius", {}),
+        ("Detector cylinder length (m)", "detector_length", {}),
     ]),
     ("Run & Domain", [
         ("CRM duration (s)", "duration", {}),
@@ -539,6 +549,55 @@ def py_exec() -> str:
         return env_py
     cand = ROOT / "chrono-env" / "bin" / "python"
     return str(cand) if cand.is_file() else sys.executable
+
+
+def read_detector_result(path: Path | None) -> dict | None:
+    """Read a detector-sizer result file; return None if absent or incomplete."""
+    if path is None or not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        return {
+            "radius": float(data["radius"]),
+            "length": float(data["length"]),
+            "dirty": bool(data.get("dirty", True)),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def build_detector_sizer_command(
+        *, python: str, root: Path, step_file: Path | None,
+        surface_file: Path | None, fea_node: Path | None,
+        radius: float, length: float, spacing: float, cad_axis: str,
+        unit_scale: float, result_json: Path, threads: int = 0,
+        show: bool = True) -> list[str]:
+    """Build the live 3D adjuster command without launching it."""
+    cmd = [python, str(root / "detector_size_tool.py")]
+    if step_file is not None and step_file.is_file():
+        cmd.extend(["--step", str(step_file)])
+    if surface_file is not None and surface_file.is_file():
+        cmd.extend(["--surface", str(surface_file)])
+    if fea_node is not None and fea_node.is_file():
+        cmd.extend(["--fea-node", str(fea_node)])
+    cmd.extend([
+        "--radius", f"{radius:g}",
+        "--length", f"{length:g}",
+        "--spacing", f"{spacing:g}",
+        "--source-axis", str(cad_axis or "Y"),
+        "--unit-scale", f"{unit_scale:g}",
+        "--result-json", str(result_json),
+    ])
+    if threads > 0:
+        cmd.extend(["--threads", str(threads)])
+    if show:
+        cmd.append("--show")
+    return cmd
 
 
 class ScrollFrame(ttk.Frame):
@@ -671,8 +730,10 @@ class StudyGUI:
         self.tools_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self.vars: dict[str, StringVar | BooleanVar] = {}
         self.default_vars: dict[str, StringVar | BooleanVar] = {}
+        self.detector_widgets: dict[str, object] = {}
         self._build_vars()
         self._build_ui()
+        self._sync_detector_fields()
         self._bind_particle_estimate()
         self._update_particle_estimate()
         self.root.after(100, self._drain_log)
@@ -848,11 +909,11 @@ class StudyGUI:
         messagebox.showinfo(title=f"{title} - info", message=text)
 
     def _row(self, parent, r, label, key, width=40, browse=None, combo=None, check=False,
-             help_text=None, variables=None):
+             help_text=None, variables=None, widget_out=None, command=None):
         fields = variables if variables is not None else self.vars
         ttk.Label(parent, text=label).grid(row=r, column=0, sticky=W, padx=6, pady=3)
         if check:
-            w = ttk.Checkbutton(parent, variable=fields[key])
+            w = ttk.Checkbutton(parent, variable=fields[key], command=command)
             w.grid(row=r, column=1, sticky=W, padx=6, pady=3)
         elif combo:
             w = ttk.Combobox(parent, textvariable=fields[key], values=combo, width=max(12, width-2), state="readonly")
@@ -869,6 +930,8 @@ class StudyGUI:
                     if p:
                         f[k].set(p)
                 ttk.Button(parent, text="Browse", command=cmd).grid(row=r, column=2, sticky=W)
+        if widget_out is not None:
+            widget_out[key] = w
         info_text = PARAM_INFO.get(key) or help_text or "No additional information is available for this setting."
         ttk.Button(
             parent, text="Info", width=6,
@@ -916,6 +979,25 @@ class StudyGUI:
         r = self._row(p, r, "Drum half-length (m)", "drum_half_length")
         r = self._row(p, r, "Inner/cavity radius (m)", "inner_radius")
         r = self._row(p, r, "Capacity volume override (m^3)", "capacity_volume", help_text="Blank = derive from geometry.")
+        ttk.Separator(p).grid(row=r, column=0, columnspan=4, sticky="ew", pady=8); r += 1
+        ttk.Label(p, text="Fill-detector cylinder", font=SECTION_FONT).grid(
+            row=r, column=0, sticky=W, padx=6); r += 1
+        r = self._row(p, r, "Auto-size fill detector", "detector_auto_size", check=True,
+                      command=self._sync_detector_fields,
+                      widget_out=self.detector_widgets)
+        r = self._row(p, r, "Detector cylinder radius (m)", "detector_radius",
+                      help_text="Used when auto-size is unchecked.",
+                      widget_out=self.detector_widgets)
+        r = self._row(p, r, "Detector cylinder length (m)", "detector_length",
+                      help_text="Full axial length; used when auto-size is unchecked.",
+                      widget_out=self.detector_widgets)
+        ttk.Button(
+            p, text="Open live 3D detector sizer", command=self._tool_detector_sizer,
+        ).grid(row=r, column=1, sticky=W, padx=6, pady=4)
+        ttk.Label(p, text="Shows the STEP/drum at 50% opacity with the detector cylinder; "
+                          "slider changes update the fields live.",
+                  foreground="#666666").grid(row=r, column=2, columnspan=2, sticky=W, padx=6)
+        r += 1
 
     def _page_run(self):
         p = self._add_page("3. Run & Domain")
@@ -1234,6 +1316,7 @@ class StudyGUI:
             ("Open lightweight CRM/FEA output preview", self._open_output_preview),
             ("Preview STEP mesh (full-run mesher + comparison)", self._tool_mesh_preview),
             ("View geometry comparison (STEP vs converted)", self._tool_geometry),
+            ("Live 3D fill-detector size adjuster", self._tool_detector_sizer),
             ("Open study folder", self._tool_open_folder),
         ]
         for text, cmd in actions:
@@ -1820,6 +1903,14 @@ class StudyGUI:
         v = self.vars[key]
         return bool(v.get()) if isinstance(v, BooleanVar) else v.get().strip().lower() in {"1", "true", "yes", "y"}
 
+    def _sync_detector_fields(self, *_):
+        """Enable the manual size fields only when auto sizing is disabled."""
+        state = NORMAL if not self._gb("detector_auto_size") else DISABLED
+        for key in ("detector_radius", "detector_length"):
+            widget = getattr(self, "detector_widgets", {}).get(key)
+            if widget is not None:
+                widget.configure(state=state)
+
     def _bind_particle_estimate(self) -> None:
         for key in ("drum_radius", "drum_half_length", "spin_axis",
                     "bed_height", "bed_padding", "spacing"):
@@ -1969,6 +2060,11 @@ class StudyGUI:
         inner_radius = float(self._g("inner_radius") or 0.055)
         cap_raw = self._g("capacity_volume").strip()
         capacity_volume = float(cap_raw) if cap_raw else None
+        detector_auto_size = self._gb("detector_auto_size")
+        detector_radius = float(self._g("detector_radius") or drum_radius)
+        detector_length = float(self._g("detector_length") or 2.0 * drum_half_length)
+        if detector_radius <= 0.0 or detector_length <= 0.0:
+            raise ValueError("Detector radius and length must be positive")
 
         mesh_steps = []
         if geo == "step":
@@ -2101,6 +2197,9 @@ class StudyGUI:
             "spin_axis": spin_axis,
             "inner_radius": inner_radius,
             "capacity_volume": capacity_volume,
+            "detector_auto_size": detector_auto_size,
+            "detector_radius": detector_radius,
+            "detector_length": detector_length,
             "soil": soil,
             "fea_dt": fea_dt,
             "solver": solver,
@@ -2259,6 +2358,9 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                     self.vars[k].set(f"{gd[k]:g}")
             if "active_box" in gd:
                 self.vars["active_box"].set(",".join(f"{v:g}" for v in gd["active_box"]))
+            if self._gb("detector_auto_size"):
+                self.vars["detector_radius"].set(f"{gd['drum_radius']:g}")
+                self.vars["detector_length"].set(f"{2.0 * gd['drum_half_length']:g}")
             self.vars["fea_duration"].set(self.vars["duration"].get())
             self.status_var.set("Applied CAD/mesh-derived defaults (you can still edit them).")
             messagebox.showinfo("Geometry", "Applied geometry-derived defaults. Review and adjust any field before running.")
@@ -2288,7 +2390,8 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         for k in ["unit_scale", "mesh_size", "surface_target_faces", "surface_faces", "surface_max_faces",
                   "surface_fit_tolerance", "min_solid_volume", "hub_radius",
                   "part_aware_radius", "part_aware_reduction", "part_aware_min_faces",
-                  "drum_radius", "drum_half_length", "inner_radius", "capacity_volume", "duration",
+                  "drum_radius", "drum_half_length", "inner_radius", "capacity_volume",
+                  "detector_radius", "detector_length", "duration",
                   "fea_duration", "spacing", "d0_multiplier", "artificial_viscosity",
                    "shifting_ppst_push", "crm_fps", "fea_fps", "fea_dt",
                   "bed_height", "bed_padding", "settle_time", "gravity", "descent_speed", "descent_force_n", "descent_force_ramp_s", "omega", "num_threads",
@@ -2297,7 +2400,7 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                   "paraview_particle_render_stride"]:
             setv(k, data.get(k))
         for k in ["reverse_spin", "drum_gravity", "save_particles", "fea_export_vtk", "export_vtk", "open_results", "open_paraview", "auto_geometry",
-                  "part_aware_simplify"]:
+                  "detector_auto_size", "part_aware_simplify"]:
             if k in data:
                 setv(k, data.get(k))
         for k, v in {"output_dir": data.get("output_dir"), "step_file": data.get("step_file"),
@@ -2305,6 +2408,7 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                      "fea_ele": data.get("fea_ele")}.items():
             if v:
                 setv(k, v)
+        self._sync_detector_fields()
         ab = data.get("active_box")
         if isinstance(ab, (list, tuple)) and len(ab) == 3:
             setv("active_box", ",".join(f"{float(x):g}" for x in ab))
@@ -2562,6 +2666,101 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             self.tools_queue.put(("done", (label, proc.wait())))
         except Exception as exc:
             self.tools_queue.put(("done", (label, f"log error: {exc}")))
+
+    def _tool_detector_sizer(self):
+        """Open the live 3D STEP + detector-cylinder size adjuster."""
+        proc = getattr(self, "_detector_sizer_proc", None)
+        if proc is not None and proc.poll() is None:
+            self._tool_log("# Detector sizer is already running.")
+            return
+        try:
+            mesh = self._mesh_settings()
+            step_file = mesh.get("step_file")
+            if step_file is not None and not step_file.is_file():
+                step_file = None
+            crm_obj = Path(self._g("crm_obj")).expanduser().resolve()
+            surface_file = crm_obj if crm_obj.is_file() else None
+            fea_node = Path(self._g("fea_node")).expanduser().resolve()
+            if not fea_node.is_file():
+                fea_node = None
+            if step_file is None and surface_file is None and fea_node is None:
+                raise ValueError(
+                    "3D sizer needs a STEP file, CRM surface OBJ, or FEA .node with "
+                    "a recorded surface"
+                )
+
+            if self._gb("detector_auto_size"):
+                # Show the cylinder that will actually be used in auto mode.
+                radius = float(self._g("drum_radius"))
+                length = 2.0 * float(self._g("drum_half_length"))
+            else:
+                radius = float(self._g("detector_radius")
+                               or self._g("drum_radius"))
+                length = float(self._g("detector_length")
+                               or 2.0 * float(self._g("drum_half_length")))
+            spacing = float(self._g("spacing"))
+            if radius <= 0.0 or length <= 0.0 or spacing <= 0.0:
+                raise ValueError("Detector radius, length, and SPH spacing must be positive")
+        except Exception as exc:
+            self._tool_log(f"[detector sizer error] {exc}")
+            return
+
+        scratch = Path(tempfile.mkdtemp(prefix="detector_sizer_"))
+        result_path = scratch / "detector_size.json"
+        cmd = build_detector_sizer_command(
+            python=py_exec(),
+            root=ROOT,
+            step_file=step_file,
+            surface_file=surface_file,
+            fea_node=fea_node,
+            radius=radius,
+            length=length,
+            spacing=spacing,
+            cad_axis=str(mesh.get("cad_axis") or "Y"),
+            unit_scale=float(mesh.get("unit_scale") or 0.001),
+            result_json=result_path,
+            show=True,
+        )
+        self._tool_log("$ " + shlex.join(cmd))
+        env = os.environ.copy()
+        env.setdefault("QT_QPA_PLATFORM", "xcb")
+        try:
+            self._detector_sizer_proc = subprocess.Popen(cmd, cwd=ROOT, env=env)
+        except Exception as exc:
+            self._tool_log(f"[detector sizer error] {exc}")
+            return
+        self._detector_result_json = result_path
+        self._detector_last_values = None
+        self._tool_log("# 3D detector sizer opened; slider values update the GUI live.")
+        self.root.after(250, self._poll_detector_sizer)
+
+    def _poll_detector_sizer(self):
+        proc = getattr(self, "_detector_sizer_proc", None)
+        if proc is None:
+            return
+        result = read_detector_result(getattr(self, "_detector_result_json", None))
+        values = None
+        if result is not None and result["dirty"]:
+            values = (result["radius"], result["length"])
+        if values is not None and values != getattr(self, "_detector_last_values", None):
+            self.vars["detector_auto_size"].set(False)
+            self.vars["detector_radius"].set(f"{values[0]:.6g}")
+            self.vars["detector_length"].set(f"{values[1]:.6g}")
+            self._sync_detector_fields()
+            self._detector_last_values = values
+            self.status_var.set(
+                f"Detector cylinder: R={values[0]:.5g} m, L={values[1]:.5g} m"
+            )
+        rc = proc.poll()
+        if rc is None:
+            self.root.after(250, self._poll_detector_sizer)
+            return
+        self._detector_sizer_proc = None
+        self._tool_log(f"# 3D detector sizer closed (exit {rc}).")
+        if values is not None:
+            self.status_var.set(
+                f"Detector cylinder set to R={values[0]:.5g} m, L={values[1]:.5g} m"
+            )
 
     def _tool_mesh_preview(self):
         """Run the full-run STEP mesher into a scratch dir, then compare it to CAD."""

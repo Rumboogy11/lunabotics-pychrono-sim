@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
 import tempfile
@@ -714,6 +715,230 @@ class GravityGuiFieldsTest(IsolatedGuiDefaultsTest):
                     app._collect_cfg()
         finally:
             root.destroy()
+
+
+class FillDetectorSizeControlsTest(IsolatedGuiDefaultsTest):
+    def test_gui_fields_default_to_auto_drum_dimensions(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        import study_gui as gui
+
+        defaults = gui.shipped_defaults()
+        self.assertTrue(defaults["detector_auto_size"])
+        self.assertEqual(defaults["detector_radius"], "0.061037")
+        self.assertEqual(defaults["detector_length"], "0.066")
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+            self.assertTrue(app._gb("detector_auto_size"))
+            self.assertEqual(str(app.detector_widgets["detector_radius"].cget("state")), "disabled")
+            self.assertEqual(str(app.detector_widgets["detector_length"].cget("state")), "disabled")
+
+            def descendants(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descendants(child)
+
+            geometry_labels = [
+                child.cget("text") for child in descendants(app.pages[1])
+                if isinstance(child, (tk.Label, ttk.Label))
+            ]
+            self.assertIn("Auto-size fill detector", geometry_labels)
+            self.assertIn("Detector cylinder radius (m)", geometry_labels)
+            self.assertIn("Detector cylinder length (m)", geometry_labels)
+
+            tool_labels = [
+                child.cget("text") for child in descendants(app.tools_tab)
+                if isinstance(child, (tk.Label, ttk.Button))
+            ]
+            self.assertIn("Live 3D fill-detector size adjuster", tool_labels)
+
+            app.vars["detector_auto_size"].set(False)
+            app._sync_detector_fields()
+            self.assertEqual(str(app.detector_widgets["detector_radius"].cget("state")), "normal")
+            self.assertEqual(str(app.detector_widgets["detector_length"].cget("state")), "normal")
+        finally:
+            root.destroy()
+
+    def test_config_round_trip_collects_full_detector_length(self) -> None:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+            app._apply_config({
+                "detector_auto_size": False,
+                "detector_radius": 0.05,
+                "detector_length": 0.08,
+            })
+            self.assertFalse(app._gb("detector_auto_size"))
+            self.assertEqual(app.vars["detector_radius"].get(), "0.05")
+            self.assertEqual(app.vars["detector_length"].get(), "0.08")
+            self.assertEqual(str(app.detector_widgets["detector_radius"].cget("state")), "normal")
+
+            with tempfile.TemporaryDirectory(prefix="detector_gui_cfg_", dir="/tmp/opencode") as tmp:
+                app.vars["output_dir"].set(tmp)
+                cfg = app._collect_cfg()
+                self.assertFalse(cfg["detector_auto_size"])
+                self.assertEqual(cfg["detector_radius"], 0.05)
+                self.assertEqual(cfg["detector_length"], 0.08)
+
+                steps = gui.wiz.build_commands(cfg)
+                crm_cmd = next(s["command"] for s in steps if s["name"] == "rigid-CRM")
+                fea_cmd = next(s["command"] for s in steps if s["name"] == "one-way-FEA")
+                self.assertIn("--no-detector-auto-size", crm_cmd)
+                self.assertEqual(crm_cmd[crm_cmd.index("--detector-radius") + 1], "0.05")
+                self.assertEqual(crm_cmd[crm_cmd.index("--detector-length") + 1], "0.08")
+                self.assertNotIn("--detector-radius", fea_cmd)
+        finally:
+            root.destroy()
+
+    def test_sizer_launch_passes_geometry_and_show_flag(self) -> None:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+            with tempfile.TemporaryDirectory(prefix="detector_launch_", dir="/tmp/opencode") as tmp:
+                base = Path(tmp)
+                step = base / "drum.step"
+                surface = base / "drum.obj"
+                node = base / "drum.node"
+                for path in (step, surface, node):
+                    path.write_text("", encoding="utf-8")
+                (base / "scratch").mkdir()
+                app.vars["geometry"].set("step")
+                app.vars["step_file"].set(str(step))
+                app.vars["crm_obj"].set(str(surface))
+                app.vars["fea_node"].set(str(node))
+                app.vars["cad_axis"].set("Z")
+                app.vars["unit_scale"].set("1")
+                app.vars["detector_auto_size"].set(False)
+                app.vars["detector_radius"].set("0.05")
+                app.vars["detector_length"].set("0.08")
+
+                class Proc:
+                    def poll(self):
+                        return None
+
+                with patch.object(gui.tempfile, "mkdtemp", return_value=str(base / "scratch")), \
+                     patch.object(app.root, "after", return_value=None), \
+                     patch.object(gui.subprocess, "Popen", return_value=Proc()) as popen:
+                    app._tool_detector_sizer()
+
+                cmd = popen.call_args.args[0]
+                self.assertTrue(cmd[1].endswith("detector_size_tool.py"))
+                self.assertEqual(cmd[cmd.index("--step") + 1], str(step))
+                self.assertEqual(cmd[cmd.index("--surface") + 1], str(surface))
+                self.assertEqual(cmd[cmd.index("--fea-node") + 1], str(node))
+                self.assertEqual(cmd[cmd.index("--radius") + 1], "0.05")
+                self.assertEqual(cmd[cmd.index("--length") + 1], "0.08")
+                self.assertEqual(cmd[cmd.index("--source-axis") + 1], "Z")
+                self.assertIn("--show", cmd)
+                self.assertEqual(
+                    cmd[cmd.index("--result-json") + 1],
+                    str(base / "scratch" / "detector_size.json"),
+                )
+        finally:
+            root.destroy()
+
+    def test_result_polling_applies_only_dirty_slider_values(self) -> None:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+            with tempfile.TemporaryDirectory(prefix="detector_poll_", dir="/tmp/opencode") as tmp:
+                path = Path(tmp) / "detector_size.json"
+                path.write_text(json.dumps({
+                    "radius": 0.061037, "length": 0.066, "dirty": False,
+                }), encoding="utf-8")
+                app._detector_result_json = path
+                app._detector_sizer_proc = FinishedProcess()
+
+                app._poll_detector_sizer()
+                self.assertTrue(app._gb("detector_auto_size"))
+                self.assertEqual(str(app.detector_widgets["detector_radius"].cget("state")), "disabled")
+
+                path.write_text(json.dumps({
+                    "radius": 0.0525, "length": 0.074, "dirty": True,
+                }), encoding="utf-8")
+                app._detector_sizer_proc = FinishedProcess()
+
+                app._poll_detector_sizer()
+                self.assertFalse(app._gb("detector_auto_size"))
+                self.assertEqual(app.vars["detector_radius"].get(), "0.0525")
+                self.assertEqual(app.vars["detector_length"].get(), "0.074")
+                self.assertEqual(str(app.detector_widgets["detector_radius"].cget("state")), "normal")
+                self.assertIn("Detector cylinder set to", app.status_var.get())
+                self.assertIsNone(app._detector_sizer_proc)
+        finally:
+            root.destroy()
+
+    def test_command_builder_and_result_reader(self) -> None:
+        import study_gui as gui
+
+        cmd = gui.build_detector_sizer_command(
+            python="/usr/bin/python3",
+            root=Path("/work"),
+            step_file=None,
+            surface_file=None,
+            fea_node=None,
+            radius=0.05,
+            length=0.08,
+            spacing=0.002,
+            cad_axis="",
+            unit_scale=0.001,
+            result_json=Path("/tmp/result.json"),
+            show=False,
+        )
+        self.assertEqual(cmd, [
+            "/usr/bin/python3", "/work/detector_size_tool.py",
+            "--radius", "0.05", "--length", "0.08", "--spacing", "0.002",
+            "--source-axis", "Y", "--unit-scale", "0.001",
+            "--result-json", "/tmp/result.json",
+        ])
+
+        with tempfile.TemporaryDirectory(prefix="detector_read_", dir="/tmp/opencode") as tmp:
+            base = Path(tmp)
+            step = base / "drum.step"
+            step.write_text("", encoding="utf-8")
+            cmd = gui.build_detector_sizer_command(
+                python="py", root=base, step_file=step, surface_file=None,
+                fea_node=None, radius=0.061, length=0.066, spacing=0.002,
+                cad_axis="X", unit_scale=0.001,
+                result_json=base / "result.json", threads=2, show=True,
+            )
+            self.assertEqual(cmd[cmd.index("--step") + 1], str(step))
+            self.assertEqual(cmd[cmd.index("--threads") + 1], "2")
+            self.assertIn("--show", cmd)
+
+            result = base / "result.json"
+            result.write_text("{not json", encoding="utf-8")
+            self.assertIsNone(gui.read_detector_result(result))
+            result.write_text(json.dumps({
+                "radius": 0.055, "length": 0.077,
+            }), encoding="utf-8")
+            self.assertEqual(gui.read_detector_result(result), {
+                "radius": 0.055, "length": 0.077, "dirty": True,
+            })
+
+
+class FinishedProcess:
+    def poll(self):
+        return 0
 
 
 if __name__ == "__main__":

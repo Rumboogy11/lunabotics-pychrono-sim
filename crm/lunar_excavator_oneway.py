@@ -264,7 +264,8 @@ def build_parser() -> argparse.ArgumentParser:
         flags = set(action.option_strings)
         if flags & {"--use-contact-skin", "--contact-obj", "--bce-layers",
                     "--check-fea-embedded", "--initial-gap", "--loads-file",
-                    "--save-particles", "--smoke-test", "--mesh", "--mesh-file"}:
+                    "--save-particles", "--smoke-test", "--mesh", "--mesh-file",
+                    "--detector-auto-size", "--detector-radius", "--detector-length"}:
             p._remove_action(action)
         elif "--spin-ramp-time" in flags:
             # The recorded rigid-CRM load assumes instant spin after settling.

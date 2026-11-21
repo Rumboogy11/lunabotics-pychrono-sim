@@ -12,7 +12,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "crm"))
 
+import lunar_excavator_crm_fea as fea  # noqa: E402
+import lunar_excavator_oneway as oneway  # noqa: E402
 import study_wizard as wiz  # noqa: E402
 
 
@@ -134,6 +137,92 @@ class StudyGeometryConsistencyTest(unittest.TestCase):
             self.assertNotIn("--fill-detector-obj", fea_cmd)
             self.assertNotIn("--fill-detector-step", crm_cmd)
             self.assertNotIn("--fill-detector-step", fea_cmd)
+
+    def test_manual_detector_size_is_forwarded_only_to_rigid_crm(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="detector_cfg_", dir="/tmp/opencode") as tmp:
+            cfg = consistent_cfg(Path(tmp))
+            cfg["detector_auto_size"] = False
+            cfg["detector_radius"] = 0.05
+            cfg["detector_length"] = 0.08
+            steps = wiz.build_commands(cfg)
+            crm_cmd = next(s["command"] for s in steps if s["name"] == "rigid-CRM")
+
+            self.assertIn("--no-detector-auto-size", crm_cmd)
+            self.assertEqual(crm_cmd[crm_cmd.index("--detector-radius") + 1], "0.05")
+            self.assertEqual(crm_cmd[crm_cmd.index("--detector-length") + 1], "0.08")
+            for step in steps:
+                if step["name"] == "rigid-CRM":
+                    continue
+                self.assertNotIn("--no-detector-auto-size", step["command"])
+                self.assertNotIn("--detector-radius", step["command"])
+                self.assertNotIn("--detector-length", step["command"])
+
+    def test_auto_detector_size_sends_no_manual_flags(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="detector_auto_cfg_", dir="/tmp/opencode") as tmp:
+            cfg = consistent_cfg(Path(tmp))
+            cfg["detector_auto_size"] = True
+            steps = wiz.build_commands(cfg)
+            crm_cmd = next(s["command"] for s in steps if s["name"] == "rigid-CRM")
+            self.assertNotIn("--no-detector-auto-size", crm_cmd)
+            self.assertNotIn("--detector-radius", crm_cmd)
+            self.assertNotIn("--detector-length", crm_cmd)
+
+    def test_manual_detector_cli_options_are_accepted(self) -> None:
+        args = wiz.build_parser().parse_args([
+            "--no-detector-auto-size",
+            "--detector-radius", "0.05",
+            "--detector-length", "0.08",
+        ])
+        self.assertFalse(args.detector_auto_size)
+        self.assertEqual(args.detector_radius, 0.05)
+        self.assertEqual(args.detector_length, 0.08)
+
+    def test_auto_detector_config_follows_corrected_drum_dimensions(self) -> None:
+        measured = {"drum_radius": 0.178835, "drum_half_length": 0.153176}
+        wiz.measured_geometry_for_cfg = lambda cfg: measured
+        with tempfile.TemporaryDirectory(prefix="detector_auto_sync_", dir="/tmp/opencode") as tmp:
+            cfg = consistent_cfg(Path(tmp))
+            cfg["auto_geometry"] = True
+            cfg["drum_radius"] = 0.3
+            cfg["detector_auto_size"] = True
+            cfg["detector_radius"] = 0.3
+            cfg["detector_length"] = 0.8
+            wiz.build_commands(cfg)
+
+            self.assertAlmostEqual(cfg["detector_radius"], measured["drum_radius"])
+            self.assertAlmostEqual(
+                cfg["detector_length"], 2.0 * measured["drum_half_length"])
+
+    def test_auto_geometry_correction_leaves_manual_detector_alone(self) -> None:
+        measured = {"drum_radius": 0.178835, "drum_half_length": 0.153176}
+        wiz.measured_geometry_for_cfg = lambda cfg: measured
+        with tempfile.TemporaryDirectory(prefix="detector_auto_geom_", dir="/tmp/opencode") as tmp:
+            cfg = consistent_cfg(Path(tmp))
+            cfg["auto_geometry"] = True
+            cfg["drum_radius"] = 0.3
+            cfg["duration"] = 2.0
+            cfg["detector_auto_size"] = False
+            cfg["detector_radius"] = 0.05
+            cfg["detector_length"] = 0.08
+            wiz.build_commands(cfg)
+
+            self.assertAlmostEqual(cfg["drum_radius"], measured["drum_radius"])
+            self.assertFalse(cfg["detector_auto_size"])
+            self.assertEqual(cfg["detector_radius"], 0.05)
+            self.assertEqual(cfg["detector_length"], 0.08)
+
+    def test_fea_drivers_reject_rigid_only_detector_flags(self) -> None:
+        removed_flags = {
+            "--detector-auto-size", "--no-detector-auto-size",
+            "--detector-radius", "--detector-length",
+        }
+        for module in (fea, oneway):
+            parser_flags = {
+                flag
+                for action in module.build_parser()._actions
+                for flag in action.option_strings
+            }
+            self.assertFalse(removed_flags & parser_flags, module.__name__)
 
     def test_detector_step_option_is_rejected(self) -> None:
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):

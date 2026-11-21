@@ -12,11 +12,11 @@ soil response, torque, and specific energy across drum/spike geometries.
 
 Soil/FEA metrics count **SPH fluid markers only**. Older comparisons that included BCE markers are invalid.
 
-Fill uses the same instantaneous **excavated** set as the specific-energy metric: a particle must be above the initial bed by one SPH radius (`rp = 0.5 × --spacing`, with Chrono `d0 = --spacing`) and fully inside the outer drum envelope eroded by `rp` radially and at both axial endcaps (bounds clamped at zero). The analytical cylinder follows the excavator's full live pose. `inside_drum`, `fill_ratio_count`, `fill_ratio_mass`, and both particle CSV flag columns all use that set.
+Fill uses the same instantaneous **excavated** set as the specific-energy metric: a particle must be above the initial bed by one SPH radius (`rp = 0.5 × --spacing`, with Chrono `d0 = --spacing`) and fully inside a detector cylinder eroded by `rp` radially and at both axial endcaps (bounds clamped at zero). By default that cylinder is sized from the drum radius and full length; `--no-detector-auto-size` with `--detector-radius`/`--detector-length` sizes it independently. The analytical cylinder follows the excavator's full live pose. `inside_drum`, `fill_ratio_count`, `fill_ratio_mass`, and both particle CSV flag columns all use that set.
 
-Classification is current-state only: a particle loses its flag as soon as it leaves the eroded cylinder or drops back to the bed. Capacity (including the nominal `inner_radius` denominator), the lifted predicate, SPH/BCE bookkeeping, and particle-position writers are unaffected.
+Classification is current-state only: a particle loses its flag as soon as it leaves the eroded cylinder or drops back to the bed. Capacity (including the nominal `inner_radius` denominator), the lifted predicate, SPH/BCE bookkeeping, and particle-position writers are unaffected. The manual detector dimensions affect only classification; they are not used for the soil mesh, container, or capacity denominator.
 
-Generated studies keep `--drum-radius`/`--drum-half-length` tied to the CAD or mesh actually loaded. With auto geometry enabled (the default), an edited outer dimension is restored to the measured value, an impossible cavity radius is reset, and a kinematic duration shorter than the full descent is extended (force mode has no analytic descent time, so that correction is skipped); the corrections are recorded in `study_config.json`. Disable auto geometry only when using a mesh that intentionally matches a custom radius. The fill measure and SPH/BCE counts are not changed by this check.
+Generated studies keep `--drum-radius`/`--drum-half-length` tied to the CAD or mesh actually loaded. With auto geometry enabled (the default), an edited outer dimension is restored to the measured value, an impossible cavity radius is reset, and a kinematic duration shorter than the full descent is extended (force mode has no analytic descent time, so that correction is skipped); the corrections are recorded in `study_config.json`. Disable auto geometry only when using a mesh that intentionally matches a custom radius. Geometry auto-correction manages the physical drum only and never overwrites manual detector dimensions. Detector flags are added only to the rigid-CRM command; the one-way and coupled FEA drivers reject them. The fill measure and SPH/BCE counts are not changed by this check.
 
 ## Requirements
 
@@ -142,6 +142,9 @@ write reproducible `study_config.json`/`commands.sh`, run both one-way stages, a
 | `--container-padding D` | gap between the outermost soil particles and the fixed reflective container (default: half an SPH spacing) |
 | `--inner-radius R` | nominal cavity radius for fill ratio |
 | `--capacity-volume V` | CAD-derived cavity/free-volume override |
+| `--detector-auto-size` / `--no-detector-auto-size` | size the fill cylinder from the drum, or use manual dimensions (default: auto) |
+| `--detector-radius R` | manual nominal detector radius in m (requires `--no-detector-auto-size`) |
+| `--detector-length L` | manual nominal detector **full** axial length in m; stored as half-length internally (requires `--no-detector-auto-size`) |
 | `--active-box X,Y,Z` | active SPH full size (default: padded bed + 2 drum diameters laterally; bed + initial excavator height + 2 diameters + padding vertically) |
 | `--mesh {coarse,medium}` | shipped OBJ selection |
 | `--mesh-file PATH` | custom OBJ geometry |
@@ -163,7 +166,7 @@ Notes:
 
 Typical rigid CRM run directory (`--output-dir ...`):
 
-- `config.json` — soil, numerics, mesh, and capacity settings
+- `config.json` — soil, numerics, mesh, capacity, and `fill_detector` settings (size mode, nominal/effective dimensions, and lift gate)
 - `summary.csv` — per-frame metrics (pose, counts, fill ratios, torque/work/specific energy; force-mode runs also record descent state/actuator telemetry)
 - `soil_loads.csv` — time-interpolated soil wrench at `--loads-fps` cadence when `--loads-file` is used (force-mode runs add the same descent telemetry columns)
 - `particles_*.csv` — per-frame particle positions/flags when `--save-particles` is used

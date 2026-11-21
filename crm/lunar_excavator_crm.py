@@ -17,10 +17,13 @@ At each output time, SPH particles are transformed into the drum's local frame
 using its full live pose.  The mesh's local Z axis is the long axis of the drum.
 With SPH particle radius ``rp = 0.5 * spacing`` (Chrono ``d0 = spacing``), an
 "excavated" particle is above the initial bed surface by the ``rp`` lift
-tolerance and inside the eroded outer drum envelope (``radial <= drum_radius -
-rp`` and ``abs(local_z) <= drum_half_length - rp``, bounds clamped at zero).
+tolerance and inside the eroded detector cylinder (``radial <= detector_radius -
+rp`` and ``abs(local_z) <= detector_half_length - rp``, bounds clamped at zero).
 
-The cylindrical envelope follows the excavator's exact rotation and translation.
+By default the detector cylinder dimensions follow the measured drum radius and
+half-length.  Use ``--no-detector-auto-size`` with ``--detector-radius`` and
+``--detector-length`` to size it independently.  The cylinder follows the
+excavator's exact rotation and translation.
 Classification is instantaneous: a particle is counted only while it is inside
 the current drum pose and above the initial bed, and loses the flag when it
 leaves either condition.  Fill uses exactly this excavated set::
@@ -115,6 +118,9 @@ class CrmRunParams:
     drum_half_length: float = MOTION_DEFAULT.drum_half_length
     inner_radius: float = 0.055          # nominal cavity radius [m]
     capacity_volume: float | None = None  # override for CAD free volume [m^3]
+    detector_auto_size: bool = True       # size the fill cylinder from the drum dimensions
+    detector_radius: float = MOTION_DEFAULT.drum_radius  # manual nominal cylinder radius [m]
+    detector_half_length: float = MOTION_DEFAULT.drum_half_length  # manual half-length [m]
     active_box_x: float = 0.631333  # padded bed + 2 drum diameters (reference drum)
     active_box_y: float = 0.687407
     active_box_z: float = 0.866370  # bed + initial centre height + 2 diameters
@@ -137,6 +143,7 @@ class CrmRunParams:
                 raise ValueError("descent_force_ramp_s must be non-negative")
         positive = ["spacing", "dt", "duration", "fps", "loads_fps", "particle_fps",
                     "bed_height", "drum_radius", "drum_half_length", "inner_radius",
+                    "detector_radius", "detector_half_length",
                     "max_velocity", "d0_multiplier", "free_surface_threshold"]
         for name in positive:
             if getattr(self, name) <= 0.0:
@@ -167,6 +174,12 @@ class CrmRunParams:
     @property
     def active_box(self) -> tuple[float, float, float]:
         return (self.active_box_x, self.active_box_y, self.active_box_z)
+
+    def detector_cylinder(self) -> tuple[float, float]:
+        """Return the nominal fill-cylinder radius and half-length in metres."""
+        if self.detector_auto_size:
+            return self.drum_radius, self.drum_half_length
+        return self.detector_radius, self.detector_half_length
 
 
 METRIC_FIELDS = [
@@ -289,6 +302,14 @@ def build_parser(*, include_drum_gravity: bool = True) -> argparse.ArgumentParse
                    help="nominal cavity radius for fill ratio in m (default: 0.055)")
     p.add_argument("--capacity-volume", type=float, default=None,
                    help="override nominal cavity volume in m^3 (for CAD-calibrated designs)")
+    p.add_argument("--detector-auto-size", action=argparse.BooleanOptionalAction, default=True,
+                   help="size the fill cylinder from the drum radius/half-length (default; "
+                        "use --no-detector-auto-size for manual dimensions)")
+    p.add_argument("--detector-radius", type=float, default=None,
+                   help="manual nominal fill-cylinder radius in m (requires --no-detector-auto-size)")
+    p.add_argument("--detector-length", type=float, default=None,
+                   help="manual nominal fill-cylinder full length in m "
+                        "(requires --no-detector-auto-size)")
     p.add_argument("--active-box", type=str, default=None,
                    help="active SPH domain full size X,Y,Z in metres (default: padded bed + 2 drum "
                         "diameters laterally; bed + initial height + 2 diameters + padding vertically)")
@@ -549,6 +570,8 @@ def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -
         "drum_half_length": getattr(args, "drum_half_length", None),
         "inner_radius": args.inner_radius,
         "capacity_volume": args.capacity_volume,
+        "detector_auto_size": getattr(args, "detector_auto_size", True),
+        "detector_radius": getattr(args, "detector_radius", None),
         "max_velocity": args.max_velocity,
         "artificial_viscosity": getattr(args, "artificial_viscosity", None),
         "shifting_ppst_push": getattr(args, "shifting_ppst_push", None),
@@ -587,6 +610,29 @@ def make_run_params(args: argparse.Namespace, *, validate_sph_dt: bool = True) -
             )
     else:
         overrides["dt"] = suggested_sph_dt(spacing, d0_multiplier)
+
+    manual_detector_radius = getattr(args, "detector_radius", None)
+    manual_detector_length = getattr(args, "detector_length", None)
+    if overrides.get("detector_auto_size", True):
+        if manual_detector_radius is not None or manual_detector_length is not None:
+            raise SystemExit(
+                "--detector-radius/--detector-length require --no-detector-auto-size"
+            )
+    else:
+        if manual_detector_radius is not None:
+            overrides["detector_radius"] = float(manual_detector_radius)
+        else:
+            overrides.setdefault(
+                "detector_radius",
+                overrides.get("drum_radius", CrmRunParams.detector_radius),
+            )
+        if manual_detector_length is not None:
+            overrides["detector_half_length"] = float(manual_detector_length) / 2.0
+        else:
+            overrides.setdefault(
+                "detector_half_length",
+                overrides.get("drum_half_length", CrmRunParams.detector_half_length),
+            )
 
     run = CrmRunParams(**overrides)  # type: ignore[arg-type]
     if args.active_box is None:
@@ -1055,12 +1101,13 @@ def compute_metrics(positions: np.ndarray, drum, run: CrmRunParams, motion,
     # the drum envelope.  Erode the outer radius and both axial endcaps by rp
     # (clamped at zero) before classifying particles.
     rp = 0.5 * run.spacing
-    r_outer2 = max(0.0, run.drum_radius - rp) ** 2
-    half_len_eff = max(0.0, run.drum_half_length - rp)
+    detector_radius, detector_half_length = run.detector_cylinder()
+    r_outer2 = max(0.0, detector_radius - rp) ** 2
+    half_len_eff = max(0.0, detector_half_length - rp)
     lift_tol = rp
 
     lifted = pos[:, 2] > surface_z + lift_tol
-    # Analytic outer drum envelope in the live drum-local frame.  This is
+    # Analytic detector cylinder in the live drum-local frame.  This is
     # instantaneous: leaving the eroded cylinder clears the flag on the next
     # metrics call.
     excavated = (
@@ -1125,6 +1172,7 @@ def write_config(path: Path, soil: CrmSoilParams, run: CrmRunParams,
                  particle_mass: float, particle_mass_source: str,
                  computational_domain: tuple[tuple[float, float, float], tuple[float, float, float]]) -> None:
     container_min, container_max = fit_solid_container(run, motion)
+    detector_radius, detector_half_length = run.detector_cylinder()
     config = {
         "model": "Chrono::CRM (SPH continuum)",
         "soil": asdict(soil),
@@ -1154,6 +1202,16 @@ def write_config(path: Path, soil: CrmSoilParams, run: CrmRunParams,
             "spin_axis_global": motion.drum_spin_axis,
             "capacity_volume_m3": capacity_volume,
             "capacity_source": "user override" if run.capacity_volume else "pi*r_i^2*L",
+        },
+        "fill_detector": {
+            "kind": "analytic_cylinder",
+            "size_mode": "auto" if run.detector_auto_size else "manual",
+            "radius_m": detector_radius,
+            "half_length_m": detector_half_length,
+            "length_m": 2.0 * detector_half_length,
+            "effective_radius_m": max(0.0, detector_radius - 0.5 * run.spacing),
+            "effective_half_length_m": max(0.0, detector_half_length - 0.5 * run.spacing),
+            "lift_gate_m": 0.5 * run.spacing,
         },
         "particle_mass_kg": particle_mass,
         "particle_mass_source": particle_mass_source,
@@ -1224,6 +1282,7 @@ def main() -> int:
 
     mesh = resolve_mesh(args)
     surface_z = motion.floor_z + motion.bed_height
+    detector_radius, detector_half_length = run.detector_cylinder()
     print(soil.summary(), flush=True)
     print(
         "\n".join(
@@ -1254,8 +1313,9 @@ def main() -> int:
                 f"max={container_bounds[1]}, padding={solid_container_padding(run):g} m",
                 f"world computational domain: min={comp_domain[0]}, max={comp_domain[1]}",
                 f"capacity={capacity_volume:.6g} m^3 ({capacity_volume * soil.density:.4f} kg)",
-                f"fill detector: analytic drum envelope eroded by {0.5 * run.spacing:g} m "
-                f"plus the bed lift gate",
+                f"fill detector: {'auto' if run.detector_auto_size else 'manual'} analytic cylinder "
+                f"R={detector_radius:g} m, length={2.0 * detector_half_length:g} m; "
+                f"eroded by {0.5 * run.spacing:g} m plus the bed lift gate",
             ]
         ),
         flush=True,

@@ -677,6 +677,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="keep legacy fixed bed/spacing defaults instead of scaling from CAD size")
     p.add_argument("--inner-radius", type=float, default=None, help="nominal drum cavity radius in m")
     p.add_argument("--capacity-volume", type=float, default=None, help="CAD-derived cavity volume override")
+    p.add_argument("--detector-auto-size", action=argparse.BooleanOptionalAction, default=None,
+                   help="size the fill detector cylinder from the measured drum (default; "
+                        "use --no-detector-auto-size for manual dimensions)")
+    p.add_argument("--detector-radius", type=float, default=None,
+                   help="manual fill-detector cylinder radius in m")
+    p.add_argument("--detector-length", type=float, default=None,
+                   help="manual fill-detector cylinder full length in m")
 
     p.add_argument("--density", type=float, default=None, help="soil bulk density in kg/m^3")
     p.add_argument("--youngs-modulus", type=float, default=None, help="soil Young's modulus in Pa")
@@ -1149,6 +1156,40 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "Drum half-length (m)", float(geo["drum_half_length"]), minimum=1e-3,
         detail="Half the drum length along its axis; used for bed box and CRM placement.",
     )
+
+    auto_detector_radius = float(drum_radius)
+    auto_detector_length = 2.0 * float(drum_half_length)
+    if args.detector_auto_size is not None:
+        detector_auto_size = bool(args.detector_auto_size)
+    elif INTERACTIVE and not ACCEPT_DEFAULTS:
+        detector_auto_size = prompt_bool(
+            "Auto-size the fill detector from the drum?", True,
+            detail="The analytic detector cylinder normally follows the measured drum radius "
+                   "and full length. Choose no to enter them manually, or use the GUI's live "
+                   "3D size adjuster.",
+        )
+    else:
+        detector_auto_size = True
+    if detector_auto_size and (
+            args.detector_radius is not None or args.detector_length is not None):
+        raise SystemExit(
+            "--detector-radius/--detector-length require --no-detector-auto-size"
+        )
+    if detector_auto_size:
+        detector_radius = auto_detector_radius
+        detector_length = auto_detector_length
+    else:
+        detector_radius = args.detector_radius if args.detector_radius is not None else prompt_float(
+            "Fill-detector cylinder radius (m)", auto_detector_radius, minimum=1e-4,
+            detail="Nominal detector radius. The SPH particle radius is eroded from it at runtime.",
+        )
+        detector_length = args.detector_length if args.detector_length is not None else prompt_float(
+            "Fill-detector cylinder length (m)", auto_detector_length, minimum=1e-4,
+            detail="Nominal full axial length. The SPH particle radius is eroded from each end.",
+        )
+    if detector_radius <= 0.0 or detector_length <= 0.0:
+        raise SystemExit("fill-detector radius and length must be positive")
+
     if args.hub_radius is not None:
         hub_radius = args.hub_radius
     elif geometry == "step" or (auto_geo and measured is not None):
@@ -1547,12 +1588,14 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             f"FEA mesh:     {fea_node} / {fea_ele}"
             + (f" (interior coarsened within {part_aware_radius:g} m)"
                if part_aware_simplify else ""),
-            "Fill measure: excavated particles (lifted, inside eroded drum envelope)",
+            "Fill measure: excavated particles (lifted, inside eroded detector cylinder)",
             f"Duration:     CRM {duration:g} s, FEA {fea_duration:g} s",
             f"Cadence:      CRM summary {crm_fps:g} Hz, FEA summary {fea_fps:g} Hz, "
             f"loads {loads_fps:g} Hz, particles {particle_fps:g} Hz",
             f"Drum:         R={drum_radius:g} m, half-length={drum_half_length:g} m, "
             f"z0≈{bed_height + drum_radius:g} m",
+            f"Detector:     {'auto from drum' if detector_auto_size else 'manual'} cylinder "
+            f"R={detector_radius:g} m, length={detector_length:g} m",
             f"SPH:          spacing={spacing:g} m, dt={dt_text}, "
             f"est. particles ~{estimate_sph_particles(drum_radius=drum_radius, drum_half_length=drum_half_length, bed_height=bed_height, spacing=spacing, spin_axis=spin_axis, bed_padding=bed_padding):,}",
             f"Bed:          height={bed_height:g} m, padding={bed_padding:g} R, "
@@ -1606,6 +1649,9 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "part_aware_min_faces": int(part_aware_min_faces),
         "drum_radius": drum_radius,
         "drum_half_length": drum_half_length,
+        "detector_auto_size": detector_auto_size,
+        "detector_radius": detector_radius,
+        "detector_length": detector_length,
         "min_solid_volume": min_solid_volume,
         "duration": duration,
         "fea_duration": fea_duration,
@@ -1659,6 +1705,11 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     auto_correct_study_geometry(cfg)
+    if cfg.get("detector_auto_size", True):
+        # The detector follows the corrected drum in auto mode.  Manual sizes
+        # are never overwritten by geometry validation/auto-correction.
+        cfg["detector_radius"] = float(cfg["drum_radius"])
+        cfg["detector_length"] = 2.0 * float(cfg["drum_half_length"])
     for warning in validate_study_geometry(cfg):
         print(f"WARNING: {warning}", file=sys.stderr)
     gravity = float(cfg.get("gravity", -9.81))
@@ -1705,6 +1756,12 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         crm_cmd.extend(["--dt", f"{cfg['crm_dt']:g}"])
     if cfg["capacity_volume"] is not None:
         crm_cmd.extend(["--capacity-volume", f"{cfg['capacity_volume']:g}"])
+    if not cfg.get("detector_auto_size", True):
+        crm_cmd.extend([
+            "--no-detector-auto-size",
+            "--detector-radius", f"{cfg['detector_radius']:g}",
+            "--detector-length", f"{cfg['detector_length']:g}",
+        ])
     if cfg["save_particles"]:
         crm_cmd.append("--save-particles")
     if drum_gravity:
