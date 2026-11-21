@@ -214,7 +214,7 @@ SETTINGS_INFO: dict[str, str] = {
     "text_color": "Foreground text color as #RRGGBB. Pick... opens the system color dialog.",
     "dark_mode": "Use a dark interface palette. If the text color is still the default, it switches to a light shade automatically.",
     "show_output_preview": "Show the lightweight CRM/FEA Output Preview tab. It reads study CSVs directly and draws a bounded 3D subsample of particles on a Tk canvas.",
-    "preview_particle_stride": "In the Output Preview, read only every Nth particle row before sampling. 1 reads all rows; higher values reduce CSV work.",
+    "preview_particle_stride": "In the Output Preview, read only every Nth particle row and show at most 1200/stride points. 1 reads all rows and shows up to 1200 points; higher values reduce both CSV work and the number of drawn points.",
     "preview_frame_stride": "In the Output Preview, show only every Nth discovered particle CSV frame in the slider and Play loop. 1 shows all frames.",
 }
 

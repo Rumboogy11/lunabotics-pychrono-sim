@@ -3,11 +3,20 @@
 
 from __future__ import annotations
 
+import csv
 import math
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
-from study_output_preview import OutputPreview, _project_point
+from study_output_preview import (
+    PARTICLE_LIMIT,
+    OutputPreview,
+    _project_point,
+    load_particle_sample,
+    particle_sample_limit,
+)
 
 
 class OutputPreviewCameraTest(unittest.TestCase):
@@ -47,6 +56,31 @@ class OutputPreviewCameraTest(unittest.TestCase):
         OutputPreview._on_drag_move(preview, SimpleNamespace(x=120, y=80))
         self.assertAlmostEqual(preview.yaw_deg, 0.0 % 360.0)
         self.assertAlmostEqual(preview.pitch_deg, 20.0)
+
+
+class ParticleStrideTest(unittest.TestCase):
+    def test_sample_limit_shrinks_with_stride(self) -> None:
+        self.assertEqual(particle_sample_limit(1), PARTICLE_LIMIT)
+        self.assertEqual(particle_sample_limit(4), PARTICLE_LIMIT // 4)
+        self.assertEqual(particle_sample_limit(0), PARTICLE_LIMIT)
+
+    def test_stride_reduces_drawn_particle_count(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="preview_stride_", dir="/tmp/opencode") as tmp:
+            path = Path(tmp) / "particles_000000.csv"
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["X", "Y", "Z", "inside_drum", "excavated"])
+                for i in range(5000):
+                    writer.writerow([i * 0.001, 0.0, 0.0, 0, 0])
+
+            full, full_total = load_particle_sample(path, particle_sample_limit(1), 1)
+            strided, strided_total = load_particle_sample(path, particle_sample_limit(4), 4)
+
+            self.assertEqual(full_total, 5000)
+            self.assertEqual(len(full), PARTICLE_LIMIT)
+            self.assertEqual(strided_total, 1250)
+            self.assertEqual(len(strided), PARTICLE_LIMIT // 4)
+            self.assertLess(len(strided), len(full))
 
 
 if __name__ == "__main__":

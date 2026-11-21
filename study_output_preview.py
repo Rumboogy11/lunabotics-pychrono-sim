@@ -26,6 +26,16 @@ import tkinter as tk
 from tkinter import BooleanVar, IntVar, StringVar, filedialog, ttk
 
 PARTICLE_LIMIT = 1200
+
+
+def particle_sample_limit(stride: int) -> int:
+    """Return the display budget for a particle-row stride.
+
+    Stride 1 keeps the full budget; larger strides reduce both the number of
+    CSV rows read and the number of points drawn, so the control has a visible
+    effect instead of only changing which particles are sampled.
+    """
+    return max(1, PARTICLE_LIMIT // max(1, int(stride)))
 FRAME_DELAY_MS = 250
 
 SUMMARY_FIELDS = ("frame", "time_s", "drum_z_m", "spin_deg")
@@ -341,7 +351,7 @@ class OutputPreview:
         for box in (self.particle_stride_box, self.frame_stride_box):
             box.bind("<Return>", lambda _e: self._on_stride_change())
             box.bind("<FocusOut>", lambda _e: self._on_stride_change())
-        ttk.Label(options, text="(1 = all; drag canvas to orbit, wheel to zoom)",
+        ttk.Label(options, text="(1 = all rows/points; drag to orbit, wheel to zoom)",
                   font="TkSmallCaptionFont").pack(side="left", padx=(10, 2))
 
         pane = ttk.Panedwindow(self.parent, orient="horizontal")
@@ -597,7 +607,8 @@ class OutputPreview:
         frame_index = min(self.current_frame, len(self.frames) - 1)
         if frame_index != self.loaded_frame:
             self.particles, self.particle_total = load_particle_sample(
-                self.frames[frame_index], PARTICLE_LIMIT, self.particle_stride)
+                self.frames[frame_index], particle_sample_limit(self.particle_stride),
+                self.particle_stride)
             self.loaded_frame = frame_index
 
         radius = _to_float(self.config.get("drum_radius")) or 0.06
