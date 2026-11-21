@@ -437,10 +437,10 @@ def _bounds_at_time(reader, time_s: float, fallback_center):
     return None, fallback_center
 
 
-def _fit_orbit_radius(bounds, center, axis, u, v):
-    """Radius that keeps the whole excavator inside the orbit around its axis."""
+def _orbit_extents(bounds, center, axis, u, v):
+    """Return the excavator's half-extents (radial, axial) around ``center``."""
     if bounds is None:
-        return 0.6
+        return None, None
     corners = [(bounds[0], bounds[2], bounds[4]), (bounds[0], bounds[2], bounds[5]),
                (bounds[0], bounds[3], bounds[4]), (bounds[0], bounds[3], bounds[5]),
                (bounds[1], bounds[2], bounds[4]), (bounds[1], bounds[2], bounds[5]),
@@ -448,7 +448,25 @@ def _fit_orbit_radius(bounds, center, axis, u, v):
     offsets = [tuple(c[i] - center[i] for i in range(3)) for c in corners]
     radial = max(max(abs(_dot(p, u)), abs(_dot(p, v))) for p in offsets)
     axial = max(abs(_dot(p, axis)) for p in offsets)
-    return max(2.2 * radial, 1.2 * axial, 0.25)
+    return radial, axial
+
+
+def _fit_orbit_radius(bounds, center, axis, u, v):
+    """Radius that keeps the whole excavator inside the orbit around its axis."""
+    radial, axial = _orbit_extents(bounds, center, axis, u, v)
+    if radial is None:
+        return 0.6
+    return max(4.4 * radial, 2.4 * axial, 0.25)
+
+
+def _lowered_orbit_center(bounds, center, axis, u, v):
+    """Shift the orbit center down by one third of the excavator's radius."""
+    radial, axial = _orbit_extents(bounds, center, axis, u, v)
+    if radial is None:
+        return center, 0.0
+    excavator_radius = max(radial, axial)
+    drop = excavator_radius / 3.0
+    return tuple(center[i] - axis[i] * drop for i in range(3)), drop
 
 
 def _install_camera_orbit(args, view, scene, excav_reader, times):
@@ -468,14 +486,16 @@ def _install_camera_orbit(args, view, scene, excav_reader, times):
     pos = tuple(float(v) for v in camera.GetPosition())
     axis, u, v = _orbit_basis()
 
-    bounds, center = _bounds_at_time(
+    bounds, bounds_center = _bounds_at_time(
         excav_reader, t0, tuple(float(v) for v in camera.GetFocalPoint()))
     if args.orbit_radius and args.orbit_radius > 0.0:
         radius = float(args.orbit_radius)
         fit_note = "requested"
     else:
-        radius = _fit_orbit_radius(bounds, center, axis, u, v)
+        radius = _fit_orbit_radius(bounds, bounds_center, axis, u, v)
         fit_note = "auto-fit"
+    center, center_drop = _lowered_orbit_center(
+        bounds, bounds_center, axis, u, v)
 
     off_u, off_v = _dot(pos, u) - _dot(center, u), _dot(pos, v) - _dot(center, v)
     start_angle = (float(args.orbit_start_angle) if args.orbit_start_angle is not None
@@ -516,7 +536,8 @@ def _install_camera_orbit(args, view, scene, excav_reader, times):
     camera.SetPosition(*frames[0].Position)
     camera.SetViewUp(*axis)
     return (f"{n + 1} keyframes, {speed:g} rev/s, {fit_note} radius {radius:g} m, "
-            f"inclination {inclination:g} deg, axis Z")
+            f"inclination {inclination:g} deg, axis Z, "
+            f"center lowered {center_drop:g} m")
 
 
 def main():

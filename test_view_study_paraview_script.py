@@ -54,5 +54,38 @@ class ParaViewParticleDisplayTest(unittest.TestCase):
         self.assertLess(sprite, glyph)
 
 
+class ParaViewCameraOrbitTest(unittest.TestCase):
+    def test_auto_fit_radius_uses_doubled_clearance(self) -> None:
+        axis, u, v = viewer._orbit_basis()
+        bounds = (-1.0, 1.0, -2.0, 2.0, -3.0, 3.0)
+
+        radius = viewer._fit_orbit_radius(bounds, (0.0, 0.0, 0.0), axis, u, v)
+
+        self.assertAlmostEqual(radius, 8.8)
+
+    def test_orbit_center_is_lowered_by_one_third_excavator_radius(self) -> None:
+        axis, u, v = viewer._orbit_basis()
+        bounds = (-1.0, 1.0, -2.0, 2.0, -3.0, 3.0)
+
+        center, drop = viewer._lowered_orbit_center(
+            bounds, (0.0, 0.0, 0.0), axis, u, v)
+
+        self.assertAlmostEqual(drop, 1.0)
+        self.assertAlmostEqual(center[0], 0.0)
+        self.assertAlmostEqual(center[1], 0.0)
+        self.assertAlmostEqual(center[2], -1.0)
+
+    def test_missing_bounds_keep_original_center(self) -> None:
+        axis, u, v = viewer._orbit_basis()
+
+        center, drop = viewer._lowered_orbit_center(
+            None, (1.0, 2.0, 3.0), axis, u, v)
+
+        self.assertEqual(center, (1.0, 2.0, 3.0))
+        self.assertEqual(drop, 0.0)
+        self.assertAlmostEqual(
+            viewer._fit_orbit_radius(None, center, axis, u, v), 0.6)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -174,7 +174,7 @@ PARAM_INFO: dict[str, str] = {
     "tools_particle_render_stride": "Render only every Nth particle in each exported frame in the Export ParaView VTK/PVD tool. Use 1 for all particles; >1 reduces particle file size and ParaView load without skipping frames.",
     "tools_camera_orbit": "Automatically add a ParaView camera track that orbits the excavator drum while the time animation plays. The track follows the drum center from the excavator frames.",
     "tools_orbit_speed": "Camera revolutions per simulation second. Positive orbits one way, negative reverses. 0.1 means one revolution every 10 seconds of study time.",
-    "tools_orbit_radius": "Orbit radius in meters around the vertical Z axis. Use 0 to auto-fit the excavator bounds so the camera stays outside the drum; inclination is the camera elevation above the orbit plane.",
+    "tools_orbit_radius": "Orbit radius in meters around the vertical Z axis. Use 0 to auto-fit the excavator bounds with doubled clearance; the orbit center is also lowered by one third of the excavator's bounding radius. Inclination is the camera elevation above the orbit plane.",
     "tools_orbit_inclination": "Camera elevation above the horizontal orbit plane in degrees. Clamped to +/-80 degrees to avoid an unstable up direction.",
     "tools_orbit_start_angle": "Starting camera azimuth in degrees. Leave blank to begin at the current camera angle.",
     "tools_orbit_keyframes": "Number of camera keyframes. Use 0 to choose automatically from orbit speed and animation duration; more keyframes make fast orbits smoother.",
