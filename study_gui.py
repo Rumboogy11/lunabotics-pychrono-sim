@@ -167,7 +167,7 @@ PARAM_INFO: dict[str, str] = {
     "save_particles": "Write CRM particle positions as CSV at the particle output FPS. Needed for ParaView particle spheres; uses disk space.",
     "fea_export_vtk": "Write the full 3D FEA stress/deformation animation as per-frame VTU files (fea/vtk/fea.pvd). This adds a stress scan and file write per recorded frame and can dominate runtime/disk, so it is off by default. Scalar FEA summaries are always written.",
     "fea_vtk_stride": "Export every Nth recorded FEA frame to the 3D VTU animation. 1 means every frame (full animation); the final frame is always included. Higher values reduce cost.",
-    "tools_show_fea_3d": "Load the validated 3D FEA stress/deformation PVD in ParaView when the study produced one. On by default; uncheck to view only CRM particles plus scalar charts. Requires the 'Export full 3D FEA stress animation' option (or an older complete fea.pvd).",
+    "tools_show_fea_3d": "Load the validated 3D FEA stress/deformation PVD in ParaView when the study produced one. On by default; uncheck to view only CRM particles. One-way FEA history charts are opt-in and hidden by default. Requires the 'Export full 3D FEA stress animation' option (or an older complete fea.pvd).",
     "export_vtk": "Create separate ParaView series (crm_particles.pvd, excavator.pvd, optional fea.pvd) plus combined.pvd and a manifest after the run.",
     "paraview_stride": "Export every Nth CRM frame for both particles and excavator. Use 1 for all frames; all series stay time-aligned.",
     "paraview_particle_stride": "Export every Nth CRM particle frame independently of the excavator series. Use 0 to follow the general ParaView export stride, or >1 to reduce the much larger particle series.",
@@ -986,9 +986,9 @@ class StudyGUI:
         r = self._row(p, r, "Open results folder after run", "open_results", check=True)
         r = self._row(p, r, "Open ParaView after run", "open_paraview", check=True)
         ttk.Label(p, text="ParaView note: run 'pvpython view_study_paraview.py <study>/paraview' for a preconfigured 3D view\n"
-                          "(particles as spheres and a separate excavator) plus FEA scalar charts. Enable the\n"
-                          "3D FEA stress option above and the ParaView Tools toggle 'Load 3D FEA stress' to\n"
-                          "overlay the validated per-frame stress/deformation animation.",
+                          "(particles as spheres and a separate excavator). One-way FEA history charts are hidden\n"
+                          "by default; add --show-fea-charts to display them. Enable the 3D FEA stress option\n"
+                          "above and the Tools toggle 'Load 3D FEA stress' for the validated deformation animation.",
                   justify=LEFT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8)
 
     def _page_review(self):
@@ -1261,7 +1261,7 @@ class StudyGUI:
             "• pvpython fallback: pvpython view_study_paraview.py <study>/paraview stays open until its render window is closed.\n"
             "• 'Preview STEP mesh' runs the current Geometry settings through the exact full-run mesher into geometry_checks/, then opens the STEP-vs-mesh comparison tool. Active study outputs are untouched.\n"
             "• Particles are rendered as 3D sphere point sprites (glyph fallback). Excavator is a separate source.\n"
-            "• FEA scalar XY charts load automatically from fea/summary.csv. A validated per-frame stress/deformation PVD is loaded by default; uncheck 'Load 3D FEA stress' to skip it.\n"
+            "• One-way FEA scalar/deformation XY charts are hidden by default; pass --show-fea-charts to opt in. A validated per-frame stress/deformation PVD is loaded by default; uncheck 'Load 3D FEA stress' to skip it.\n"
             "• The lightweight Output Preview tab reads CRM/FEA CSVs directly and draws a bounded 3D point cloud with editable particle/frame strides."
         )
         ttk.Label(p, text=notes, justify=LEFT).grid(row=r, column=0, columnspan=4, sticky=W, padx=8, pady=4); r += 1

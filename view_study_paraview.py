@@ -9,9 +9,9 @@ pvpython render window (stays open until the render window is closed):
     # optional 3D FEA stress/deformation overlay, when a complete VTK series exists:
     pvpython /path/to/view_study_paraview.py /path/to/study/paraview --with-fea
 
-By default this loads the CRM animation, plus lightweight FEA scalar charts when
-``fea/summary.csv`` is available. CRM series are separate pipeline sources so
-each can have its own render settings:
+By default this loads the CRM animation and does not display one-way FEA scalar
+or deformation history charts. CRM series are separate pipeline sources so each
+can have its own render settings:
   - crm_particles.pvd : particle point cloud over time, rendered as 3D sphere
         point sprites (glyph fallback) sized from the study's SPH radius and
         colored by state.
@@ -19,11 +19,11 @@ each can have its own render settings:
 The equivalent combined collection is crm_animation.pvd (also written as the
 backwards-compatible combined.pvd); neither contains FEA data.
 
-The fast one-way FEA path writes scalar summaries only.  A lightweight XY chart
-of those histories (peak von Mises stress and deformation versus time) is loaded
-alongside the CRM animation whenever ``fea/summary.csv`` exists.  It uses a tiny
-derived table in the export directory and does not require VTK frames.  Use
---no-fea to suppress it.
+The fast one-way FEA path writes scalar summaries only.  Their XY histories are
+not displayed by default.  Use --show-fea-charts (or PYCHRONO_FEA_CHARTS=1 with
+``paraview --script=...``) to opt in to the peak von Mises stress/deformation
+charts; they use a tiny derived table and do not require VTK frames.  --no-fea
+still suppresses all FEA output.
 
 The UI's "Export full 3D FEA stress animation" option writes a complete
 per-frame VTU series with von Mises stress and displacement.  Load it with
@@ -143,15 +143,21 @@ def _parse_args(argv: list[str]):
     ap.add_argument("--no-particles", action="store_true")
     ap.add_argument("--no-excavator", action="store_true")
     ap.add_argument("--no-fea", action="store_true",
-                    help="do not load the FEA scalar summary chart or 3D FEA VTK series")
+                    help="do not load the FEA scalar summary charts or 3D FEA VTK series")
+    ap.add_argument("--show-fea-charts", action="store_true",
+                    default=_env_bool("PYCHRONO_FEA_CHARTS", False),
+                    help="display one-way FEA scalar/deformation XY history charts "
+                         "(off by default; PYCHRONO_FEA_CHARTS=1 also works with paraview --script)")
     ap.add_argument("--with-fea", action="store_true",
                     default=_env_bool("PYCHRONO_WITH_FEA", False),
                     help="also overlay a validated FEA VTK stress/deformation series on the CRM animation "
                          "(GUI Tools toggle sets PYCHRONO_WITH_FEA)")
     ap.add_argument("--fea-only", action="store_true",
-                    help="load only FEA outputs (scalar summary chart and any validated VTK series)")
+                    help="load only FEA outputs (charts require --show-fea-charts; "
+                         "3D FEA requires a validated VTK series)")
     ap.add_argument("--fea-series", default=None,
-                    help="comma-separated summary columns to chart (default: peak von Mises stress and deformation)")
+                    help="comma-separated summary columns to chart when --show-fea-charts is used "
+                         "(default: peak von Mises stress and deformation)")
     ap.add_argument("--no-interact", action="store_true",
                     help="do not keep the pvpython render window open (batch setups only)")
     # Camera orbit keyframes.  Environment variables are used by the full
@@ -595,12 +601,12 @@ def main():
     if args.no_fea:
         active_series = "CRM animation only (FEA excluded)"
     elif args.fea_only:
-        active_series = "FEA only (scalar summary chart + validated 3D FEA VTK when available)"
+        active_series = ("FEA only (3D FEA when available; charts only with --show-fea-charts)")
     elif want_3d_fea:
-        active_series = ("CRM animation + FEA scalar chart (when available) "
-                         "+ 3D FEA stress overlay requested")
+        active_series = ("CRM animation + 3D FEA stress overlay "
+                         "(charts only with --show-fea-charts)")
     else:
-        active_series = "CRM animation + FEA scalar chart (when available)"
+        active_series = "CRM animation (FEA scalar charts off by default)"
     print(f"[view_study_paraview] active series: {active_series}")
     print("  PVD files: crm_particles.pvd + excavator.pvd = crm_animation.pvd (aka combined.pvd); "
           "3D FEA loads a validated multi-frame FEA PVD, including usable partial runs")
@@ -796,10 +802,14 @@ def main():
         SetActiveSource(excav)
         sources_shown.append(('excavator', excav))
 
-    # --- FEA scalar summary chart (supported replacement for per-frame VTU) ---
+    # --- FEA scalar summary charts (opt-in; never shown for the default script view) ---
     fea_charts: list = []
     fea_summary_status = "FEA excluded by --no-fea"
-    if include_fea:
+    if args.no_fea:
+        fea_summary_status = "FEA excluded by --no-fea"
+    elif not args.show_fea_charts:
+        fea_summary_status = "disabled by default (use --show-fea-charts or PYCHRONO_FEA_CHARTS=1)"
+    if include_fea and args.show_fea_charts:
         fea_charts, fea_summary_status = load_fea_summary_charts(
             export_dir, manifest, view, args.fea_series)
         if fea_charts:
@@ -907,10 +917,10 @@ def main():
         sources_shown.append(('fea', disp_source))
     elif want_3d_fea:
         print(f"  FEA VTK: not loaded ({fea_status}). Enable 'Export full 3D FEA stress animation' "
-              "in the UI and rerun FEA, or use an older complete fea.pvd; scalar charts remain available.")
+              "in the UI and rerun FEA, or use an older complete fea.pvd; scalar charts are opt-in.")
     elif include_fea:
         print("  FEA VTK: excluded. Use --with-fea (or the GUI Tools toggle) to overlay a validated "
-              "3D FEA stress series; the scalar summary chart does not need VTK frames.")
+              "3D FEA stress series; scalar charts are opt-in and do not need VTK frames.")
 
     if not sources_shown and not fea_charts:
         print("[view_study_paraview] nothing loaded. Expected crm_particles.pvd/excavator.pvd, "
@@ -962,16 +972,20 @@ def main():
     print("  - Excavator: non-FEA rigid surface source with its own render settings; poses come from CRM summary.")
     if fea_charts:
         print("  - FEA: scalar XY chart(s) in separate view(s) (peak von Mises stress/load history and "
-              "deformation vs time). Use --fea-series to choose other columns; --no-fea suppresses it.")
+              "deformation vs time). Use --fea-series to choose other columns; --no-fea suppresses them.")
     elif args.no_fea:
         print("  - FEA: excluded by --no-fea.")
+    elif not args.show_fea_charts:
+        print("  - FEA: scalar/deformation history charts are not displayed "
+              "(--show-fea-charts opts in).")
     else:
         print(f"  - FEA: no scalar summary available ({fea_summary_status}).")
     if fea_pvd is not None:
         print("  - FEA 3D VTK: validated stress/deformation series, colored by von Mises stress and warped by "
               "displacement by default. Adjust warp 'Scale Factor' to exaggerate deformation.")
     elif want_3d_fea:
-        print("  - FEA 3D VTK: no valid series loaded; the scalar chart and non-FEA animation remain available.")
+        print("  - FEA 3D VTK: no valid series loaded; the non-FEA animation remains available "
+              "(scalar charts are opt-in).")
     print("  - Use time controls to animate; if particles obscure geometry, adjust opacity/visibility per source.")
 
     # pvpython exits as soon as this script returns unless an interactive render

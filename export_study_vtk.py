@@ -22,9 +22,10 @@ or stale animation behind.
 
 The fast one-way FEA path writes scalar summaries only. Scalar FEA histories
 remain in <fea>/summary.csv and are displayed by the GUI's Output Preview. A
-compact <out>/fea_summary.csv is derived from it with MPa/mm units and is loaded
-as an XY chart by view_study_paraview.py. When the UI's full 3D FEA stress option
-is enabled, the driver also writes:
+compact <out>/fea_summary.csv is derived from it with MPa/mm units; ParaView
+history charts are opt-in via --show-fea-charts/PYCHRONO_FEA_CHARTS and are off
+by default. When the UI's full 3D FEA stress option is enabled, the driver also
+writes:
   <fea>/vtk/frame_*.vtu  and  <fea>/vtk/fea.pvd
 with point data (Displacement, DisplacementMagnitude) and cell data
 (von_mises_pa, von_mises_MPa). A validated copy is written to <out>/fea.pvd and
@@ -38,7 +39,7 @@ Typical use::
     ./chrono-env/bin/python export_study_vtk.py \
         --study-dir Output_study_20261119_144040
 
-    # then in ParaView: CRM animation + FEA scalar charts when available
+    # then in ParaView: CRM animation (FEA history charts are opt-in)
     pvpython /path/to/view_study_paraview.py Output_study_20261119_144040/paraview
     # 3D FEA stress overlay, when a multi-frame VTK series is available:
     pvpython /path/to/view_study_paraview.py Output_study_20261119_144040/paraview --with-fea
@@ -793,8 +794,10 @@ def main() -> int:
     print(f"  manifest: {out_dir / 'export_manifest.json'}")
     print("Done. Open in ParaView, e.g.:")
     print(f"  paraview {combined}")
-    print("  # CRM animation + lightweight FEA scalar charts when summary.csv exists:")
+    print("  # CRM animation (one-way FEA history charts are opt-in):")
     print(f"  pvpython {ROOT / 'view_study_paraview.py'} {out_dir}")
+    print("  # also show lightweight FEA history charts when summary.csv exists:")
+    print(f"  pvpython {ROOT / 'view_study_paraview.py'} {out_dir} --show-fea-charts")
     print("  # suppress all FEA views:")
     print(f"  pvpython {ROOT / 'view_study_paraview.py'} {out_dir} --no-fea")
     print("  # 3D FEA stress overlay, when a multi-frame VTK series is available:")

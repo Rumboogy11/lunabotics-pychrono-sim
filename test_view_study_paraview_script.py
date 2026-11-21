@@ -53,6 +53,12 @@ class ParaViewParticleDisplayTest(unittest.TestCase):
         glyph = source.index("glyph = Glyph(")
         self.assertLess(sprite, glyph)
 
+    def test_one_way_fea_history_charts_are_opt_in(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("PYCHRONO_FEA_CHARTS", source)
+        self.assertIn("if include_fea and args.show_fea_charts:", source)
+        self.assertEqual(source.count("CreateXYPlotView()"), 1)
+
 
 class ParaViewCameraOrbitTest(unittest.TestCase):
     def test_auto_fit_radius_uses_five_times_radial_clearance(self) -> None:

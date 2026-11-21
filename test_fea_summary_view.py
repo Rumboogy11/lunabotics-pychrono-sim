@@ -81,6 +81,33 @@ class FeaSummaryTest(unittest.TestCase):
         self.assertEqual(args.fea_series, "max_von_mises_MPa,work_j")
         self.assertFalse(args.no_fea)
 
+    def test_fea_history_charts_are_opt_in(self) -> None:
+        import view_study_paraview as viewer
+
+        with patch.dict(os.environ, {"PYCHRONO_FEA_CHARTS": ""}):
+            args = viewer._parse_args([
+                "view_study_paraview.py", "/tmp/opencode/export",
+            ])
+        self.assertFalse(args.show_fea_charts)
+
+        with patch.dict(os.environ, {"PYCHRONO_FEA_CHARTS": "1"}):
+            args = viewer._parse_args([
+                "view_study_paraview.py", "/tmp/opencode/export",
+            ])
+        self.assertTrue(args.show_fea_charts)
+
+    def test_fea_series_still_parses_without_enabling_charts(self) -> None:
+        import view_study_paraview as viewer
+
+        with patch.dict(os.environ, {"PYCHRONO_FEA_CHARTS": ""}):
+            args = viewer._parse_args([
+                "view_study_paraview.py", "/tmp/opencode/export",
+                "--no-fea", "--fea-series", "max_von_mises_MPa,work_j",
+            ])
+        self.assertTrue(args.no_fea)
+        self.assertFalse(args.show_fea_charts)
+        self.assertEqual(args.fea_series, "max_von_mises_MPa,work_j")
+
     def test_gui_environment_enables_3d_fea_overlay(self) -> None:
         import view_study_paraview as viewer
 

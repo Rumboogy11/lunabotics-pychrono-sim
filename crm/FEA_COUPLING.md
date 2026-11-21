@@ -138,8 +138,10 @@ pvpython view_study_paraview.py Output_my_study/paraview
 ```
 
 The viewer derives the table on demand for older studies, so re-running the
-exporter is optional. `--no-fea` hides the charts; `--fea-series COL1,COL2`
-selects other summary columns.
+exporter is optional. One-way FEA history charts are hidden by default: add
+`--show-fea-charts` (or `PYCHRONO_FEA_CHARTS=1` with `paraview --script=...`) to
+show them, `--fea-series COL1,COL2` to select other columns, or `--no-fea` to
+suppress all FEA views.
 
 For a full 3D animation, enable the UI toggle before running FEA (wizard
 equivalents: `--fea-export-vtk` and optional `--vtk-stride N`, default `1`).

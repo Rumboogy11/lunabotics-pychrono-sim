@@ -295,6 +295,8 @@ class ParaViewFeaLoadTest(IsolatedGuiDefaultsTest):
                     app._tool_paraview()
                 self.assertTrue(calls)
                 self.assertEqual(calls[0][1]["env"]["PYCHRONO_WITH_FEA"], "1")
+                self.assertNotIn("PYCHRONO_FEA_CHARTS", calls[0][1]["env"])
+                self.assertNotIn("--show-fea-charts", calls[0][0])
         finally:
             root.destroy()
 
@@ -321,6 +323,8 @@ class WizardParaViewLaunchTest(IsolatedGuiDefaultsTest):
             self.assertTrue(calls)
             env = calls[0][1]["env"]
             self.assertEqual(env["PYCHRONO_WITH_FEA"], "1")
+            self.assertNotIn("PYCHRONO_FEA_CHARTS", env)
+            self.assertNotIn("--show-fea-charts", calls[0][0])
             self.assertEqual(env["PYCHRONO_PARAVIEW_GUI"], "1")
             self.assertEqual(env["PYCHRONO_EXPORT_DIR"], str(paraview_dir))
             self.assertEqual(env["PYCHRONO_SCRIPT_DIR"], str(ROOT))
