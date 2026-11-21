@@ -790,8 +790,11 @@ def particle_positions_numpy(fluid, fsi, terrain=None) -> np.ndarray:
     """Return fluid-marker positions as an ``(N, 3)`` float array.
 
     ``GetParticlePositionsNumpy()`` avoids creating hundreds of thousands of
-    Python ``ChVector3d`` objects per frame.  It exposes all markers, so slice
-    to the fluid prefix exactly as :func:`particle_positions` does.
+    Python ``ChVector3d`` objects per frame.  Request ``MarkerGroup.FLUID``
+    first so boundary/container BCE markers are never copied from the GPU.
+    Older bindings that reject the group argument fall back to the all-marker
+    array and slice to the fluid prefix exactly as :func:`particle_positions`
+    does.
     """
     count = None
     if hasattr(fluid, "GetNumFluidMarkers"):
@@ -803,13 +806,31 @@ def particle_positions_numpy(fluid, fsi, terrain=None) -> np.ndarray:
         count = int(terrain.GetNumSPHParticles())
 
     if hasattr(fluid, "GetParticlePositionsNumpy"):
+        group = fsi_enum(fsi, "MarkerGroup", "FLUID")
         try:
-            positions = np.asarray(fluid.GetParticlePositionsNumpy(), dtype=np.float64)
+            if group is not None:
+                try:
+                    positions = np.asarray(
+                        fluid.GetParticlePositionsNumpy(group), dtype=np.float64
+                    )
+                except TypeError:
+                    # This Chrono build exposes only the default all-marker form.
+                    if count is None:
+                        raise
+                    positions = np.asarray(
+                        fluid.GetParticlePositionsNumpy(), dtype=np.float64
+                    )[:count]
+            else:
+                positions = np.asarray(
+                    fluid.GetParticlePositionsNumpy(), dtype=np.float64
+                )
+                if count is not None:
+                    positions = positions[:count]
             if positions.ndim == 1 and positions.size % 3 == 0:
                 positions = positions.reshape(-1, 3)
             if positions.ndim != 2 or positions.shape[1] != 3:
                 raise ValueError(f"unexpected position array shape {positions.shape}")
-            return positions[:count] if count is not None else positions
+            return positions
         except (TypeError, ValueError, RuntimeError):
             pass
 
