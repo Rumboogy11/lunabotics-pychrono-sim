@@ -28,9 +28,10 @@ is enabled, the driver also writes:
   <fea>/vtk/frame_*.vtu  and  <fea>/vtk/fea.pvd
 with point data (Displacement, DisplacementMagnitude) and cell data
 (von_mises_pa, von_mises_MPa). A validated copy is written to <out>/fea.pvd and
-the optional overlay <out>/with_fea.pvd adds FEA to the CRM animation. An
-incomplete/one-frame FEA PVD (e.g. from a cancelled run) is ignored and never
-mixed into the non-FEA series.
+the optional overlay <out>/with_fea.pvd adds FEA to the CRM animation. A
+multi-frame partial run is viewable and noted in the manifest; a one-frame
+t=0 FEA PVD (e.g. from a cancelled run) is ignored and never mixed into the
+non-FEA series.
 
 Typical use::
 
@@ -39,7 +40,7 @@ Typical use::
 
     # then in ParaView: CRM animation + FEA scalar charts when available
     pvpython /path/to/view_study_paraview.py Output_study_20261119_144040/paraview
-    # 3D FEA stress overlay, only when a complete VTK series exists:
+    # 3D FEA stress overlay, when a multi-frame VTK series is available:
     pvpython /path/to/view_study_paraview.py Output_study_20261119_144040/paraview --with-fea
     # or ParaView GUI:
     # PYCHRONO_EXPORT_DIR=Output_study_20261119_144040/paraview paraview --script=/path/to/view_study_paraview.py
@@ -438,11 +439,12 @@ def expected_fea_duration(study_cfg: dict[str, Any], fea_dir: Path) -> float | N
 
 
 def validate_fea_pvd(fea_pvd: Path, study_cfg: dict[str, Any], fea_dir: Path) -> tuple[bool, str, list[tuple[float, Path]]]:
-    """Check that an FEA PVD looks like a completed, usable time series.
+    """Check that an FEA PVD is a usable time series.
 
     The one-way FEA writer updates fea.pvd after every frame, so a cancelled run
     can leave a syntactically valid PVD with only the t=0 frame.  Such a file is
-    treated as invalid and excluded from every exported series.
+    still rejected.  A multi-frame partial run is viewable and is exported with
+    a status note that records how much of the configured duration it covers.
     """
     if not fea_pvd.is_file():
         return False, "fea.pvd not found", []
@@ -460,10 +462,10 @@ def validate_fea_pvd(fea_pvd: Path, study_cfg: dict[str, Any], fea_dir: Path) ->
     if any(b < a - 1.0e-9 for a, b in zip(times, times[1:])):
         return False, "fea.pvd timesteps are not monotonic", []
     duration = expected_fea_duration(study_cfg, fea_dir)
-    if duration is not None and last_t < 0.9 * duration:
-        return False, (f"incomplete FEA export (last t={last_t:g}s of expected "
-                       f"{duration:g}s); likely a cancelled run"), []
-    return True, f"{len(entries)} frames to {last_t:g}s", entries
+    partial_note = ""
+    if duration is not None and last_t < duration - 1.0e-9:
+        partial_note = f" (partial: {last_t:g}s of expected {duration:g}s)"
+    return True, f"{len(entries)} frames to {last_t:g}s{partial_note}", entries
 
 
 def _read_particle_frame(args):
@@ -728,7 +730,7 @@ def main() -> int:
         else:
             print(f"  fea summary: no {fea_summary_source} (scalar FEA view unavailable)")
 
-    # Full 3D FEA stress/deformation VTK is opt-in and must look complete.
+    # Full 3D FEA stress/deformation VTK is opt-in and must have usable frames.
     fea_source = fea_dir / "vtk" / "fea.pvd"
     fea_valid, fea_status, fea_entries = validate_fea_pvd(
         fea_source, info["study_cfg"], fea_dir)
@@ -795,7 +797,7 @@ def main() -> int:
     print(f"  pvpython {ROOT / 'view_study_paraview.py'} {out_dir}")
     print("  # suppress all FEA views:")
     print(f"  pvpython {ROOT / 'view_study_paraview.py'} {out_dir} --no-fea")
-    print("  # 3D FEA stress overlay, only when a complete VTK series exists:")
+    print("  # 3D FEA stress overlay, when a multi-frame VTK series is available:")
     print(f"  pvpython {ROOT / 'view_study_paraview.py'} {out_dir} --with-fea")
     return 0
 

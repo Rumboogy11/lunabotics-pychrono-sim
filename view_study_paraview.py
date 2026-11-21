@@ -231,11 +231,12 @@ def _resolve_export_dir(path_like: str | None) -> Path | None:
 
 
 def validate_fea_pvd_file(path: Path) -> tuple[bool, str]:
-    """Local sanity check used when no export manifest is available.
+    """Sanity-check an FEA PVD before the GUI loads it.
 
-    The FEA writer updates fea.pvd incrementally, so a cancelled run can leave
-    a valid-looking PVD with a single t=0 frame.  Require more than one frame
-    with a positive final time and existing frame files.
+    This is the authority for GUI loading, not the export manifest: an older
+    manifest may mark a long partial run invalid even though its PVD/frames are
+    usable.  Reject only structurally unusable series (no frames, a single
+    t=0 frame, missing frame files, or non-monotonic timesteps).
     """
     import xml.etree.ElementTree as ET
 
@@ -262,6 +263,8 @@ def validate_fea_pvd_file(path: Path) -> tuple[bool, str]:
     if missing:
         return False, f"{len(missing)} FEA frame(s) missing/empty"
     times = [t for t, _ in entries]
+    if any(b < a - 1.0e-9 for a, b in zip(times, times[1:])):
+        return False, "FEA PVD timesteps are not monotonic"
     if len(entries) < 2 or max(times) <= 0.0:
         return False, (f"incomplete FEA series ({len(entries)} frame(s), last t={max(times):g}s); "
                        "likely a cancelled run")
@@ -269,10 +272,17 @@ def validate_fea_pvd_file(path: Path) -> tuple[bool, str]:
 
 
 def find_valid_fea_pvd(export_dir: Path, manifest: dict) -> tuple[Path | None, str]:
-    """Locate a validated FEA series, never falling back to arbitrary rglob hits."""
+    """Locate a usable FEA series, never falling back to arbitrary rglob hits.
+
+    A stale manifest must not hide a real multi-frame PVD.  Older exporters
+    marked partial runs invalid, but their frames are still viewable.  Validate
+    the actual source files here and only reject structurally unusable series.
+    """
     series = manifest.get("series") if isinstance(manifest.get("series"), dict) else {}
+    manifest_note = ""
     if manifest.get("fea_valid") is False:
-        return None, (f"manifest marks FEA export invalid: {manifest.get('fea_status', 'incomplete')}")
+        status = manifest.get("fea_status") or "incomplete"
+        manifest_note = f"manifest marked invalid ({status}); re-checked source"
     candidates: list[Path] = []
     for key in ("fea", "fea_source"):
         value = series.get(key)
@@ -297,11 +307,14 @@ def find_valid_fea_pvd(export_dir: Path, manifest: dict) -> tuple[Path | None, s
             continue
         valid, reason = validate_fea_pvd_file(c)
         if valid:
+            if manifest_note:
+                reason = f"{reason} ({manifest_note})"
             return c, reason
         notes.append(f"{c}: {reason}")
-    if notes:
-        return None, "; ".join(notes)
-    return None, "no fea.pvd found in the export or study FEA directory"
+    detail = "; ".join(notes) if notes else "no fea.pvd found in the export or study FEA directory"
+    if manifest_note:
+        detail = f"{manifest_note}; {detail}"
+    return None, detail
 
 
 def _fea_y_axis_title(series: list[str]) -> str:
@@ -590,7 +603,7 @@ def main():
         active_series = "CRM animation + FEA scalar chart (when available)"
     print(f"[view_study_paraview] active series: {active_series}")
     print("  PVD files: crm_particles.pvd + excavator.pvd = crm_animation.pvd (aka combined.pvd); "
-          "fea.pvd/with_fea.pvd only when a complete FEA VTK export is valid")
+          "3D FEA loads a validated multi-frame FEA PVD, including usable partial runs")
 
     # disable auto camera reset on first show so multiple sources compose
     try:

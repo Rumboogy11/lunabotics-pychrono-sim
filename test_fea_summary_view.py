@@ -110,6 +110,12 @@ class FeaSummaryTest(unittest.TestCase):
             self.assertFalse(valid)
             self.assertIn("incomplete", reason)
 
+            # A stale manifest must not rescue a one-frame t=0 PVD.
+            found, status = viewer.find_valid_fea_pvd(
+                root, {"fea_valid": False, "fea_status": "incomplete FEA export"})
+            self.assertIsNone(found)
+            self.assertIn("incomplete", status)
+
             pvd.write_text(
                 '<?xml version="1.0"?><VTKFile type="Collection"><Collection>'
                 '<DataSet timestep="0" file="frames/frame_000000.vtu"/>'
@@ -122,10 +128,12 @@ class FeaSummaryTest(unittest.TestCase):
             self.assertTrue(valid)
             self.assertIn("2 frames", reason)
 
+            # A stale manifest must also not hide a real multi-frame source.
             found, status = viewer.find_valid_fea_pvd(
                 root, {"fea_valid": False, "fea_status": "incomplete FEA export"})
-            self.assertIsNone(found)
-            self.assertIn("manifest", status)
+            self.assertEqual(found, pvd.resolve())
+            self.assertIn("2 frames", status)
+            self.assertIn("manifest marked invalid", status)
 
 
 if __name__ == "__main__":

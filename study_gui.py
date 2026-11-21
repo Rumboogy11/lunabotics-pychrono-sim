@@ -2573,15 +2573,17 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                 self._tool_log("# FEA scalar charts: available from fea_summary.csv")
             else:
                 self._tool_log("# FEA scalar charts: no summary found")
-            if manifest.get("fea_valid"):
-                self._tool_log("# 3D FEA VTK: validated series available")
-            else:
-                status = str(manifest.get("fea_status") or "no validated 3D series")
-                self._tool_log(f"# 3D FEA VTK: invalid/unavailable ({status}); "
-                               "scalar charts and CRM still load")
+        # The manifest can be stale.  Let the viewer validate the actual PVD
+        # and frame files so a usable partial run still loads from the GUI.
+        fea_pvd, fea_status = pvview.find_valid_fea_pvd(pdir, manifest)
+        if fea_pvd is not None:
+            self._tool_log(f"# 3D FEA VTK: loadable source found ({fea_status})")
         elif show_fea_3d:
-            self._tool_log("# 3D FEA VTK requested, but no export manifest was found; "
-                           "run ParaView export first")
+            self._tool_log(f"# 3D FEA VTK requested but unavailable ({fea_status}); "
+                           "scalar charts and CRM still load")
+        elif manifest:
+            self._tool_log(f"# 3D FEA VTK: unavailable ({fea_status}); "
+                           "scalar charts and CRM still load")
 
         def env_number(name: str, text: str, default: float, low: float | None = None,
                        high: float | None = None):
@@ -2598,7 +2600,7 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         env["PYCHRONO_CAMERA_ORBIT"] = "1" if self.tools_camera_orbit.get() else "0"
         env["PYCHRONO_WITH_FEA"] = "1" if show_fea_3d else "0"
         if show_fea_3d:
-            self._tool_log("# 3D FEA stress overlay requested; only a validated complete series will load")
+            self._tool_log("# 3D FEA stress overlay requested; a validated multi-frame PVD will load")
         env_number("PYCHRONO_ORBIT_SPEED", self.tools_orbit_speed.get(), 0.10)
         env_number("PYCHRONO_ORBIT_RADIUS", self.tools_orbit_radius.get(), 0.0, low=0.0)
         env_number("PYCHRONO_ORBIT_INCLINATION", self.tools_orbit_inclination.get(), 20.0,
