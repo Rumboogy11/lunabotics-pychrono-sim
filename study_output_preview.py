@@ -7,8 +7,9 @@ It reads the files written by the study directly:
   * ``crm/particles_*.csv`` for a subsampled 3D particle point cloud,
   * ``crm/summary.csv`` and ``fea/summary.csv`` for scalar timelines.
 
-Particles are drawn as 1-2 pixel points on a Tk canvas instead of 3D spheres.
-Every row in a displayed frame is read (to report the true simulation particle
+Particles are drawn as configurable-size points on a Tk canvas instead of 3D
+spheres; grid, drum, axis, and timeline line widths are adjustable too.  Every
+row in a displayed frame is read (to report the true simulation particle
 count), then at most the configured number of points is reservoir-sampled for
 drawing.  The 3D view is a plain perspective/orthographic projection with mouse
 orbit and zoom; it needs no NumPy, VTK, PIL, or file conversion.
@@ -26,8 +27,14 @@ from typing import Callable, Iterable
 import tkinter as tk
 from tkinter import BooleanVar, IntVar, StringVar, filedialog, ttk
 
-PARTICLE_SAMPLE_DEFAULT = 25000
+PARTICLE_SAMPLE_DEFAULT = 5000
 PARTICLE_SAMPLE_MAX = 250000
+PARTICLE_SIZE_DEFAULT = 2
+PARTICLE_SIZE_MIN = 1
+PARTICLE_SIZE_MAX = 12
+LINE_WIDTH_DEFAULT = 1
+LINE_WIDTH_MIN = 1
+LINE_WIDTH_MAX = 6
 FRAME_DELAY_MS = 250
 
 SUMMARY_FIELDS = ("frame", "time_s", "drum_z_m", "spin_deg")
@@ -252,11 +259,15 @@ class OutputPreview:
         particle_limit: int = PARTICLE_SAMPLE_DEFAULT,
         frame_stride: int = 1,
         limits_callback: Callable[[int, int], None] | None = None,
+        particle_size: int = PARTICLE_SIZE_DEFAULT,
+        line_width: int = LINE_WIDTH_DEFAULT,
+        style_callback: Callable[[int, int], None] | None = None,
     ) -> None:
         self.parent = parent
         self.root = root
         self.palette = palette
         self.limits_callback = limits_callback
+        self.style_callback = style_callback
         self.dir_var = StringVar(value=initial_dir)
         self.show_particles = BooleanVar(value=True)
         self.show_crm = BooleanVar(value=True)
@@ -265,8 +276,13 @@ class OutputPreview:
         self.frame_var = IntVar(value=0)
         self.particle_limit = min(PARTICLE_SAMPLE_MAX, max(1, int(particle_limit)))
         self.frame_stride = max(1, int(frame_stride))
+        self.particle_size = min(PARTICLE_SIZE_MAX,
+                                 max(PARTICLE_SIZE_MIN, int(particle_size)))
+        self.line_width = min(LINE_WIDTH_MAX, max(LINE_WIDTH_MIN, int(line_width)))
         self.particle_limit_var = IntVar(value=self.particle_limit)
         self.frame_stride_var = IntVar(value=self.frame_stride)
+        self.particle_size_var = IntVar(value=self.particle_size)
+        self.line_width_var = IntVar(value=self.line_width)
         self.view_mode = StringVar(value="3D perspective")
         self.yaw_deg = 35.0
         self.pitch_deg = 20.0
@@ -345,6 +361,26 @@ class OutputPreview:
         ttk.Label(options, text="(drag to orbit, wheel to zoom)",
                   font="TkSmallCaptionFont").pack(side="left", padx=(10, 2))
 
+        style_options = ttk.Frame(self.parent)
+        style_options.pack(fill="x", padx=6, pady=(0, 2))
+        ttk.Label(style_options, text="Marker / line sizes").pack(
+            side="left", padx=(2, 8))
+        ttk.Label(style_options, text="Particle size (px)").pack(
+            side="left", padx=(4, 4))
+        self.particle_size_box = ttk.Spinbox(
+            style_options, from_=PARTICLE_SIZE_MIN, to=PARTICLE_SIZE_MAX, width=4,
+            textvariable=self.particle_size_var, command=self._on_style_change)
+        self.particle_size_box.pack(side="left", padx=2)
+        ttk.Label(style_options, text="Line width (px)").pack(
+            side="left", padx=(12, 4))
+        self.line_width_box = ttk.Spinbox(
+            style_options, from_=LINE_WIDTH_MIN, to=LINE_WIDTH_MAX, width=4,
+            textvariable=self.line_width_var, command=self._on_style_change)
+        self.line_width_box.pack(side="left", padx=2)
+        for box in (self.particle_size_box, self.line_width_box):
+            box.bind("<Return>", lambda _e: self._on_style_change())
+            box.bind("<FocusOut>", lambda _e: self._on_style_change())
+
         pane = ttk.Panedwindow(self.parent, orient="horizontal")
         pane.pack(fill="both", expand=True, padx=6, pady=4)
 
@@ -395,6 +431,19 @@ class OutputPreview:
         self.frame_stride_var.set(frame)
         if changed:
             self.loaded_frame = -1
+        return changed
+
+    def set_display_style(self, particle_size: int, line_width: int) -> bool:
+        """Apply externally edited marker/line sizes; return True when changed."""
+        size = min(PARTICLE_SIZE_MAX, max(PARTICLE_SIZE_MIN, int(particle_size)))
+        width = min(LINE_WIDTH_MAX, max(LINE_WIDTH_MIN, int(line_width)))
+        changed = (size, width) != (self.particle_size, self.line_width)
+        self.particle_size = size
+        self.line_width = width
+        self.particle_size_var.set(size)
+        self.line_width_var.set(width)
+        if changed:
+            self._draw_all()
         return changed
 
     def refresh(self) -> None:
@@ -469,6 +518,25 @@ class OutputPreview:
                 pass
         else:
             self.refresh()
+
+    def _on_style_change(self) -> None:
+        try:
+            size = int(self.particle_size_var.get())
+        except (tk.TclError, TypeError, ValueError):
+            size = self.particle_size
+        try:
+            width = int(self.line_width_var.get())
+        except (tk.TclError, TypeError, ValueError):
+            width = self.line_width
+        size = min(PARTICLE_SIZE_MAX, max(PARTICLE_SIZE_MIN, size))
+        width = min(LINE_WIDTH_MAX, max(LINE_WIDTH_MIN, width))
+        if not self.set_display_style(size, width):
+            return
+        if self.style_callback is not None:
+            try:
+                self.style_callback(size, width)
+            except Exception:
+                pass
 
     def _reset_view(self) -> None:
         self.yaw_deg = 35.0
@@ -666,7 +734,8 @@ class OutputPreview:
         y_tick = math.ceil(ymin / step) * step
         while y_tick <= ymax:
             x = px(y_tick)
-            canvas.create_line(x, origin_y, x, height - origin_y, fill=grid)
+            canvas.create_line(x, origin_y, x, height - origin_y, fill=grid,
+                               width=self.line_width)
             canvas.create_text(x, height - origin_y + 3, anchor="n",
                                text=f"{y_tick:g}", fill=palette["text"],
                                font="TkSmallCaptionFont")
@@ -674,7 +743,8 @@ class OutputPreview:
         z_tick = math.ceil(zmin / step) * step
         while z_tick <= zmax:
             y = py(z_tick)
-            canvas.create_line(origin_x, y, width - origin_x, y, fill=grid)
+            canvas.create_line(origin_x, y, width - origin_x, y, fill=grid,
+                               width=self.line_width)
             canvas.create_text(origin_x - 3, y, anchor="e", text=f"{z_tick:g}",
                                fill=palette["text"], font="TkSmallCaptionFont")
             z_tick += step
@@ -684,12 +754,12 @@ class OutputPreview:
         if bed is not None and zmin <= bed <= zmax:
             y = py(bed)
             canvas.create_line(origin_x, y, width - origin_x, y,
-                               fill="#8D6E63", dash=(4, 3))
+                               fill="#8D6E63", dash=(4, 3), width=self.line_width)
 
         def draw_circle(r: float, color: str, dashed: bool = False) -> None:
             x0, y0 = px(-r), py(center_z + r)
             x1, y1 = px(r), py(center_z - r)
-            options = {"outline": color, "width": 1}
+            options = {"outline": color, "width": self.line_width}
             if dashed:
                 options["dash"] = (3, 2)
             canvas.create_oval(x0, y0, x1, y1, **options)
@@ -704,14 +774,16 @@ class OutputPreview:
         canvas.create_line(px(0.0), py(center_z),
                            px(radius * math.cos(theta)),
                            py(center_z + radius * math.sin(theta)),
-                           fill="#FFD54F", width=2)
+                           fill="#FFD54F", width=self.line_width)
 
         # Subsampled soil points (never 3D glyphs).
+        dot_radius = max(0.5, self.particle_size / 2.0)
         for x, y, z, inside, excavated in self.particles:
             color = PARTICLE_COLORS["excavated"] if excavated else (
                 PARTICLE_COLORS["inside"] if inside else PARTICLE_COLORS["soil"])
             sx, sy = px(y), py(z)
-            canvas.create_oval(sx - 1, sy - 1, sx + 1, sy + 1,
+            canvas.create_oval(sx - dot_radius, sy - dot_radius,
+                               sx + dot_radius, sy + dot_radius,
                                fill=color, outline="")
 
         canvas.create_text(
@@ -821,7 +893,7 @@ class OutputPreview:
         for index, color in enumerate(("#EF5350", "#81C784", "#64B5F6")):
             x0, y0 = screen(projected_axes[index])
             x1, y1 = screen(projected_axes[index + 3])
-            canvas.create_line(x0, y0, x1, y1, fill=color, width=1)
+            canvas.create_line(x0, y0, x1, y1, fill=color, width=self.line_width)
 
         # Drum envelope: outer rings solid, cavity rings dashed.
         inner_offset = 66 if 0.0 < inner < radius else 0
@@ -839,7 +911,7 @@ class OutputPreview:
             for point in projected_wire[start:start + count]:
                 sx, sy = screen(point)
                 coords.extend((sx, sy))
-            options = {"fill": color, "width": 1}
+            options = {"fill": color, "width": self.line_width}
             if dash:
                 options["dash"] = dash
             canvas.create_line(*coords, **options)
@@ -847,13 +919,14 @@ class OutputPreview:
         for start in range(66 + inner_offset, len(projected_wire) - 1, 2):
             x0, y0 = screen(projected_wire[start])
             x1, y1 = screen(projected_wire[start + 1])
-            canvas.create_line(x0, y0, x1, y1, fill="#FFD54F", width=1)
+            canvas.create_line(x0, y0, x1, y1, fill="#FFD54F", width=self.line_width)
 
         depths = [point[2] for point in projected]
         depth_min, depth_max = (min(depths), max(depths)) if depths else (0.0, 1.0)
         depth_span = max(1e-12, depth_max - depth_min)
         ordered = sorted(zip(self.particles, projected),
                          key=lambda pair: pair[1][2], reverse=True)
+        dot_radius = max(0.5, self.particle_size / 2.0)
         for particle, point in ordered:
             x, y, z, inside, excavated = particle
             del x, y, z
@@ -861,8 +934,9 @@ class OutputPreview:
                 PARTICLE_COLORS["inside"] if inside else PARTICLE_COLORS["soil"])
             shade = (point[2] - depth_min) / depth_span
             sx, sy = screen(point)
-            dot = 2 if point[3] > 1.02 else 1
-            canvas.create_oval(sx - dot, sy - dot, sx + dot, sy + dot,
+            radius = dot_radius * (2.0 if point[3] > 1.02 else 1.0)
+            canvas.create_oval(sx - radius, sy - radius,
+                               sx + radius, sy + radius,
                                fill=_shade(color, palette["field"], 0.45 * shade),
                                outline="")
 
@@ -910,7 +984,8 @@ class OutputPreview:
 
         for fraction in (0.0, 0.5, 1.0):
             y = top + plot_h * fraction
-            canvas.create_line(left, y, right, y, fill=palette["frame"])
+            canvas.create_line(left, y, right, y, fill=palette["frame"],
+                               width=self.line_width)
         canvas.create_text(left, 8, anchor="nw", text=f"{label} history",
                            fill=palette["text"], font="TkSmallCaptionFont")
         for fraction in (0.0, 1.0):
@@ -923,7 +998,7 @@ class OutputPreview:
         marker_x = left + plot_w * max(0.0, min(1.0,
                                                (self.current_time - t_min) / (t_max - t_min)))
         canvas.create_line(marker_x, top, marker_x, bottom,
-                           fill="#FFD54F", dash=(3, 2))
+                           fill="#FFD54F", dash=(3, 2), width=self.line_width)
 
         legend_x = left + 4
         for key, title, color, scale, suffix in series:
@@ -944,7 +1019,7 @@ class OutputPreview:
                 x = left + plot_w * (time_s - t_min) / (t_max - t_min)
                 y = bottom - plot_h * (value - low) / (high - low)
                 points.extend((x, y))
-            canvas.create_line(*points, fill=color, width=1)
+            canvas.create_line(*points, fill=color, width=self.line_width)
             current = min(pairs, key=lambda pair: abs(pair[0] - self.current_time))[1]
             canvas.create_text(legend_x, height - 8, anchor="sw",
                                text=f"{title}: {current:.3g}{suffix}",

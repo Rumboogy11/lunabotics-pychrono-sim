@@ -85,9 +85,16 @@ if str(ROOT / "crm") not in sys.path:
     sys.path.insert(0, str(ROOT / "crm"))
 
 import study_wizard as wiz  # noqa: E402
+import view_study_paraview as pvview  # noqa: E402  (std-lib only; no ParaView import here)
 from study_output_preview import (  # noqa: E402
+    LINE_WIDTH_DEFAULT,
+    LINE_WIDTH_MAX,
+    LINE_WIDTH_MIN,
     PARTICLE_SAMPLE_DEFAULT,
     PARTICLE_SAMPLE_MAX,
+    PARTICLE_SIZE_DEFAULT,
+    PARTICLE_SIZE_MAX,
+    PARTICLE_SIZE_MIN,
     OutputPreview,
 )
 
@@ -106,11 +113,16 @@ PARAM_INFO: dict[str, str] = {
     "cad_axis": "Drum axis in original STEP coordinates. New models default to Y; the converter rotates this axis to local +Z for Chrono.",
     "unit_scale": "Multiply STEP coordinates by this factor (0.001 when CAD coordinates are millimetres). Final mesh units must be metres.",
     "mesh_size": "Approximate tetrahedral edge length. Smaller gives a finer, slower FEA mesh.",
-    "surface_target_faces": "Starting contact-surface triangle count from STEP. The converter raises it automatically if TetGen rejects self-intersections. Keep it modest (8000 default); very large targets can create sliver tetrahedra that destabilize the FEA solve.",
-    "surface_max_faces": "Upper bound for the watertight decimation retry used by STEP mesh generation.",
+    "surface_target_faces": "Starting contact-surface triangle count from STEP. The converter raises it automatically until the measured exterior fit and TetGen both accept the surface. Keep it modest (8000 default); very large targets can create sliver tetrahedra that destabilize the FEA solve.",
+    "surface_max_faces": "Upper bound for the watertight/fit-driven decimation retry used by STEP mesh generation.",
+    "surface_fit_tolerance": "Maximum measured deviation (m) of exterior/screw-flight faces from the raw OCC surface. Starting at 'Surface target faces', the converter doubles the target until this fit and TetGen pass, then records the achieved error in the mesh JSON. 0 disables the fit check.",
     "surface_repair_order": "'none' unifies fused CAD faces and retries decimation until watertight. 'before'/'after' are legacy MeshFix routes that can inflate volume.",
     "min_solid_volume": "Drop STEP assembly solids smaller than this volume (m^3) before meshing (fasteners/debris).",
     "hub_radius": "Nodes within this radius of the drum axis are tied rigidly to the spindle in FEA.",
+    "part_aware_simplify": "Recommended: coarsen only hub/interior surface faces before TetGen. Exterior and screw-flight faces are copied unchanged; the hub is rigid in FEA, so its dense CAD-driven triangulation is mostly wasted solver cost.",
+    "part_aware_radius": "Faces wholly inside this radial distance from the drum axis may be coarsened. Use slightly more than the rigid hub radius. Incompatible with MeshFix order 'after'.",
+    "part_aware_reduction": "Fraction of eligible interior faces removed by topology-preserving, boundary-fixed decimation. 0.75 removed ~74% of eligible faces and ~23% of total nodes on the current spikey CAD.",
+    "part_aware_min_faces": "Skip interior coarsening unless at least this many faces qualify; avoids changing already-coarse meshes.",
     "drum_radius": "Outer crest radius; sets initial drum height (bed + radius) and bed sizing.",
     "drum_half_length": "Half the drum length along its axis; used for bed box and CRM placement.",
     "inner_radius": "Nominal cavity radius used to estimate fill ratio and capacity volume.",
@@ -146,8 +158,9 @@ PARAM_INFO: dict[str, str] = {
     "export_workers": "Number of processes used to write ParaView frame files in parallel.",
     # Output & export
     "save_particles": "Write CRM particle positions as CSV at the particle output FPS. Needed for ParaView particle spheres; uses disk space.",
-    "fea_export_vtk": "Deprecated and disabled. FEA VTU deformation export was removed because it dominated one-way FEA runtime; scalar FEA summaries are still written.",
-    "fea_vtk_stride": "Deprecated and disabled along with FEA VTU deformation export.",
+    "fea_export_vtk": "Write the full 3D FEA stress/deformation animation as per-frame VTU files (fea/vtk/fea.pvd). This adds a stress scan and file write per recorded frame and can dominate runtime/disk, so it is off by default. Scalar FEA summaries are always written.",
+    "fea_vtk_stride": "Export every Nth recorded FEA frame to the 3D VTU animation. 1 means every frame (full animation); the final frame is always included. Higher values reduce cost.",
+    "tools_show_fea_3d": "Load the validated 3D FEA stress/deformation PVD in ParaView when the study produced one. On by default; uncheck to view only CRM particles plus scalar charts. Requires the 'Export full 3D FEA stress animation' option (or an older complete fea.pvd).",
     "export_vtk": "Create separate ParaView series (crm_particles.pvd, excavator.pvd, optional fea.pvd) plus combined.pvd and a manifest after the run.",
     "paraview_stride": "Export every Nth CRM frame for both particles and excavator. Use 1 for all frames; all series stay time-aligned.",
     "paraview_particle_stride": "Export every Nth CRM particle frame independently of the excavator series. Use 0 to follow the general ParaView export stride, or >1 to reduce the much larger particle series.",
@@ -209,6 +222,8 @@ SHIPPED_SETTINGS: dict[str, object] = {
     "show_output_preview": True,
     "preview_particle_limit": PARTICLE_SAMPLE_DEFAULT,
     "preview_frame_stride": 1,
+    "preview_particle_size": PARTICLE_SIZE_DEFAULT,
+    "preview_line_width": LINE_WIDTH_DEFAULT,
 }
 
 SETTINGS_INFO: dict[str, str] = {
@@ -218,8 +233,10 @@ SETTINGS_INFO: dict[str, str] = {
     "text_color": "Foreground text color as #RRGGBB. Pick... opens the system color dialog.",
     "dark_mode": "Use a dark interface palette. If the text color is still the default, it switches to a light shade automatically.",
     "show_output_preview": "Show the lightweight CRM/FEA Output Preview tab. It reads study CSVs directly and draws a bounded 3D subsample of particles on a Tk canvas.",
-    "preview_particle_limit": "In the Output Preview, reservoir-sample at most this many SPH particles from each displayed frame. Every row is read, so the canvas also shows the true simulated particle count. Default 25,000; raise for more detail (slower drawing), lower for a sparser cloud.",
+    "preview_particle_limit": "In the Output Preview, reservoir-sample at most this many SPH particles from each displayed frame. Every row is read, so the canvas also shows the true simulated particle count. Default 5,000; raise for more detail (slower drawing), lower for a sparser cloud.",
     "preview_frame_stride": "In the Output Preview, show only every Nth discovered particle CSV frame in the slider and Play loop. 1 shows all frames.",
+    "preview_particle_size": "Output Preview marker diameter in pixels for CRM particle points. Increase for a denser-looking cloud; decrease to resolve individual points.",
+    "preview_line_width": "Output Preview line width in pixels for the particle-view drum/grid and for CRM/FEA timeline traces. Applies immediately without reloading the study.",
 }
 
 GENERATED_DOC_ID = "<generated>"
@@ -279,6 +296,14 @@ def load_ui_settings() -> dict[str, object]:
     values["preview_frame_stride"] = _setting_int(
         data.get("preview_frame_stride"), "Preview frame stride", 1, 50,
         int(SHIPPED_SETTINGS["preview_frame_stride"]))
+    values["preview_particle_size"] = _setting_int(
+        data.get("preview_particle_size"), "Preview particle size",
+        PARTICLE_SIZE_MIN, PARTICLE_SIZE_MAX,
+        int(SHIPPED_SETTINGS["preview_particle_size"]))
+    values["preview_line_width"] = _setting_int(
+        data.get("preview_line_width"), "Preview line width",
+        LINE_WIDTH_MIN, LINE_WIDTH_MAX,
+        int(SHIPPED_SETTINGS["preview_line_width"]))
     return values
 
 
@@ -298,6 +323,14 @@ def write_ui_settings(values: dict[str, object]) -> None:
         "preview_frame_stride": _setting_int(
             values.get("preview_frame_stride"), "Preview frame stride", 1, 50,
             int(SHIPPED_SETTINGS["preview_frame_stride"])),
+        "preview_particle_size": _setting_int(
+            values.get("preview_particle_size"), "Preview particle size",
+            PARTICLE_SIZE_MIN, PARTICLE_SIZE_MAX,
+            int(SHIPPED_SETTINGS["preview_particle_size"])),
+        "preview_line_width": _setting_int(
+            values.get("preview_line_width"), "Preview line width",
+            LINE_WIDTH_MIN, LINE_WIDTH_MAX,
+            int(SHIPPED_SETTINGS["preview_line_width"])),
     }
     SETTINGS_FILE.write_text(json.dumps(clean, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -315,9 +348,14 @@ def shipped_defaults() -> dict[str, object]:
         "mesh_size": "0.012",
         "surface_target_faces": "8000",
         "surface_max_faces": "256000",
+        "surface_fit_tolerance": "0.001",
         "surface_repair_order": "none",
         "min_solid_volume": "0.0",
         "hub_radius": "0.0015",
+        "part_aware_simplify": True,
+        "part_aware_radius": "0.05",
+        "part_aware_reduction": "0.75",
+        "part_aware_min_faces": "500",
         "drum_radius": "0.061037",
         "drum_half_length": "0.033",
         "inner_radius": "0.055",
@@ -379,9 +417,14 @@ DEFAULT_GROUPS: list[tuple[str, list[tuple[str, str, dict]]]] = [
         ("FEA mesh size (m)", "mesh_size", {}),
         ("Surface target faces", "surface_target_faces", {}),
         ("Surface max faces", "surface_max_faces", {}),
+        ("Exterior fit tolerance (m)", "surface_fit_tolerance", {}),
         ("MeshFix order", "surface_repair_order", {"combo": ["none", "before", "after"]}),
         ("Min solid volume (m^3)", "min_solid_volume", {}),
         ("Hub radius (m)", "hub_radius", {}),
+        ("Coarsen hub/interior mesh", "part_aware_simplify", {"check": True}),
+        ("Interior coarsen radius (m)", "part_aware_radius", {}),
+        ("Interior reduction", "part_aware_reduction", {}),
+        ("Interior min faces", "part_aware_min_faces", {}),
         ("Drum radius (m)", "drum_radius", {}),
         ("Drum half-length (m)", "drum_half_length", {}),
         ("Inner/cavity radius (m)", "inner_radius", {}),
@@ -422,6 +465,8 @@ DEFAULT_GROUPS: list[tuple[str, list[tuple[str, str, dict]]]] = [
     ]),
     ("Output & Export", [
         ("Save CRM particle CSV frames", "save_particles", {"check": True}),
+        ("Export full 3D FEA stress animation", "fea_export_vtk", {"check": True}),
+        ("FEA VTU frame stride", "fea_vtk_stride", {}),
         ("Export ParaView datasets after run", "export_vtk", {"check": True}),
         ("ParaView export stride (frames)", "paraview_stride", {}),
         ("ParaView particle stride (0 = same)", "paraview_particle_stride", {}),
@@ -480,20 +525,118 @@ def py_exec() -> str:
 
 
 class ScrollFrame(ttk.Frame):
+    """A frame with a vertical scrollbar that also responds to the mouse wheel.
+
+    Wheel events in Tk are delivered to the widget under the pointer, not to
+    the scrollable canvas.  Bind a private bindtag over the whole subtree so
+    hovering over labels, entries, buttons, etc. scrolls the page too.  Widgets
+    with their own wheel scrolling (Text/Listbox/Treeview) keep their native
+    behaviour.
+    """
+
     def __init__(self, parent, *args, **kwargs):
         super().__init__(parent, *args, **kwargs)
-        canvas = tk.Canvas(self, highlightthickness=0)
-        vsb = ttk.Scrollbar(self, orient=VERTICAL, command=canvas.yview)
-        self.inner = ttk.Frame(canvas)
+        self.canvas = tk.Canvas(self, highlightthickness=0, yscrollincrement=36)
+        self.vsb = ttk.Scrollbar(self, orient=VERTICAL, command=self.canvas.yview)
+        self.inner = ttk.Frame(self.canvas)
         self.inner.bind(
             "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")),
         )
-        win = canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        canvas.configure(yscrollcommand=vsb.set)
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))
-        canvas.pack(side=LEFT, fill=BOTH, expand=True)
-        vsb.pack(side=RIGHT, fill=Y)
+        win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.vsb.set)
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(win, width=e.width))
+        self.canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        self.vsb.pack(side=RIGHT, fill=Y)
+
+        self._wheel_tag = f"StudyGuiScroll{id(self)}"
+        self.bind_class(self._wheel_tag, "<MouseWheel>", self._on_mousewheel)
+        self.bind_class(self._wheel_tag, "<Button-4>", self._on_button4)
+        self.bind_class(self._wheel_tag, "<Button-5>", self._on_button5)
+        self._bind_wheel_tree(self)
+        # Page builders add their widgets after ScrollFrame.__init__ returns.
+        self._bind_after = self.after_idle(self._bind_wheel_tree_idle)
+        self.bind("<Destroy>", self._on_destroy, add="+")
+
+    def _bind_wheel_tree_idle(self) -> None:
+        self._bind_after = None
+        self._bind_wheel_tree(self)
+
+    def _on_destroy(self, event) -> None:
+        if event.widget is not self:
+            return
+        after = getattr(self, "_bind_after", None)
+        if after is not None:
+            try:
+                self.after_cancel(after)
+            except Exception:
+                pass
+            self._bind_after = None
+
+    def _bind_wheel_tree(self, widget) -> None:
+        """Install the scroll bindtag on widget and every descendant."""
+        tags = list(widget.bindtags())
+        if self._wheel_tag not in tags:
+            # After widget-specific bindings, before class bindings.
+            tags.insert(1, self._wheel_tag)
+            widget.bindtags(tuple(tags))
+        for child in widget.winfo_children():
+            self._bind_wheel_tree(child)
+
+    @staticmethod
+    def _owns_own_wheel(widget) -> bool:
+        return isinstance(widget, (tk.Text, tk.Listbox, ttk.Treeview))
+
+    def _scroll_units(self, amount: int) -> str:
+        """Scroll by wheel units, clamped to the content bounds.
+
+        Tk normally clamps yview, but some wheel bindings deliver duplicate or
+        oversized deltas.  Computing the target explicitly keeps the view from
+        drifting above the first row (or below the last row).
+        """
+        region = self.canvas.cget("scrollregion")
+        if not region:
+            return "break"
+        try:
+            _, top, _, bottom = (float(part) for part in region.split())
+        except (TypeError, ValueError):
+            return "break"
+        span = bottom - top
+        if span <= 0.0:
+            return "break"
+
+        visible = self.canvas.winfo_height() / span
+        if visible >= 1.0:  # content fits; nothing to scroll
+            self.canvas.yview_moveto(0.0)
+            return "break"
+
+        first, _last = self.canvas.yview()
+        max_first = max(0.0, 1.0 - visible)
+        step = amount * 36.0 / span
+        target = min(max_first, max(0.0, first + step))
+        self.canvas.yview_moveto(target)
+        # Stop class/toplevel bindings from also handling this wheel event.
+        return "break"
+
+    def _on_button4(self, event) -> str | None:
+        if self._owns_own_wheel(event.widget):
+            return None
+        return self._scroll_units(-1)
+
+    def _on_button5(self, event) -> str | None:
+        if self._owns_own_wheel(event.widget):
+            return None
+        return self._scroll_units(1)
+
+    def _on_mousewheel(self, event) -> str | None:
+        if self._owns_own_wheel(event.widget):
+            return None
+        delta = int(getattr(event, "delta", 0) or 0)
+        if not delta:
+            return None
+        # Windows/macOS normally use +/-120; some setups use +/-1.
+        steps = -int(delta / 120) if abs(delta) >= 120 else -delta
+        return self._scroll_units(steps or (-1 if delta > 0 else 1))
 
 
 class StudyGUI:
@@ -564,6 +707,9 @@ class StudyGUI:
             particle_limit=int(self.settings["preview_particle_limit"]),
             frame_stride=int(self.settings["preview_frame_stride"]),
             limits_callback=self._on_preview_limits_change,
+            particle_size=int(self.settings["preview_particle_size"]),
+            line_width=int(self.settings["preview_line_width"]),
+            style_callback=self._on_preview_style_change,
         )
         self._apply_ui_settings(self.settings)
 
@@ -607,6 +753,18 @@ class StudyGUI:
         write_ui_settings(self.settings)
         self.output_preview.refresh()
 
+    def _on_preview_style_change(self, particle_size: int, line_width: int) -> None:
+        """Persist marker/line sizes edited in the Output Preview tab."""
+        self.settings = dict(self.settings)
+        self.settings["preview_particle_size"] = int(particle_size)
+        self.settings["preview_line_width"] = int(line_width)
+        for key, value in (("preview_particle_size", particle_size),
+                           ("preview_line_width", line_width)):
+            var = self.settings_vars.get(key)
+            if var is not None:
+                var.set(str(value))
+        write_ui_settings(self.settings)
+
     def _apply_preview_limits(self, values: dict[str, object]) -> None:
         preview = getattr(self, "output_preview", None)
         if preview is None:
@@ -619,6 +777,20 @@ class StudyGUI:
             int(SHIPPED_SETTINGS["preview_frame_stride"]))
         if preview.set_display_limits(particle_limit, frame_stride):
             preview.refresh()
+
+    def _apply_preview_style(self, values: dict[str, object]) -> None:
+        preview = getattr(self, "output_preview", None)
+        if preview is None:
+            return
+        particle_size = _setting_int(
+            values.get("preview_particle_size"), "Preview particle size",
+            PARTICLE_SIZE_MIN, PARTICLE_SIZE_MAX,
+            int(SHIPPED_SETTINGS["preview_particle_size"]))
+        line_width = _setting_int(
+            values.get("preview_line_width"), "Preview line width",
+            LINE_WIDTH_MIN, LINE_WIDTH_MAX,
+            int(SHIPPED_SETTINGS["preview_line_width"]))
+        preview.set_display_style(particle_size, line_width)
 
     def _open_output_preview(self) -> None:
         self.settings_vars["show_output_preview"].set(True)
@@ -714,9 +886,15 @@ class StudyGUI:
         r = self._row(p, r, "FEA mesh size (m)", "mesh_size")
         r = self._row(p, r, "Surface target faces", "surface_target_faces")
         r = self._row(p, r, "Surface max faces", "surface_max_faces")
+        r = self._row(p, r, "Exterior fit tolerance (m)", "surface_fit_tolerance",
+                      help_text="0 disables; otherwise the face target rises until this exterior fit passes.")
         r = self._row(p, r, "MeshFix order", "surface_repair_order", combo=["none", "before", "after"])
         r = self._row(p, r, "Min solid volume (m^3)", "min_solid_volume")
         r = self._row(p, r, "Hub radius (m)", "hub_radius")
+        r = self._row(p, r, "Coarsen hub/interior mesh", "part_aware_simplify", check=True)
+        r = self._row(p, r, "Interior coarsen radius (m)", "part_aware_radius")
+        r = self._row(p, r, "Interior reduction", "part_aware_reduction")
+        r = self._row(p, r, "Interior min faces", "part_aware_min_faces")
         r = self._row(p, r, "Drum radius (m)", "drum_radius")
         r = self._row(p, r, "Drum half-length (m)", "drum_half_length")
         r = self._row(p, r, "Inner/cavity radius (m)", "inner_radius")
@@ -772,6 +950,10 @@ class StudyGUI:
         ttk.Label(p, text="Saved outputs and ParaView/VTK export (added as final wizard step when enabled).",
                   font=HEADER_FONT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8); r += 1
         r = self._row(p, r, "Save CRM particle CSV frames", "save_particles", check=True)
+        r = self._row(p, r, "Export full 3D FEA stress animation", "fea_export_vtk", check=True,
+                      help_text="Writes per-frame stress/deformation VTU files. Expensive; off by default.")
+        r = self._row(p, r, "FEA VTU frame stride", "fea_vtk_stride",
+                      help_text="1 = every recorded frame; higher values sample frames. Final frame is included.")
         r = self._row(p, r, "Export ParaView datasets after run", "export_vtk", check=True,
                       help_text="Creates separate particle and excavator series + combined PVD.")
         r = self._row(p, r, "ParaView export stride (frames)", "paraview_stride")
@@ -781,8 +963,9 @@ class StudyGUI:
         r = self._row(p, r, "Open results folder after run", "open_results", check=True)
         r = self._row(p, r, "Open ParaView after run", "open_paraview", check=True)
         ttk.Label(p, text="ParaView note: run 'pvpython view_study_paraview.py <study>/paraview' for a preconfigured 3D view\n"
-                          "(particles as spheres and a separate excavator). FEA deformation VTU export is disabled;\n"
-                          "scalar FEA histories remain in fea/summary.csv and the Output Preview tab.",
+                          "(particles as spheres and a separate excavator) plus FEA scalar charts. Enable the\n"
+                          "3D FEA stress option above and the ParaView Tools toggle 'Load 3D FEA stress' to\n"
+                          "overlay the validated per-frame stress/deformation animation.",
                   justify=LEFT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8)
 
     def _page_review(self):
@@ -1027,11 +1210,23 @@ class StudyGUI:
             ("Open ParaView 3D view (pvpython, spheres + FEA stress)", self._tool_paraview),
             ("Open interactive result plots", self._tool_results),
             ("Open lightweight CRM/FEA output preview", self._open_output_preview),
+            ("Preview STEP mesh (full-run mesher + comparison)", self._tool_mesh_preview),
             ("View geometry comparison (STEP vs converted)", self._tool_geometry),
             ("Open study folder", self._tool_open_folder),
         ]
         for text, cmd in actions:
             ttk.Button(p, text=text, command=cmd, width=54).grid(row=r, column=0, columnspan=2, sticky=W, padx=8, pady=4); r += 1
+
+        # Viewing an already-validated FEA PVD should work straight from the
+        # ParaView button.  Exporting those VTU frames remains opt-in elsewhere.
+        self.tools_show_fea_3d = BooleanVar(value=True)
+        ttk.Checkbutton(p, text="Load 3D FEA stress/deformation in ParaView (if valid)",
+                        variable=self.tools_show_fea_3d).grid(
+                            row=r, column=0, columnspan=2, sticky=W, padx=8, pady=4)
+        ttk.Button(p, text="Info", width=6,
+                   command=lambda: self._show_info("Load 3D FEA stress", PARAM_INFO["tools_show_fea_3d"])).grid(
+                       row=r, column=3, sticky=W, padx=6)
+        r += 1
 
         ttk.Separator(p).grid(row=r, column=0, columnspan=4, sticky="ew", pady=8); r += 1
         ttk.Label(p, text="ParaView notes:", font=SECTION_FONT).grid(row=r, column=0, sticky=W, padx=8); r += 1
@@ -1041,8 +1236,9 @@ class StudyGUI:
             "• Command line: QT_QPA_PLATFORM=xcb PYCHRONO_EXPORT_DIR=<study>/paraview paraview --script=view_study_paraview.py\n"
             "  (passing args after '--' may not work with some ParaView builds).\n"
             "• pvpython fallback: pvpython view_study_paraview.py <study>/paraview stays open until its render window is closed.\n"
-            "• Particles are rendered as 3D spheres (glyphs sized from export). Excavator is a separate source.\n"
-            "• FEA deformation VTU export is disabled; scalar FEA results remain in fea/summary.csv.\n"
+            "• 'Preview STEP mesh' runs the current Geometry settings through the exact full-run mesher into geometry_checks/, then opens the STEP-vs-mesh comparison tool. Active study outputs are untouched.\n"
+            "• Particles are rendered as 3D sphere point sprites (glyph fallback). Excavator is a separate source.\n"
+            "• FEA scalar XY charts load automatically from fea/summary.csv. A validated per-frame stress/deformation PVD is loaded by default; uncheck 'Load 3D FEA stress' to skip it.\n"
             "• The lightweight Output Preview tab reads CRM/FEA CSVs directly and draws a bounded 3D point cloud with editable particle/frame strides."
         )
         ttk.Label(p, text=notes, justify=LEFT).grid(row=r, column=0, columnspan=4, sticky=W, padx=8, pady=4); r += 1
@@ -1244,6 +1440,8 @@ class StudyGUI:
             "show_output_preview": BooleanVar(value=bool(values["show_output_preview"])),
             "preview_particle_limit": StringVar(value=str(values["preview_particle_limit"])),
             "preview_frame_stride": StringVar(value=str(values["preview_frame_stride"])),
+            "preview_particle_size": StringVar(value=str(values["preview_particle_size"])),
+            "preview_line_width": StringVar(value=str(values["preview_line_width"])),
         }
         r = self._settings_row(p, r, "Text size", "font_size", kind="size")
         r = self._settings_row(p, r, "Window width (px)", "window_width")
@@ -1254,6 +1452,8 @@ class StudyGUI:
                                kind="check", command=self._apply_settings_now)
         r = self._settings_row(p, r, "Preview particles to sample", "preview_particle_limit")
         r = self._settings_row(p, r, "Preview frame stride (files)", "preview_frame_stride")
+        r = self._settings_row(p, r, "Preview particle size (px)", "preview_particle_size")
+        r = self._settings_row(p, r, "Preview line width (px)", "preview_line_width")
         ttk.Separator(p).grid(row=r, column=0, columnspan=5, sticky="ew", pady=8); r += 1
         bar = ttk.Frame(p)
         bar.grid(row=r, column=0, columnspan=5, sticky=W, padx=8, pady=6); r += 1
@@ -1343,13 +1543,22 @@ class StudyGUI:
             "preview_frame_stride": _setting_int(
                 self.settings_vars["preview_frame_stride"].get(), "Preview frame stride",
                 1, 50, int(self.settings["preview_frame_stride"]), strict=strict),
+            "preview_particle_size": _setting_int(
+                self.settings_vars["preview_particle_size"].get(), "Preview particle size",
+                PARTICLE_SIZE_MIN, PARTICLE_SIZE_MAX,
+                int(self.settings["preview_particle_size"]), strict=strict),
+            "preview_line_width": _setting_int(
+                self.settings_vars["preview_line_width"].get(), "Preview line width",
+                LINE_WIDTH_MIN, LINE_WIDTH_MAX,
+                int(self.settings["preview_line_width"]), strict=strict),
         }
 
     def _sync_settings_vars(self, values: dict[str, object]) -> None:
         if not self.settings_vars:
             return
         for key in ("font_size", "window_width", "window_height", "text_color",
-                    "preview_particle_limit", "preview_frame_stride"):
+                    "preview_particle_limit", "preview_frame_stride",
+                    "preview_particle_size", "preview_line_width"):
             self.settings_vars[key].set(str(values[key]))
         self.settings_vars["dark_mode"].set(bool(values["dark_mode"]))
         self.settings_vars["show_output_preview"].set(bool(values["show_output_preview"]))
@@ -1471,6 +1680,7 @@ class StudyGUI:
                 continue
 
         self._apply_preview_limits(values)
+        self._apply_preview_style(values)
         self._apply_preview_visibility(bool(values.get("show_output_preview", True)))
 
     def _style_combobox_popdown(self, widget, bg: str, field: str,
@@ -1613,26 +1823,114 @@ class StudyGUI:
             raise ValueError("Active box values must be positive")
         return vals
 
-    def _collect_cfg(self) -> dict:
-        geo = self._g("geometry")
-        out_dir = Path(self._g("output_dir")).expanduser().resolve()
-        out_dir.mkdir(parents=True, exist_ok=True)
-        step_file = Path(self._g("step_file")).expanduser().resolve() if self._g("step_file").strip() else None
-        crm_obj = Path(self._g("crm_obj")).expanduser().resolve()
-        fea_node = Path(self._g("fea_node")).expanduser().resolve()
-        fea_ele = Path(self._g("fea_ele")).expanduser().resolve()
+    def _mesh_settings(self) -> dict:
+        """Parse the current Geometry-page values used by STEP meshing.
+
+        This is deliberately side-effect free so the mesh-preview tool can run
+        the exact same converter command without creating or touching an
+        active study output directory.
+        """
+        step_raw = self._g("step_file").strip()
+        step_file = Path(step_raw).expanduser().resolve() if step_raw else None
         cad_axis = self._g("cad_axis") or "Y"
         if cad_axis == "auto" and step_file and step_file.is_file():
             cad_axis = wiz.detect_cad_axis(step_file)
         elif cad_axis == "auto":
             cad_axis = "Y"
+
         unit_scale = float(self._g("unit_scale") or 0.001)
         mesh_size = float(self._g("mesh_size") or 0.012)
         surface_faces = int(float(self._g("surface_target_faces") or 8000))
         surface_max_faces = int(float(self._g("surface_max_faces") or 256000))
+        surface_fit_tolerance = float(self._g("surface_fit_tolerance") or 0.001)
+        if surface_fit_tolerance < 0.0:
+            raise ValueError("Exterior fit tolerance must be non-negative")
         surface_repair_order = self._g("surface_repair_order") or "none"
         min_solid_volume = float(self._g("min_solid_volume") or 0.0)
         hub_radius = float(self._g("hub_radius") or 0.0015)
+        part_aware_simplify = self._gb("part_aware_simplify")
+        part_aware_radius = float(self._g("part_aware_radius") or 0.05)
+        part_aware_reduction = float(self._g("part_aware_reduction") or 0.75)
+        part_aware_min_faces = max(0, int(float(self._g("part_aware_min_faces") or 500)))
+        if part_aware_radius <= 0.0:
+            raise ValueError("Interior coarsening radius must be positive")
+        if not 0.0 <= part_aware_reduction < 1.0:
+            raise ValueError("Interior reduction must be in [0, 1)")
+        if part_aware_simplify and surface_repair_order == "after":
+            raise ValueError(
+                "Interior coarsening is incompatible with MeshFix order 'after'; "
+                "use 'none' (recommended) or 'before'."
+            )
+        return {
+            "geometry": self._g("geometry"),
+            "step_file": step_file,
+            "cad_axis": cad_axis,
+            "unit_scale": unit_scale,
+            "mesh_size": mesh_size,
+            "surface_faces": surface_faces,
+            "surface_max_faces": surface_max_faces,
+            "surface_fit_tolerance": surface_fit_tolerance,
+            "surface_repair_order": surface_repair_order,
+            "min_solid_volume": min_solid_volume,
+            "hub_radius": hub_radius,
+            "part_aware_simplify": part_aware_simplify,
+            "part_aware_radius": part_aware_radius,
+            "part_aware_reduction": part_aware_reduction,
+            "part_aware_min_faces": part_aware_min_faces,
+        }
+
+    def _mesh_command(self, prefix: Path, step_file: Path, mesh: dict) -> list[str]:
+        """Build the exact STEP converter command used by a full study run."""
+        cmd = [
+            str(ROOT / "chrono-env" / "bin" / "python"),
+            str(ROOT / "step_to_chrono_fea.py"),
+            str(step_file),
+            "--out-prefix", str(prefix),
+            "--unit-scale", f"{mesh['unit_scale']:g}",
+            "--mesh-size", f"{mesh['mesh_size']:g}",
+            "--surface-target-faces", str(mesh["surface_faces"]),
+            "--surface-max-faces", str(mesh["surface_max_faces"]),
+            "--surface-fit-tolerance", f"{mesh['surface_fit_tolerance']:g}",
+            "--min-solid-volume", f"{mesh['min_solid_volume']:g}",
+            "--hub-radius", f"{mesh['hub_radius']:g}",
+            "--axis", mesh["cad_axis"],
+            # Keep TetGen's default radius-edge/dihedral quality bounds;
+            # pYQ disables them and can create FEA-destabilizing slivers.
+            "--time-stages",
+        ]
+        if mesh["part_aware_simplify"]:
+            cmd.extend([
+                "--part-aware-simplify",
+                "--part-aware-radius", f"{mesh['part_aware_radius']:g}",
+                "--part-aware-reduction", f"{mesh['part_aware_reduction']:g}",
+                "--part-aware-min-faces", str(mesh["part_aware_min_faces"]),
+            ])
+        if mesh["surface_repair_order"] == "after":
+            cmd.append("--repair-after-decimation")
+        return cmd
+
+    def _collect_cfg(self) -> dict:
+        mesh = self._mesh_settings()
+        geo = mesh["geometry"]
+        out_dir = Path(self._g("output_dir")).expanduser().resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        step_file = mesh["step_file"]
+        crm_obj = Path(self._g("crm_obj")).expanduser().resolve()
+        fea_node = Path(self._g("fea_node")).expanduser().resolve()
+        fea_ele = Path(self._g("fea_ele")).expanduser().resolve()
+        cad_axis = mesh["cad_axis"]
+        unit_scale = mesh["unit_scale"]
+        mesh_size = mesh["mesh_size"]
+        surface_faces = mesh["surface_faces"]
+        surface_max_faces = mesh["surface_max_faces"]
+        surface_fit_tolerance = mesh["surface_fit_tolerance"]
+        surface_repair_order = mesh["surface_repair_order"]
+        min_solid_volume = mesh["min_solid_volume"]
+        hub_radius = mesh["hub_radius"]
+        part_aware_simplify = mesh["part_aware_simplify"]
+        part_aware_radius = mesh["part_aware_radius"]
+        part_aware_reduction = mesh["part_aware_reduction"]
+        part_aware_min_faces = mesh["part_aware_min_faces"]
         drum_radius = float(self._g("drum_radius") or 0.061)
         drum_half_length = float(self._g("drum_half_length") or 0.033)
         inner_radius = float(self._g("inner_radius") or 0.055)
@@ -1650,24 +1948,7 @@ class StudyGUI:
             fea_ele = Path(f"{prefix}.ele")
             surface_stl = Path(f"{prefix}_surface.stl")
             crm_obj = Path(f"{prefix}_surface.obj")
-            cmd = [
-                str(ROOT / "chrono-env" / "bin" / "python"),
-                str(ROOT / "step_to_chrono_fea.py"),
-                str(step_file),
-                "--out-prefix", str(prefix),
-                "--unit-scale", f"{unit_scale:g}",
-                "--mesh-size", f"{mesh_size:g}",
-                "--surface-target-faces", str(surface_faces),
-                "--surface-max-faces", str(surface_max_faces),
-                "--min-solid-volume", f"{min_solid_volume:g}",
-                "--hub-radius", f"{hub_radius:g}",
-                "--axis", cad_axis,
-                # Keep TetGen's default radius-edge/dihedral quality bounds;
-                # pYQ disables them and can create FEA-destabilizing slivers.
-                "--time-stages",
-            ]
-            if surface_repair_order == "after":
-                cmd.append("--repair-after-decimation")
+            cmd = self._mesh_command(prefix, step_file, mesh)
             mesh_steps.append({"name": "generate-FEA-mesh", "command": cmd})
             mesh_steps.append({
                 "name": "make-CRM-surface-OBJ",
@@ -1735,8 +2016,13 @@ class StudyGUI:
             "mesh_size": mesh_size,
             "surface_faces": surface_faces,
             "surface_max_faces": surface_max_faces,
+            "surface_fit_tolerance": surface_fit_tolerance,
             "surface_repair_order": surface_repair_order,
             "hub_radius": hub_radius,
+            "part_aware_simplify": bool(part_aware_simplify),
+            "part_aware_radius": part_aware_radius,
+            "part_aware_reduction": part_aware_reduction,
+            "part_aware_min_faces": part_aware_min_faces,
             "drum_radius": drum_radius,
             "drum_half_length": drum_half_length,
             "min_solid_volume": min_solid_volume,
@@ -1772,8 +2058,8 @@ class StudyGUI:
             "export_workers": export_workers,
             "pla": pla,
             "save_particles": self._gb("save_particles"),
-            "fea_export_vtk": False,
-            "fea_vtk_stride": 1,
+            "fea_export_vtk": self._gb("fea_export_vtk"),
+            "fea_vtk_stride": max(1, int(float(self._g("fea_vtk_stride") or 1))),
             "export_vtk": self._gb("export_vtk"),
             "paraview_stride": max(1, int(float(self._g("paraview_stride") or 1))),
             "paraview_particle_stride": max(0, int(float(self._g("paraview_particle_stride") or 0))),
@@ -1913,7 +2199,8 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                     )
                     return
             gd = wiz.geometry_defaults(measured, auto=True)
-            for k in ["mesh_size", "surface_target_faces", "min_solid_volume", "hub_radius",
+            for k in ["mesh_size", "surface_target_faces", "surface_fit_tolerance",
+                      "min_solid_volume", "hub_radius",
                       "drum_radius", "drum_half_length", "inner_radius", "bed_height",
                       "descent_speed", "spacing"]:
                 if k in gd and k in self.vars:
@@ -1947,7 +2234,8 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         for k in ["study_name", "geometry", "cad_axis", "surface_repair_order", "spin_axis", "solver", "crm_dt"]:
             setv(k, data.get(k))
         for k in ["unit_scale", "mesh_size", "surface_target_faces", "surface_faces", "surface_max_faces",
-                  "min_solid_volume", "hub_radius",
+                  "surface_fit_tolerance", "min_solid_volume", "hub_radius",
+                  "part_aware_radius", "part_aware_reduction", "part_aware_min_faces",
                   "drum_radius", "drum_half_length", "inner_radius", "capacity_volume", "duration",
                   "fea_duration", "spacing", "d0_multiplier", "artificial_viscosity",
                    "shifting_ppst_push", "crm_fps", "fea_fps", "fea_dt",
@@ -1956,7 +2244,8 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                   "fea_vtk_stride", "paraview_stride", "paraview_particle_stride",
                   "paraview_particle_render_stride"]:
             setv(k, data.get(k))
-        for k in ["reverse_spin", "save_particles", "fea_export_vtk", "export_vtk", "open_results", "open_paraview", "auto_geometry"]:
+        for k in ["reverse_spin", "save_particles", "fea_export_vtk", "export_vtk", "open_results", "open_paraview", "auto_geometry",
+                  "part_aware_simplify"]:
             if k in data:
                 setv(k, data.get(k))
         for k, v in {"output_dir": data.get("output_dir"), "step_file": data.get("step_file"),
@@ -2121,7 +2410,34 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                     self.tools_log.insert(END, text)
                     self.tools_log.see(END)
                 elif kind == "done":
-                    self._tool_log(str(payload))
+                    if isinstance(payload, tuple) and len(payload) == 2:
+                        label, result = payload
+                        if isinstance(result, int):
+                            self._tool_log(f"[{label} exited {result}]")
+                            if label == "export":
+                                self.status_var.set(
+                                    f"ParaView export exited {result}. "
+                                    "Refreshing output preview."
+                                )
+                                try:
+                                    self._refresh_output_preview()
+                                except Exception:
+                                    pass
+                            elif label == "mesh-preview":
+                                if result == 0:
+                                    self.status_var.set(
+                                        "Mesh preview complete; opening STEP-vs-mesh comparison."
+                                    )
+                                    try:
+                                        self._launch_mesh_comparison()
+                                    except Exception as exc:
+                                        self._tool_log(f"[comparison error] {exc}")
+                                else:
+                                    self.status_var.set("Mesh preview failed. See Tools log.")
+                        else:
+                            self._tool_log(f"[{label} {result}]")
+                    else:
+                        self._tool_log(str(payload))
         except queue.Empty:
             pass
         self.root.after(120, self._drain_tools_log)
@@ -2132,15 +2448,16 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             self.tools_log.insert(END, msg + "\n")
             self.tools_log.see(END)
 
-    def _run_tool_cmd(self, cmd, cwd=None, stream: bool = False):
+    def _run_tool_cmd(self, cmd, cwd=None, stream: bool = False, label: str = "export"):
         self._tool_log("$ " + shlex.join(cmd))
         try:
             p = subprocess.Popen(cmd, cwd=cwd or ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             if stream:
-                # Keep the GUI responsive while a long export streams progress.
+                # Keep the GUI responsive while a long tool streams progress.
+                # Completion is reported through tools_queue, not this return.
                 threading.Thread(target=self._watch_tool_process,
-                                 args=(p, "export"), daemon=True).start()
-                return 0
+                                 args=(p, label), daemon=True).start()
+                return None
             out, _ = p.communicate(timeout=600)
             if out:
                 self.tools_log.insert(END, out[-8000:] + ("\n" if not out.endswith("\n") else ""))
@@ -2173,17 +2490,98 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             assert proc.stdout is not None
             for line in proc.stdout:
                 self.tools_queue.put(("line", line))
-            self.tools_queue.put(("done", f"[{label} exited {proc.wait()}]"))
+            self.tools_queue.put(("done", (label, proc.wait())))
         except Exception as exc:
-            self.tools_queue.put(("done", f"[{label} log error: {exc}]"))
+            self.tools_queue.put(("done", (label, f"log error: {exc}")))
+
+    def _tool_mesh_preview(self):
+        """Run the full-run STEP mesher into a scratch dir, then compare it to CAD."""
+        try:
+            mesh = self._mesh_settings()
+        except Exception as exc:
+            self._tool_log(f"[mesh preview error] {exc}")
+            return
+        if mesh["geometry"] != "step":
+            self._tool_log("# Mesh preview needs Geometry source = 'step' on the Geometry page.")
+            return
+        step_file = mesh["step_file"]
+        if not step_file or not step_file.is_file():
+            self._tool_log(f"[mesh preview error] STEP file not found: {step_file}")
+            return
+
+        preview_root = ROOT / "geometry_checks" / "mesh_preview"
+        prefix = preview_root / f"{step_file.stem}_fea"
+        prefix.parent.mkdir(parents=True, exist_ok=True)
+        self._mesh_preview_step = step_file
+        self._mesh_preview_node = Path(f"{prefix}.node")
+        self._mesh_preview_axis = mesh["cad_axis"]
+
+        cmd = self._mesh_command(prefix, step_file, mesh)
+        self._tool_log("# Mesh preview uses the exact full-run STEP mesher; "
+                       f"outputs go to {prefix.parent}")
+        self._run_tool_cmd(cmd, cwd=ROOT, stream=True, label="mesh-preview")
+
+    def _launch_mesh_comparison(self):
+        step_file = getattr(self, "_mesh_preview_step", None)
+        node_file = getattr(self, "_mesh_preview_node", None)
+        if not step_file or not node_file:
+            self._tool_log("[comparison error] no mesh preview result to compare")
+            return
+        if not node_file.is_file():
+            self._tool_log(f"[comparison error] mesher did not write {node_file}")
+            return
+        threads = max(0, int(float(self._g("num_threads") or 8)))
+        cmd = [py_exec(), str(ROOT / "view_geometry.py"),
+               "--step", str(step_file),
+               "--fea-node", str(node_file),
+               "--source-axis", str(getattr(self, "_mesh_preview_axis", "Y")),
+               "--threads", str(threads),
+               "--show"]
+        self._tool_log("$ " + shlex.join(cmd))
+        try:
+            subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.STDOUT)
+            self._tool_log("[launched STEP-vs-mesh comparison]")
+        except Exception as exc:
+            self._tool_log(f"[comparison error] {exc}")
 
     def _tool_paraview(self):
         d = Path(self.tools_study_dir.get()).expanduser()
         pdir = d / "paraview" if (d / "paraview").is_dir() else d
         script = str(ROOT / "view_study_paraview.py")
+        show_fea_3d = bool(getattr(self, "tools_show_fea_3d", None) and self.tools_show_fea_3d.get())
         env = os.environ.copy()
         env["PYCHRONO_EXPORT_DIR"] = str(pdir)
         env["PYCHRONO_STUDY_DIR"] = str(d)
+        # ParaView's --script runner does not define __file__; the viewer uses
+        # these to locate its local fea_summary helper.
+        env["PYCHRONO_SCRIPT_DIR"] = str(ROOT)
+        env["PYCHRONO_ROOT"] = str(ROOT)
+        self._tool_log("# viewer loads fea/summary.csv scalar charts when available "
+                       "(--no-fea suppresses them); 3D FEA follows the Tools toggle")
+
+        # Make invalid/cancelled 3D FEA exports explicit before the viewer opens.
+        manifest_path = pdir / "export_manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                manifest = {}
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            manifest = {}
+        if manifest:
+            if manifest.get("has_fea_summary"):
+                self._tool_log("# FEA scalar charts: available from fea_summary.csv")
+            else:
+                self._tool_log("# FEA scalar charts: no summary found")
+            if manifest.get("fea_valid"):
+                self._tool_log("# 3D FEA VTK: validated series available")
+            else:
+                status = str(manifest.get("fea_status") or "no validated 3D series")
+                self._tool_log(f"# 3D FEA VTK: invalid/unavailable ({status}); "
+                               "scalar charts and CRM still load")
+        elif show_fea_3d:
+            self._tool_log("# 3D FEA VTK requested, but no export manifest was found; "
+                           "run ParaView export first")
 
         def env_number(name: str, text: str, default: float, low: float | None = None,
                        high: float | None = None):
@@ -2198,6 +2596,9 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             env[name] = f"{value:g}"
 
         env["PYCHRONO_CAMERA_ORBIT"] = "1" if self.tools_camera_orbit.get() else "0"
+        env["PYCHRONO_WITH_FEA"] = "1" if show_fea_3d else "0"
+        if show_fea_3d:
+            self._tool_log("# 3D FEA stress overlay requested; only a validated complete series will load")
         env_number("PYCHRONO_ORBIT_SPEED", self.tools_orbit_speed.get(), 0.10)
         env_number("PYCHRONO_ORBIT_RADIUS", self.tools_orbit_radius.get(), 0.0, low=0.0)
         env_number("PYCHRONO_ORBIT_INCLINATION", self.tools_orbit_inclination.get(), 20.0,
@@ -2215,6 +2616,7 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         # needs the viewer's Interact() loop to avoid exiting immediately.
         paraview_bin = shutil.which("paraview")
         if paraview_bin:
+            env["PYCHRONO_PARAVIEW_GUI"] = "1"
             cmd = [paraview_bin, f"--script={script}"]
             self._tool_log("$ " + shlex.join(cmd))
             self._tool_log(f"# PYCHRONO_EXPORT_DIR={pdir} QT_QPA_PLATFORM={env['QT_QPA_PLATFORM']}")
@@ -2230,8 +2632,11 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             except Exception as exc:
                 self._tool_log(f"[paraview launch failed: {exc}] trying pvpython...")
 
+        env.pop("PYCHRONO_PARAVIEW_GUI", None)
         pvpython_bin = shutil.which("pvpython") or "pvpython"
         cmd = [pvpython_bin, script, str(pdir)]
+        if show_fea_3d:
+            cmd.append("--with-fea")
         self._tool_log("$ " + shlex.join(cmd))
         try:
             proc = subprocess.Popen(

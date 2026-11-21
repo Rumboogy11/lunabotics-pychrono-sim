@@ -14,6 +14,8 @@ Soil/FEA metrics count **SPH fluid markers only**. Older comparisons that includ
 
 Fill/cavity metrics require **full particle containment**, not just a centre-inside test: the SPH particle radius `rp = 0.5 × --spacing` (Chrono `d0 = --spacing`) is subtracted from the cavity radius, outer drum radius, and axial half-length (clamped at zero) before classifying particles. A particle whose centre lies near any boundary is rejected even if that centre is nominally inside the envelope. The nominal cavity volume used as the capacity denominator is unchanged; only the particle counts change.
 
+Generated studies keep `--drum-radius`/`--drum-half-length` tied to the CAD or mesh actually loaded. With auto geometry enabled (the default), an edited outer dimension is restored to the measured value, an impossible cavity radius is reset, and a duration shorter than the full descent is extended; the corrections are recorded in `study_config.json`. Disable auto geometry only when using a mesh that intentionally matches a custom radius. The containment predicates and SPH/BCE counts are not changed by this check.
+
 ## Requirements
 
 A standard PyPI `pychrono` wheel is not sufficient (it omits `pychrono.fsi` and `pychrono.vehicle`).

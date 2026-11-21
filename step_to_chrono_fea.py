@@ -45,11 +45,12 @@ Example
         --out-prefix fea/NewDrum_fea --unit-scale 0.001 \\
         --mesh-size 0.012 --axis Y --hub-radius 0.035
 
-    # Experimental: preserve exterior screw faces and simplify only the hub region.
-    # Keep the target modest; the converter retries automatically if needed.
+    # Recommended for the spikey CAD: start at 8k faces, preserve exterior screw faces,
+    # and raise the target automatically until the measured exterior fit and TetGen pass.
+    # The wizard/GUI enable this by default.
     ./chrono-env/bin/python step_to_chrono_fea.py "geometry/spikey/Assembly 1.step" \\
         --out-prefix fea/PartAware_fea --unit-scale 0.001 \\
-        --mesh-size 0.02 --surface-target-faces 8000 --min-solid-volume 1e-05 \\
+        --mesh-size 0.02 --surface-target-faces 8000 --surface-fit-tolerance 0.001 --min-solid-volume 1e-05 \\
         --hub-radius 0.0357669 --axis Y \\
         --part-aware-simplify --part-aware-radius 0.05 --part-aware-reduction 0.75
 """
@@ -186,6 +187,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="upper bound for the watertight decimation retry (default: 256000)",
     )
     p.add_argument(
+        "--surface-fit-tolerance",
+        type=float,
+        default=0.001,
+        help="maximum measured exterior-surface deviation from the raw OCC tessellation, "
+             "in metres (default: 0.001). Decimation targets are raised until this fit "
+             "and TetGen both pass; 0 disables the fit check",
+    )
+    p.add_argument(
         "--max-tet-volume",
         type=float,
         default=None,
@@ -252,9 +261,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--part-aware-simplify",
         action="store_true",
-        help="experimental part-aware path: keep exterior/large surface faces at the validated "
-             "fine fidelity and decimate only hub/interior faces within --part-aware-radius. "
-             "Off by default; does not affect production meshes.",
+        help="keep exterior/large surface faces at the validated fine fidelity and decimate only "
+             "hub/interior faces within --part-aware-radius. The study wizard/GUI enable this by "
+             "default; this converter flag itself is off when invoked directly.",
     )
     p.add_argument(
         "--part-aware-radius",
@@ -665,6 +674,144 @@ def decimate_to_watertight(
         target = min(target * 2, max_faces)
 
 
+def polydata_from_triangles(points: np.ndarray, faces: np.ndarray) -> pv.PolyData:
+    """Build a PyVista triangle mesh from an ``(N, 3)`` face array."""
+    points = np.asarray(points, dtype=float)
+    faces = np.asarray(faces, dtype=np.int64)
+    connectivity = np.column_stack(
+        [np.full(len(faces), 3, dtype=np.int64), faces]
+    ).ravel()
+    return pv.PolyData(points, connectivity)
+
+
+def exterior_vertex_indices(
+    points: np.ndarray,
+    faces: np.ndarray,
+    *,
+    axis: int,
+    radius_cad: float,
+) -> np.ndarray:
+    """Return vertices belonging to faces outside the radial hub/interior band."""
+    points = np.asarray(points, dtype=float)
+    faces = np.asarray(faces, dtype=np.int32)
+    if len(faces) == 0:
+        return np.empty(0, dtype=np.int64)
+    axes = radial_axes(axis)
+    radii = np.linalg.norm(points[:, axes], axis=1)
+    exterior_faces = (radii[faces] > radius_cad).all(axis=1)
+    if not np.any(exterior_faces):
+        return np.empty(0, dtype=np.int64)
+    return np.unique(faces[exterior_faces])
+
+
+def evenly_spaced_indices(count: int, limit: int) -> np.ndarray:
+    """Deterministically cap a sample while covering the whole index range."""
+    if count <= 0:
+        return np.empty(0, dtype=np.int64)
+    if count <= limit:
+        return np.arange(count, dtype=np.int64)
+    return np.unique(np.linspace(0, count - 1, limit, dtype=np.int64))
+
+
+def distance_percentiles(distances: np.ndarray) -> dict[str, float]:
+    """Summarise a nearest-surface distance sample in metres."""
+    if distances.size == 0:
+        return {"max_m": 0.0, "p999_m": 0.0, "mean_m": 0.0}
+    return {
+        "max_m": float(np.max(distances)),
+        "p999_m": float(np.percentile(distances, 99.9)),
+        "mean_m": float(np.mean(distances)),
+    }
+
+
+def nearest_surface_distances(
+    query_points_m: np.ndarray,
+    base_mesh_m: pv.PolyData,
+) -> np.ndarray:
+    """Distance from each query point to the closest triangle of ``base_mesh_m``."""
+    if query_points_m.shape[0] == 0:
+        return np.empty(0, dtype=float)
+    _cells, closest = base_mesh_m.find_closest_cell(
+        query_points_m, return_closest_point=True
+    )
+    return np.linalg.norm(query_points_m - np.asarray(closest, dtype=float), axis=1)
+
+
+def measure_exterior_fit(
+    raw_points: np.ndarray,
+    raw_faces: np.ndarray,
+    raw_mesh_m: pv.PolyData,
+    candidate_points: np.ndarray,
+    candidate_faces: np.ndarray,
+    *,
+    axis: int,
+    exterior_radius_cad: float,
+    unit_scale: float,
+    tolerance_m: float,
+    sample_limit: int = 20000,
+) -> dict:
+    """Measure bidirectional exterior deviation from the raw OCC surface.
+
+    Only faces outside the radial hub/interior band are sampled, so the fit
+    check protects the screw-flight/exterior detail while allowing the hub to
+    be coarsened.  The reported error is the larger of the two p99.9 distances;
+    maxima are retained for diagnostics.  Distances are measured in metres in
+    the original CAD frame, before the export-axis rotation.
+    """
+    if tolerance_m <= 0.0:
+        return {
+            "enabled": False,
+            "tolerance_m": 0.0,
+            "exterior_radius_m": exterior_radius_cad * unit_scale,
+            "candidate_to_raw": distance_percentiles(np.empty(0)),
+            "raw_to_candidate": distance_percentiles(np.empty(0)),
+            "error_m": 0.0,
+            "passed": True,
+        }
+
+    raw_points = np.asarray(raw_points, dtype=float)
+    raw_faces = np.asarray(raw_faces, dtype=np.int32)
+    candidate_points = np.asarray(candidate_points, dtype=float)
+    candidate_faces = np.asarray(candidate_faces, dtype=np.int32)
+
+    raw_ids = exterior_vertex_indices(
+        raw_points, raw_faces, axis=axis, radius_cad=exterior_radius_cad
+    )
+    candidate_ids = exterior_vertex_indices(
+        candidate_points, candidate_faces, axis=axis, radius_cad=exterior_radius_cad
+    )
+    raw_sample_m = raw_points[raw_ids[evenly_spaced_indices(len(raw_ids), sample_limit)]] * unit_scale
+    candidate_sample_m = (
+        candidate_points[candidate_ids[evenly_spaced_indices(len(candidate_ids), sample_limit)]]
+        * unit_scale
+    )
+
+    if candidate_sample_m.shape[0]:
+        c2b_distances = nearest_surface_distances(candidate_sample_m, raw_mesh_m)
+    else:
+        c2b_distances = np.empty(0, dtype=float)
+    if raw_sample_m.shape[0] and candidate_faces.shape[0]:
+        candidate_mesh_m = polydata_from_triangles(
+            candidate_points * unit_scale, candidate_faces
+        )
+        b2c_distances = nearest_surface_distances(raw_sample_m, candidate_mesh_m)
+    else:
+        b2c_distances = np.empty(0, dtype=float)
+
+    c2b = distance_percentiles(c2b_distances)
+    b2c = distance_percentiles(b2c_distances)
+    error = max(c2b["p999_m"], b2c["p999_m"])
+    return {
+        "enabled": True,
+        "tolerance_m": float(tolerance_m),
+        "exterior_radius_m": float(exterior_radius_cad * unit_scale),
+        "candidate_to_raw": c2b,
+        "raw_to_candidate": b2c,
+        "error_m": float(error),
+        "passed": bool(error <= tolerance_m + 1.0e-12),
+    }
+
+
 def simplify_interior_region(
     points: np.ndarray,
     faces: np.ndarray,
@@ -943,6 +1090,8 @@ def main() -> int:
         raise SystemExit("--unit-scale must be positive")
     if args.mesh_size <= 0.0:
         raise SystemExit("--mesh-size must be positive")
+    if args.surface_fit_tolerance < 0.0:
+        raise SystemExit("--surface-fit-tolerance must be non-negative")
     if args.hub_radius < 0.0:
         raise SystemExit("--hub-radius must be non-negative")
     if args.part_aware_radius <= 0.0:
@@ -1027,6 +1176,11 @@ def main() -> int:
     raw_faces = raw.faces.reshape(-1, 4)[:, 1:].astype(np.int32)
     raw_surface = trimesh.Trimesh(vertices=raw_points, faces=raw_faces, process=True)
     raw_watertight = bool(raw_surface.is_watertight)
+    raw_fit_mesh_m = (
+        polydata_from_triangles(raw_points * args.unit_scale, raw_faces)
+        if args.surface_fit_tolerance > 0.0
+        else None
+    )
     meshfix_used = False
     surface_target_used = args.surface_target_faces
 
@@ -1062,9 +1216,10 @@ def main() -> int:
     else:
         clean_points = np.asarray(raw_surface.vertices, dtype=float)
         clean_faces = np.asarray(raw_surface.faces, dtype=np.int32)
-        if args.skip_decimation:
+        if args.skip_decimation or args.surface_target_faces == 0:
             repaired_points, repaired_faces = clean_points, clean_faces
             faces_before_decimation = len(clean_faces)
+            surface_target_used = 0
         else:
             (
                 repaired_points,
@@ -1130,15 +1285,47 @@ def main() -> int:
         )
 
     # Quadric decimation can leave a watertight surface that still has tiny
-    # folded/self-intersecting triangles.  TetGen is the authoritative check:
-    # retry with progressively finer targets until it accepts the surface.
+    # folded/self-intersecting triangles or drifts away from the fine exterior.
+    # The measured fit check and TetGen are both authoritative: retry with
+    # progressively finer targets until each accepts the surface.
+    can_retry_faces = (
+        not args.skip_decimation
+        and not args.repair_after_decimation
+        and args.surface_target_faces > 0
+    )
+    retry_ceiling = max(args.surface_max_faces, args.surface_target_faces)
+    fit_radius_cad = max(args.part_aware_radius, args.hub_radius) / args.unit_scale
     surface_target_current = surface_target_used
+    surface_fit_meta: dict = {
+        "enabled": args.surface_fit_tolerance > 0.0,
+        "tolerance_m": args.surface_fit_tolerance,
+        "passed": True,
+        "error_m": 0.0,
+    }
+
+    def advance_surface_target(reason: str) -> None:
+        """Double the surface face target, or fail if the retry ceiling is reached."""
+        nonlocal surface_target_current
+        if not can_retry_faces:
+            raise SystemExit(
+                f"{reason}; surface retries are disabled by skip-decimation, "
+                "MeshFix repair-after-decimation, or a zero face target"
+            )
+        base = max(surface_target_current, surface_target_used, args.surface_target_faces)
+        next_target = min(base * 2, retry_ceiling)
+        if next_target <= base:
+            raise SystemExit(
+                f"{reason}; surface target already reached the retry ceiling "
+                f"of {retry_ceiling} faces"
+            )
+        surface_target_current = next_target
+        print(
+            f"Raising surface target from {base} to {next_target} faces: {reason}",
+            file=sys.stderr,
+        )
+
     while True:
-        if (
-            not args.skip_decimation
-            and not args.repair_after_decimation
-            and surface_target_current != surface_target_used
-        ):
+        if can_retry_faces and surface_target_current != surface_target_used:
             (
                 repaired_points,
                 repaired_faces,
@@ -1148,17 +1335,38 @@ def main() -> int:
                 clean_points,
                 clean_faces,
                 surface_target_current,
-                args.surface_max_faces,
+                retry_ceiling,
             )
             if args.part_aware_simplify:
                 repaired_points, repaired_faces, part_aware_meta = apply_part_aware(
                     repaired_points, repaired_faces
                 )
+
+        if raw_fit_mesh_m is not None:
+            surface_fit_meta = measure_exterior_fit(
+                raw_points,
+                raw_faces,
+                raw_fit_mesh_m,
+                repaired_points,
+                repaired_faces,
+                axis=args.axis,
+                exterior_radius_cad=fit_radius_cad,
+                unit_scale=args.unit_scale,
+                tolerance_m=args.surface_fit_tolerance,
+            )
             print(
-                f"Retrying surface with {surface_target_used} faces after TetGen "
-                "rejected self-intersections",
+                "[surface-fit] "
+                f"target={surface_target_used} error={surface_fit_meta['error_m']:.6g} m "
+                f"tolerance={args.surface_fit_tolerance:.6g} m "
+                f"passed={surface_fit_meta['passed']}",
                 file=sys.stderr,
             )
+            if not surface_fit_meta["passed"]:
+                advance_surface_target(
+                    f"exterior fit error {surface_fit_meta['error_m']:.6g} m exceeds "
+                    f"{args.surface_fit_tolerance:.6g} m"
+                )
+                continue
 
         # OCC leaves a few very long triangles on planar end faces.  Adaptive
         # longest-edge bisection fixes those without inflating already fine
@@ -1203,12 +1411,11 @@ def main() -> int:
                 and not args.skip_decimation
                 and not args.repair_after_decimation
                 and not args.skip_meshfix
+                and args.surface_target_faces > 0
             )
-            next_target = min(max(surface_target_used * 2, args.surface_target_faces * 2),
-                              args.surface_max_faces)
-            if not retryable or next_target <= surface_target_used:
+            if not retryable:
                 raise
-            surface_target_current = next_target
+            advance_surface_target("TetGen rejected the surface for self-intersections")
             continue
         break
     mark("surface subdivision/axis rotation and TetGen volume meshing")
@@ -1279,6 +1486,12 @@ def main() -> int:
         "max_surface_edge_m": args.mesh_size,
         "surface_target_faces_requested": args.surface_target_faces,
         "surface_target_faces_used": surface_target_used,
+        "surface_fit_tolerance_m": args.surface_fit_tolerance,
+        "surface_fit_status": (
+            "disabled" if not surface_fit_meta["enabled"]
+            else "pass" if surface_fit_meta["passed"] else "fail"
+        ),
+        "surface_fit": surface_fit_meta,
         "surface_faces_before_decimation": int(faces_before_decimation),
         "surface_points": int(len(surface_points)),
         "surface_faces": int(len(surface_faces)),
@@ -1331,6 +1544,13 @@ def main() -> int:
         f"  edge length min/median/max={quality['min_edge_m']:.6g}/"
         f"{quality['median_edge_m']:.6g}/{quality['max_edge_m']:.6g} m"
     )
+    if surface_fit_meta["enabled"]:
+        print(
+            f"  exterior fit error={surface_fit_meta['error_m']:.6g} m "
+            f"(tolerance {args.surface_fit_tolerance:.6g} m)"
+        )
+        if not surface_fit_meta["passed"]:
+            raise SystemExit("surface fit tolerance was not met")
     if volume_error > args.max_volume_error:
         raise SystemExit(
             f"mesh volume error {volume_error:.3%} exceeds --max-volume-error "

@@ -12,7 +12,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from study_output_preview import (
+    LINE_WIDTH_DEFAULT,
+    LINE_WIDTH_MAX,
+    LINE_WIDTH_MIN,
     PARTICLE_SAMPLE_DEFAULT,
+    PARTICLE_SIZE_DEFAULT,
+    PARTICLE_SIZE_MAX,
+    PARTICLE_SIZE_MIN,
     OutputPreview,
     _project_point,
     load_particle_sample,
@@ -59,10 +65,10 @@ class OutputPreviewCameraTest(unittest.TestCase):
 
 
 class ParticleSampleTest(unittest.TestCase):
-    def test_default_particle_sample_count_is_25000(self) -> None:
+    def test_default_particle_sample_count_is_5000(self) -> None:
         default = inspect.signature(OutputPreview.__init__).parameters["particle_limit"].default
         self.assertEqual(default, PARTICLE_SAMPLE_DEFAULT)
-        self.assertEqual(PARTICLE_SAMPLE_DEFAULT, 25000)
+        self.assertEqual(PARTICLE_SAMPLE_DEFAULT, 5000)
 
     def test_sample_count_controls_drawn_particles_and_reports_total(self) -> None:
         with tempfile.TemporaryDirectory(prefix="preview_sample_", dir="/tmp/opencode") as tmp:
@@ -87,7 +93,7 @@ class ParticleSampleTest(unittest.TestCase):
             frames=[object(), object()],
             _all_frame_count=2,
             frame_stride=1,
-            particle_limit=25000,
+            particle_limit=5000,
             particle_total=242172,
             crm_rows=[object()],
             fea_rows=[object()],
@@ -99,7 +105,81 @@ class ParticleSampleTest(unittest.TestCase):
         OutputPreview._update_status(fake)
 
         self.assertIn("242,172 sim particles", fake.status)
-        self.assertIn("sample limit 25,000", fake.status)
+        self.assertIn("sample limit 5,000", fake.status)
+
+
+class PreviewStyleTest(unittest.TestCase):
+    def test_set_display_style_clamps_and_redraws(self) -> None:
+        sizes = []
+        widths = []
+        draws = []
+        fake = SimpleNamespace(
+            particle_size=PARTICLE_SIZE_DEFAULT,
+            line_width=LINE_WIDTH_DEFAULT,
+            particle_size_var=SimpleNamespace(set=sizes.append),
+            line_width_var=SimpleNamespace(set=widths.append),
+            _draw_all=lambda: draws.append(True),
+        )
+
+        self.assertTrue(OutputPreview.set_display_style(fake, 99, 0))
+        self.assertEqual(fake.particle_size, PARTICLE_SIZE_MAX)
+        self.assertEqual(fake.line_width, LINE_WIDTH_MIN)
+        self.assertEqual(sizes[-1], PARTICLE_SIZE_MAX)
+        self.assertEqual(widths[-1], LINE_WIDTH_MIN)
+        self.assertEqual(len(draws), 1)
+
+        self.assertFalse(OutputPreview.set_display_style(
+            fake, PARTICLE_SIZE_MAX, LINE_WIDTH_MIN))
+        self.assertEqual(len(draws), 1)
+
+    def test_style_values_reach_canvas_primitives(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        import study_output_preview as preview_module
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            parent = ttk.Frame(root)
+            parent.pack()
+            preview = preview_module.OutputPreview(
+                parent, root, "", lambda: {},
+                particle_size=6, line_width=3)
+            root.update()
+
+            preview.crm_canvas.configure(width=320, height=160)
+            preview.particle_canvas.configure(width=320, height=200)
+            root.update()
+
+            rows = [
+                {"time_s": 0.0, "fill_ratio_mass": 0.1},
+                {"time_s": 1.0, "fill_ratio_mass": 0.2},
+            ]
+            preview.current_time = 0.0
+            preview._draw_timeline(preview.crm_canvas, "CRM", rows,
+                                   preview_module.CRM_SERIES, True)
+            line_widths = [
+                float(preview.crm_canvas.itemcget(item, "width"))
+                for item in preview.crm_canvas.find_all()
+                if preview.crm_canvas.type(item) == "line"
+            ]
+            self.assertTrue(line_widths)
+            self.assertTrue(all(width == 3.0 for width in line_widths))
+
+            preview.particles = [(0.0, 0.0, 0.0, 0, 0)]
+            preview._draw_particles_2d(preview.particle_canvas,
+                                       preview._palette(), 320, 200, None, 0.0)
+            filled = [
+                item for item in preview.particle_canvas.find_all()
+                if preview.particle_canvas.type(item) == "oval"
+                and preview.particle_canvas.itemcget(item, "fill")
+            ]
+            self.assertTrue(filled)
+            coords = preview.particle_canvas.coords(filled[0])
+            self.assertAlmostEqual(coords[2] - coords[0], 6.0)
+        finally:
+            root.destroy()
 
 
 if __name__ == "__main__":

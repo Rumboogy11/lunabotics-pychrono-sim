@@ -88,6 +88,38 @@ local Chrono rebuild was needed.
     --output-dir /tmp/opencode/oneway_fea_d02_default
 ```
 
+### Viewing one-way FEA output
+
+The structural driver writes per-frame deformation VTU files only when
+**Export full 3D FEA stress animation** is enabled in the GUI (or `--export-vtk`
+is passed to the driver). That export was a large fraction of the spiky FEA
+runtime, so it is off by default. The durable scalar history is always
+`fea/summary.csv` (filtered/raw peak von Mises stress, peak deformation, loads,
+work, pose, and timing). `export_study_vtk.py` derives
+`paraview/fea_summary.csv` with MPa/mm units, and `view_study_paraview.py`
+loads it as two lightweight XY charts beside the CRM 3D animation:
+
+```bash
+./chrono-env/bin/python export_study_vtk.py --study-dir Output_my_study
+pvpython view_study_paraview.py Output_my_study/paraview
+```
+
+The viewer derives the table on demand for older studies, so re-running the
+exporter is optional. `--no-fea` hides the charts; `--fea-series COL1,COL2`
+selects other summary columns.
+
+For a full 3D animation, enable the UI toggle before running FEA (wizard
+equivalents: `--fea-export-vtk` and optional `--vtk-stride N`, default `1`).
+The driver writes `fea/vtk/frame_*.vtu` and `fea.pvd` with per-element
+`von_mises_pa`/`von_mises_MPa`, point `Displacement`, `DisplacementMagnitude`,
+and `Deformation_mm`. Every exported frame adds a full stress scan and VTU
+write, so use a stride above 1 for long runs when a sampled animation is
+sufficient; the final frame is always included. Configure ParaView with the
+GUI **Tools** toggle "Load 3D FEA stress/deformation in ParaView" or pass
+`--with-fea`. ParaView warps by `Displacement` and colors by von Mises stress.
+A lone `t=0` VTU frame is deliberately ignored: the exporter/viewer require a
+complete, validated `fea.pvd` before showing 3D stress.
+
 Driver and SPH-coupling fixes applied in the local source/runtime:
 
 - spindle motion is prescribed by Chrono motor constraints with motion functions
@@ -232,12 +264,13 @@ mesh and CRM surface so that axis becomes local +Z for the FEA drivers. Pass
 ```
 
 Route: OpenCASCADE Boolean fusion -> `ShapeUpgrade_UnifySameDomain` ->
-STL triangulation -> topology-preserving quadric decimation ->
-`trimesh.remesh.subdivide_to_size` -> TetGen with `pYQ`. Direct Gmsh 3D
-meshing was abandoned because screw/thread surfaces produce segment/facet
-intersection failures. OpenCASCADE's parallel tessellation mode is enabled by
-default; `--no-occ-parallel` disables it, and `--time-stages` reports time in
-fusion, tessellation, surface processing, TetGen, and output writing.
+STL triangulation -> topology-preserving quadric decimation -> optional
+part-aware interior decimation -> `trimesh.remesh.subdivide_to_size` -> TetGen
+with `pYQ`. Direct Gmsh 3D meshing was abandoned because screw/thread surfaces
+produce segment/facet intersection failures. OpenCASCADE's parallel
+tessellation mode is enabled by default; `--no-occ-parallel` disables it, and
+`--time-stages` reports time in fusion, tessellation, surface processing,
+TetGen, and output writing.
 
 For multi-solid STEP assemblies, add:
 
@@ -253,6 +286,33 @@ watertight and TetGen accepts it. MeshFix is intentionally **not** used by the
 default route: on fused shells it can seal the wrong side and inflate the SPIKEY
 volume by several hundred percent. `--repair-after-decimation` remains as a
 legacy compatibility option.
+
+### Part-aware interior coarsening
+
+The current wizard/GUI enables `--part-aware-simplify` by default for STEP
+models. It classifies the decimated surface by radial distance from the source
+drum axis, extracts the patch wholly inside `--part-aware-radius` (default
+0.05 m), and applies topology-preserving, boundary-fixed `vtkDecimatePro` only
+to that patch. Protected exterior faces are copied unchanged, so the CRM
+contact surface and screw-flight resolution are not reduced. The legacy
+`--repair-after-decimation` route is incompatible; use MeshFix order `none` or
+`before`.
+
+On `geometry/spikey/Assembly 1.step` with
+`--mesh-size 0.02 --surface-target-faces 80000 --surface-max-faces 256000
+--min-solid-volume 1e-05 --hub-radius 0.0357669 --axis Y`, the default
+`--part-aware-reduction 0.75` produced:
+
+| Mesh | Nodes | Tetrahedra | Hub nodes | Volume error |
+|---|---:|---:|---:|---:|
+| Without interior coarsening | 81,606 | 352,278 | 24,174 | 0.442% |
+| With interior coarsening | 62,939 | 252,638 | 5,569 | 0.259% |
+
+The surface-area totals for every outer radial band (`r > 0.05 m`) were
+identical; the area reduction was confined to the rigid hub region. This
+primarily cuts the number of constrained hub multipliers and interior DOFs in
+the direct Pardiso solve. Revalidate peak stresses close to the hub if those
+are design-critical; the outer load-bearing surface is unchanged.
 
 The promoted 8k mesh has:
 

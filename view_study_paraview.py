@@ -6,24 +6,31 @@ Recommended full ParaView GUI (pass the export dir via environment variable):
 
 pvpython render window (stays open until the render window is closed):
     pvpython /path/to/view_study_paraview.py /path/to/study/paraview
-    # legacy FEA stress/deformation overlay, only if an older complete VTK export exists:
+    # optional 3D FEA stress/deformation overlay, when a complete VTK series exists:
     pvpython /path/to/view_study_paraview.py /path/to/study/paraview --with-fea
 
-By default this loads the *non-FEA* CRM animation, as separate pipeline sources
-so each can have its own render settings:
-  - crm_particles.pvd : particle point cloud over time, rendered as 3D spheres
-        sized from the study's SPH spacing/radius and colored by state.
+By default this loads the CRM animation, plus lightweight FEA scalar charts when
+``fea/summary.csv`` is available. CRM series are separate pipeline sources so
+each can have its own render settings:
+  - crm_particles.pvd : particle point cloud over time, rendered as 3D sphere
+        point sprites (glyph fallback) sized from the study's SPH radius and
+        colored by state.
   - excavator.pvd     : rigid excavator/drum surface over time.
 The equivalent combined collection is crm_animation.pvd (also written as the
 backwards-compatible combined.pvd); neither contains FEA data.
 
-The one-way FEA driver no longer writes per-frame deformation VTU files because
-that visualization export dominated FEA runtime.  Scalar FEA histories are in
-fea/summary.csv and in the GUI's Output Preview.  For compatibility, an older,
-complete fea.pvd can still be loaded with --with-fea/--fea-only when it passes
-validation against export_manifest.json (or local validation without a manifest).
-A one-frame/t=0 FEA PVD from a cancelled run is ignored, so it cannot obscure or
-freeze the excavation animation.
+The fast one-way FEA path writes scalar summaries only.  A lightweight XY chart
+of those histories (peak von Mises stress and deformation versus time) is loaded
+alongside the CRM animation whenever ``fea/summary.csv`` exists.  It uses a tiny
+derived table in the export directory and does not require VTK frames.  Use
+--no-fea to suppress it.
+
+The UI's "Export full 3D FEA stress animation" option writes a complete
+per-frame VTU series with von Mises stress and displacement.  Load it with
+--with-fea/--fea-only (or the GUI Tools toggle); it must pass validation against
+export_manifest.json (or local validation without a manifest).  A one-frame/t=0
+FEA PVD from a cancelled run is ignored, so it cannot obscure or freeze the
+excavation animation.
 
 If no argument is given, the script tries ./paraview in the current directory.
 
@@ -44,6 +51,40 @@ import math
 import os
 import sys
 from pathlib import Path
+
+def _script_directory() -> Path:
+    """Find this script's folder under python, pvpython and paraview --script.
+
+    ParaView's ``--script=/path/script.py`` executes the file with ``exec()``
+    and does not define ``__file__``.  Fall back to the script switch itself,
+    the GUI-provided PYCHRONO_ROOT/PYCHRONO_SCRIPT_DIR, and finally the current
+    directory, choosing the first candidate that actually contains the local
+    ``fea_summary`` helper.
+    """
+    candidates: list[Path] = []
+    if "__file__" in globals():
+        candidates.append(Path(__file__).resolve().parent)
+    for arg in sys.argv[1:]:
+        if arg.startswith("--script="):
+            candidates.append(Path(arg.split("=", 1)[1]).expanduser().resolve().parent)
+    for name in ("PYCHRONO_SCRIPT_DIR", "PYCHRONO_ROOT"):
+        value = os.environ.get(name)
+        if value:
+            candidates.append(Path(value).expanduser().resolve())
+    candidates.append(Path.cwd().resolve())
+    for candidate in candidates:
+        if (candidate / "fea_summary.py").is_file():
+            return candidate
+    raise RuntimeError(
+        "Cannot find fea_summary.py; searched: "
+        + ", ".join(str(path) for path in candidates)
+    )
+
+
+# Local helper: derives a compact ParaView table from fea/summary.csv.  It uses
+# only the standard library and is safe to import outside ParaView.
+sys.path.insert(0, str(_script_directory()))
+import fea_summary  # noqa: E402
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -73,6 +114,17 @@ def _env_int(name: str, default: int | None) -> int | None:
         return default
 
 
+def _representation_name(display) -> str:
+    """Read a ParaView Representation property without its StringList quoting."""
+    value = getattr(display, "Representation", "")
+    if not isinstance(value, str):
+        try:
+            value = value[0]
+        except Exception:
+            pass
+    return str(value).strip("'\"")
+
+
 def _parse_args(argv: list[str]):
     # Prefer explicit environment variables (works with `paraview --script=...`).
     env_dir = os.environ.get("PYCHRONO_EXPORT_DIR") or os.environ.get("PYCHRONO_STUDY_DIR")
@@ -91,11 +143,15 @@ def _parse_args(argv: list[str]):
     ap.add_argument("--no-particles", action="store_true")
     ap.add_argument("--no-excavator", action="store_true")
     ap.add_argument("--no-fea", action="store_true",
-                    help="never load FEA (FEA is already excluded by default)")
+                    help="do not load the FEA scalar summary chart or 3D FEA VTK series")
     ap.add_argument("--with-fea", action="store_true",
-                    help="also overlay a validated FEA series on the non-FEA CRM animation")
+                    default=_env_bool("PYCHRONO_WITH_FEA", False),
+                    help="also overlay a validated FEA VTK stress/deformation series on the CRM animation "
+                         "(GUI Tools toggle sets PYCHRONO_WITH_FEA)")
     ap.add_argument("--fea-only", action="store_true",
-                    help="load only the validated FEA series (stress/deformation)")
+                    help="load only FEA outputs (scalar summary chart and any validated VTK series)")
+    ap.add_argument("--fea-series", default=None,
+                    help="comma-separated summary columns to chart (default: peak von Mises stress and deformation)")
     ap.add_argument("--no-interact", action="store_true",
                     help="do not keep the pvpython render window open (batch setups only)")
     # Camera orbit keyframes.  Environment variables are used by the full
@@ -124,7 +180,8 @@ def _parse_args(argv: list[str]):
         args.camera_orbit = _env_bool("PYCHRONO_CAMERA_ORBIT", True)
     # In ParaView GUI script mode the environment variable is authoritative;
     # ParaView's own argv can otherwise be mistaken for a positional directory.
-    in_paraview_gui = ("--script=" in " ".join(argv)
+    in_paraview_gui = (_env_bool("PYCHRONO_PARAVIEW_GUI", False)
+                       or "--script=" in " ".join(argv)
                        or "paraview" in Path(sys.executable).name.lower()
                        or "vtkpython" in Path(sys.executable).name.lower())
     if env_dir and in_paraview_gui:
@@ -245,6 +302,111 @@ def find_valid_fea_pvd(export_dir: Path, manifest: dict) -> tuple[Path | None, s
     if notes:
         return None, "; ".join(notes)
     return None, "no fea.pvd found in the export or study FEA directory"
+
+
+def _fea_y_axis_title(series: list[str]) -> str:
+    if any(name.startswith("max_von_mises") for name in series):
+        return "von Mises stress (MPa)" if any("MPa" in name for name in series) else "von Mises stress (Pa)"
+    return ", ".join(series)
+
+
+def load_fea_summary_charts(export_dir: Path, manifest: dict, render_view,
+                            series_requested: str | None = None):
+    """Load lightweight XY charts of FEA scalar histories.
+
+    This is the default lightweight FEA view when full 3D VTU export is off.
+    It reads only ``fea/summary.csv`` (via a tiny derived table)
+    and creates separate ParaView XY views, so no VTK frames or mesh copy are
+    needed.  Stress/load histories and deformation are split into separate
+    charts because their units and magnitudes differ by orders of magnitude.
+    Returns ``(chart_views, status)``.
+    """
+    summary = fea_summary.ensure_fea_summary_csv(export_dir, manifest)
+    if summary is None:
+        return [], "no usable fea/summary.csv found"
+
+    header, rows = fea_summary.read_summary_rows(summary)
+    if not rows:
+        return [], f"{summary} has no data rows"
+    available = fea_summary.choose_fea_series(header, series_requested)
+    if not available:
+        return [], (f"{summary} has no requested series "
+                    f"(available: {', '.join(header)})")
+
+    try:
+        from paraview.simple import (  # type: ignore
+            AssignViewToLayout, CSVReader, CreateXYPlotView, GetLayout,
+            Render, SetActiveView, Show, UpdatePipeline,
+        )
+    except Exception as exc:
+        return [], f"ParaView XY chart API unavailable: {exc}"
+
+    try:
+        reader = CSVReader(FileName=[str(summary)])
+        try:
+            reader.HaveHeaders = 1
+            reader.DetectNumericColumns = 1
+        except Exception:
+            pass
+        UpdatePipeline(proxy=reader)
+
+        layout = GetLayout()
+        charts: list = []
+        deformation = [name for name in available if name.startswith("max_deformation")]
+        if series_requested:
+            groups = [(available, "One-way FEA selected histories")]
+        else:
+            primary = [name for name in available if name not in deformation]
+            groups = []
+            if primary:
+                groups.append((primary, "One-way FEA scalar history"))
+            if deformation:
+                groups.append((deformation, "One-way FEA deformation history"))
+
+        for names, title in groups:
+            chart = CreateXYPlotView()
+            if layout is not None:
+                try:
+                    AssignViewToLayout(view=chart, layout=layout, hint=1)
+                except Exception:
+                    pass
+            rep = Show(reader, chart)
+            rep.UseIndexForXAxis = 0
+            rep.XArrayName = "time_s" if "time_s" in header else header[0]
+            rep.SeriesVisibility = names
+
+            colors: list[str] = []
+            for name in names:
+                if name.startswith("max_von_mises") and "raw" not in name:
+                    colors.extend([name, "0.89", "0.16", "0.18"])
+                elif name.startswith("max_deformation"):
+                    colors.extend([name, "0.13", "0.51", "0.88"])
+            if colors:
+                try:
+                    rep.SeriesColor = colors
+                except Exception:
+                    pass
+
+            chart.ChartTitle = title
+            chart.BottomAxisTitle = "time (s)"
+            chart.LeftAxisTitle = _fea_y_axis_title(names)
+            chart.ShowLegend = 1
+            try:
+                Render(chart)
+            except Exception:
+                pass
+            charts.append(chart)
+
+        if render_view is not None:
+            try:
+                SetActiveView(render_view)
+            except Exception:
+                pass
+        status = (f"{len(rows)} rows from {summary}; "
+                  f"{len(charts)} chart(s): {', '.join(available)}")
+        return charts, status
+    except Exception as exc:
+        return [], f"could not create FEA summary charts: {exc}"
 
 
 def _orbit_basis():
@@ -376,11 +538,6 @@ def main():
             Render, SetActiveSource, WarpByVector, Glyph, Sphere, _DisableFirstRenderCameraReset,
             GetAnimationScene, UpdatePipeline,
         )
-        try:
-            from paraview.simple import PointGaussian  # noqa
-            has_point_gaussian = True
-        except Exception:
-            has_point_gaussian = False
     except Exception as exc:
         print(f"[view_study_paraview] ParaView Python modules not available: {exc}")
         print("  Run with: pvpython view_study_paraview.py <export_dir>")
@@ -398,17 +555,21 @@ def main():
     print(f"[view_study_paraview] export dir: {export_dir}")
     print(f"[view_study_paraview] manifest: {manifest or '(none)'}")
 
-    want_fea = (args.with_fea or args.fea_only) and not args.no_fea
+    include_fea = not args.no_fea
+    want_3d_fea = include_fea and (args.with_fea or args.fea_only)
     want_crm = not args.fea_only
-    if args.fea_only:
-        active_series = "FEA only (validated series)"
-    elif want_fea:
-        active_series = "CRM animation (non-FEA) + validated FEA overlay"
+    if args.no_fea:
+        active_series = "CRM animation only (FEA excluded)"
+    elif args.fea_only:
+        active_series = "FEA only (scalar summary chart + validated 3D FEA VTK when available)"
+    elif want_3d_fea:
+        active_series = ("CRM animation + FEA scalar chart (when available) "
+                         "+ 3D FEA stress overlay requested")
     else:
-        active_series = "CRM animation (non-FEA; FEA excluded)"
+        active_series = "CRM animation + FEA scalar chart (when available)"
     print(f"[view_study_paraview] active series: {active_series}")
     print("  PVD files: crm_particles.pvd + excavator.pvd = crm_animation.pvd (aka combined.pvd); "
-          "fea.pvd/with_fea.pvd only when FEA export is valid")
+          "fea.pvd/with_fea.pvd only when a complete FEA VTK export is valid")
 
     # disable auto camera reset on first show so multiple sources compose
     try:
@@ -454,66 +615,93 @@ def main():
             particle_radius = default_radius
 
         particle_display_src = particles
-        if args.particle_style == "spheres":
-            try:
-                sphere = Sphere()
-                sphere.Radius = particle_radius
-                # Small default glyphs do not need high tessellation; fewer
-                # triangles make large particle frames much cheaper to draw.
-                for attr, value in (("ThetaResolution", 6), ("PhiResolution", 4)):
-                    try:
-                        setattr(sphere, attr, value)
-                    except Exception:
-                        pass
-                glyph = Glyph(Input=particles, GlyphType=sphere)
-                glyph.GlyphMode = 'All Points'
-                for attr, value in (('ScaleMode', 'data_scaling_off'), ('ScaleFactor', 1.0)):
-                    try:
-                        setattr(glyph, attr, value)
-                    except Exception:
-                        pass
-                try:
-                    glyph.ScaleArray = ['POINTS', 'No scale array']
-                except Exception:
-                    pass
-                try:
-                    glyph.Orient = 0
-                except Exception:
-                    pass
-                try:
-                    UpdatePipeline(proxy=glyph)
-                except Exception:
-                    pass
-                particle_display_src = glyph
-                print(f"  particles: rendered as 3D spheres (radius={particle_radius:g} m)")
-            except Exception as e:
-                print(f"  particles: sphere glyph unavailable ({e}); falling back to point display")
-                particle_display_src = particles
+        disp = Show(particles, view)
+        # These are large analysis overlays, not interactive geometry.  Keep
+        # them out of the GUI picker so it does not build expensive OBB trees.
+        try:
+            disp.Pickable = 0
+        except Exception:
+            pass
 
-        disp = Show(particle_display_src, view)
-        if particle_display_src is particles:
+        if args.particle_style == "spheres":
+            # Prefer GPU point sprites.  A CRM frame can contain hundreds of
+            # thousands of points; a sphere glyph expands each one into many
+            # cells, which is slow and can make ParaView's GUI picker emit
+            # vtkMath::Jacobi warnings while building OBBs.  Try the actual
+            # representation property first: PointGaussian is not importable
+            # as a proxy in every ParaView build even when the representation
+            # itself is supported.
             try:
-                if args.particle_style == "points":
-                    disp.Representation = 'Points'
-                    disp.PointSize = 4.0
-                elif has_point_gaussian:
-                    disp.Representation = 'Point Gaussian'
-                    disp.GaussianRadius = particle_radius
-                    try:
-                        disp.ShaderPreset = 'Sphere'
-                    except Exception:
-                        pass
-                else:
-                    disp.Representation = 'Points'
-                    disp.PointSize = 4.0
-            except Exception:
+                disp.Representation = 'Point Gaussian'
+                disp.GaussianRadius = particle_radius
                 try:
-                    disp.Representation = 'Surface'
+                    disp.ShaderPreset = 'Sphere'
                 except Exception:
                     pass
+                if _representation_name(disp) != 'Point Gaussian':
+                    raise RuntimeError('representation was not accepted')
+                print(f"  particles: rendered as 3D spheres via point sprites "
+                      f"(radius={particle_radius:g} m)")
+            except Exception as e:
+                print(f"  particles: point sprites unavailable ({e}); using sphere glyphs")
+                try:
+                    sphere = Sphere()
+                    sphere.Radius = particle_radius
+                    # Small fallback glyphs do not need high tessellation.
+                    for attr, value in (("ThetaResolution", 6), ("PhiResolution", 4)):
+                        try:
+                            setattr(sphere, attr, value)
+                        except Exception:
+                            pass
+                    glyph = Glyph(Input=particles, GlyphType=sphere)
+                    glyph.GlyphMode = 'All Points'
+                    for attr, value in (('ScaleMode', 'data_scaling_off'), ('ScaleFactor', 1.0)):
+                        try:
+                            setattr(glyph, attr, value)
+                        except Exception:
+                            pass
+                    try:
+                        glyph.ScaleArray = ['POINTS', 'No scale array']
+                    except Exception:
+                        pass
+                    try:
+                        glyph.Orient = 0
+                    except Exception:
+                        pass
+                    try:
+                        UpdatePipeline(proxy=glyph)
+                    except Exception:
+                        pass
+                    glyph_disp = Show(glyph, view)
+                    try:
+                        glyph_disp.Pickable = 0
+                    except Exception:
+                        pass
+                    try:
+                        glyph_disp.Representation = 'Surface'
+                    except Exception:
+                        pass
+                    particle_display_src = glyph
+                    disp = glyph_disp
+                    print(f"  particles: rendered as sphere glyphs (radius={particle_radius:g} m)")
+                except Exception as ge:
+                    print(f"  particles: sphere glyph unavailable ({ge}); using points")
+                    particle_display_src = particles
+                    disp = Show(particles, view)
+                    try:
+                        disp.Pickable = 0
+                    except Exception:
+                        pass
+                    try:
+                        disp.Representation = 'Points'
+                        disp.PointSize = 4.0
+                    except Exception:
+                        pass
         else:
             try:
-                disp.Representation = 'Surface'
+                disp.Representation = 'Points'
+                disp.PointSize = 4.0
+                print("  particles: rendered as points (size 4 px)")
             except Exception:
                 pass
 
@@ -559,6 +747,10 @@ def main():
             pass
         disp = Show(excav, view)
         try:
+            disp.Pickable = 0
+        except Exception:
+            pass
+        try:
             disp.Representation = 'Surface'
             disp.Opacity = 0.85
             # neutral color to distinguish from particles/FEA
@@ -570,10 +762,21 @@ def main():
         SetActiveSource(excav)
         sources_shown.append(('excavator', excav))
 
-    # --- FEA (stress + deformation), opt-in and validated ---
+    # --- FEA scalar summary chart (supported replacement for per-frame VTU) ---
+    fea_charts: list = []
+    fea_summary_status = "FEA excluded by --no-fea"
+    if include_fea:
+        fea_charts, fea_summary_status = load_fea_summary_charts(
+            export_dir, manifest, view, args.fea_series)
+        if fea_charts:
+            print(f"  loading FEA summary chart(s) ({fea_summary_status})")
+        else:
+            print(f"  FEA summary chart: not loaded ({fea_summary_status})")
+
+    # --- Full 3D FEA deformation/stress VTK series, opt-in and validated ---
     fea_pvd = None
     fea_status = ""
-    if want_fea:
+    if want_3d_fea:
         fea_pvd, fea_status = find_valid_fea_pvd(export_dir, manifest)
     if fea_pvd is not None:
         print(f"  loading FEA ({fea_status}): {fea_pvd}")
@@ -668,15 +871,16 @@ def main():
                 pass
         SetActiveSource(disp_source)
         sources_shown.append(('fea', disp_source))
-    elif want_fea:
-        print(f"  FEA: not loaded ({fea_status}). One-way FEA deformation VTU export is disabled; "
-              "scalar FEA histories are in fea/summary.csv and the GUI Output Preview.")
-    elif not args.no_fea:
-        print("  FEA: excluded from the default non-FEA series. Use --with-fea only to overlay a "
-              "legacy, validated FEA VTK export.")
+    elif want_3d_fea:
+        print(f"  FEA VTK: not loaded ({fea_status}). Enable 'Export full 3D FEA stress animation' "
+              "in the UI and rerun FEA, or use an older complete fea.pvd; scalar charts remain available.")
+    elif include_fea:
+        print("  FEA VTK: excluded. Use --with-fea (or the GUI Tools toggle) to overlay a validated "
+              "3D FEA stress series; the scalar summary chart does not need VTK frames.")
 
-    if not sources_shown:
-        print("[view_study_paraview] nothing loaded. Expected crm_particles.pvd/excavator.pvd/fea.pvd in", export_dir)
+    if not sources_shown and not fea_charts:
+        print("[view_study_paraview] nothing loaded. Expected crm_particles.pvd/excavator.pvd, "
+              "or fea/summary.csv in", export_dir)
         return 1
 
     try:
@@ -722,13 +926,18 @@ def main():
     print(f"  - Active series: {active_series}")
     print("  - Particles: non-FEA source rendered as 3D spheres (toggle/scale in Pipeline Browser if needed).")
     print("  - Excavator: non-FEA rigid surface source with its own render settings; poses come from CRM summary.")
-    if fea_pvd is not None:
-        print("  - FEA: validated overlay, colored by von Mises stress and warped by displacement by default. "
-              "Adjust warp 'Scale Factor' to exaggerate deformation.")
-    elif want_fea:
-        print("  - FEA: no valid series loaded; the non-FEA animation remains available without FEA.")
+    if fea_charts:
+        print("  - FEA: scalar XY chart(s) in separate view(s) (peak von Mises stress/load history and "
+              "deformation vs time). Use --fea-series to choose other columns; --no-fea suppresses it.")
+    elif args.no_fea:
+        print("  - FEA: excluded by --no-fea.")
     else:
-        print("  - FEA: excluded by default. --with-fea only applies to legacy validated VTK exports.")
+        print(f"  - FEA: no scalar summary available ({fea_summary_status}).")
+    if fea_pvd is not None:
+        print("  - FEA 3D VTK: validated stress/deformation series, colored by von Mises stress and warped by "
+              "displacement by default. Adjust warp 'Scale Factor' to exaggerate deformation.")
+    elif want_3d_fea:
+        print("  - FEA 3D VTK: no valid series loaded; the scalar chart and non-FEA animation remain available.")
     print("  - Use time controls to animate; if particles obscure geometry, adjust opacity/visibility per source.")
 
     # pvpython exits as soon as this script returns unless an interactive render
@@ -746,7 +955,8 @@ def main():
 
 
 if __name__ == "__main__":
-    in_paraview_gui = ("--script=" in " ".join(sys.argv)
+    in_paraview_gui = (_env_bool("PYCHRONO_PARAVIEW_GUI", False)
+                       or "--script=" in " ".join(sys.argv)
                        or "paraview" in Path(sys.executable).name.lower()
                        or "vtkpython" in Path(sys.executable).name.lower())
     if in_paraview_gui:

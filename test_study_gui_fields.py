@@ -8,17 +8,35 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("PYCHRONO_GUI_NO_REEXEC", "1")
 
 
-class WizardCadenceFieldsTest(unittest.TestCase):
-    def test_preview_particle_sample_default_is_25000(self) -> None:
+class IsolatedGuiDefaultsTest(unittest.TestCase):
+    """Keep user-saved GUI defaults from leaking into regression tests."""
+
+    def setUp(self) -> None:
         import study_gui as gui
 
-        self.assertEqual(gui.SHIPPED_SETTINGS["preview_particle_limit"], 25000)
+        self._tmp = tempfile.TemporaryDirectory(prefix="gui_defaults_", dir="/tmp/opencode")
+        self._original_defaults = gui.DEFAULT_FILE
+        gui.DEFAULT_FILE = Path(self._tmp.name) / "defaults.json"
+
+    def tearDown(self) -> None:
+        import study_gui as gui
+
+        gui.DEFAULT_FILE = self._original_defaults
+        self._tmp.cleanup()
+
+
+class WizardCadenceFieldsTest(IsolatedGuiDefaultsTest):
+    def test_preview_particle_sample_default_is_5000(self) -> None:
+        import study_gui as gui
+
+        self.assertEqual(gui.SHIPPED_SETTINGS["preview_particle_limit"], 5000)
 
     def test_particle_fps_is_editable_next_to_crm_summary_fps(self) -> None:
         import tkinter as tk
@@ -52,6 +70,340 @@ class WizardCadenceFieldsTest(unittest.TestCase):
                 self.assertEqual(crm_cmd[crm_cmd.index("--particle-fps") + 1], "20")
         finally:
             root.destroy()
+
+    def test_part_aware_interior_coarsening_is_editable_and_default_on(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+            self.assertTrue(app._gb("part_aware_simplify"))
+
+            def descendants(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descendants(child)
+
+            geom_page = app.pages[1]  # "2. Geometry and mesh inputs"
+            labels = [child.cget("text") for child in descendants(geom_page)
+                      if isinstance(child, (tk.Label, ttk.Label))]
+            self.assertIn("Coarsen hub/interior mesh", labels)
+            self.assertIn("Interior coarsen radius (m)", labels)
+            self.assertIn("Interior reduction", labels)
+            self.assertIn("Exterior fit tolerance (m)", labels)
+
+            with tempfile.TemporaryDirectory(prefix="meshflags_", dir="/tmp/opencode") as tmp:
+                app.vars["geometry"].set("step")
+                app.vars["output_dir"].set(tmp)
+                app.vars["step_file"].set(str(ROOT / "geometry" / "spikey" / "Assembly 1.step"))
+                app.vars["surface_repair_order"].set("none")
+                app.vars["surface_target_faces"].set("8000")
+                app.vars["surface_fit_tolerance"].set("0.0015")
+                app.vars["part_aware_simplify"].set(True)
+                app.vars["part_aware_radius"].set("0.06")
+                app.vars["part_aware_reduction"].set("0.8")
+                app.vars["part_aware_min_faces"].set("400")
+                cfg = app._collect_cfg()
+                steps = gui.wiz.build_commands(cfg)
+                mesh_cmd = next(s["command"] for s in steps if s["name"] == "generate-FEA-mesh")
+                self.assertEqual(cfg["surface_fit_tolerance"], 0.0015)
+                self.assertIn("--part-aware-simplify", mesh_cmd)
+                self.assertEqual(mesh_cmd[mesh_cmd.index("--surface-target-faces") + 1], "8000")
+                self.assertEqual(mesh_cmd[mesh_cmd.index("--surface-fit-tolerance") + 1], "0.0015")
+                self.assertEqual(mesh_cmd[mesh_cmd.index("--part-aware-radius") + 1], "0.06")
+                self.assertEqual(mesh_cmd[mesh_cmd.index("--part-aware-reduction") + 1], "0.8")
+                self.assertEqual(mesh_cmd[mesh_cmd.index("--part-aware-min-faces") + 1], "400")
+        finally:
+            root.destroy()
+
+
+class SurfaceFitToleranceFieldTest(unittest.TestCase):
+    def test_defaults_use_measured_one_millimetre_fit(self) -> None:
+        import study_gui as gui
+        import study_wizard as wiz
+
+        self.assertEqual(gui.shipped_defaults()["surface_fit_tolerance"], "0.001")
+        self.assertEqual(
+            wiz.geometry_defaults(None, auto=False)["surface_fit_tolerance"], 0.001
+        )
+
+    def test_wizard_config_and_mesh_command_carry_fit_tolerance(self) -> None:
+        import study_wizard as wiz
+
+        step = ROOT / "geometry" / "spikey" / "Assembly 1.step"
+        with tempfile.TemporaryDirectory(prefix="surface_fit_", dir="/tmp/opencode") as tmp:
+            args = wiz.build_parser().parse_args([
+                "--geometry", "step",
+                "--step-file", str(step),
+                "--output-dir", tmp,
+                "--surface-target-faces", "8000",
+                "--surface-fit-tolerance", "0.002",
+                "--dry-run",
+            ])
+            cfg = wiz.collect_settings(args)
+            self.assertEqual(cfg["surface_fit_tolerance"], 0.002)
+            steps = wiz.build_commands(cfg)
+            mesh_cmd = next(s["command"] for s in steps if s["name"] == "generate-FEA-mesh")
+            self.assertEqual(mesh_cmd[mesh_cmd.index("--surface-target-faces") + 1], "8000")
+            self.assertEqual(mesh_cmd[mesh_cmd.index("--surface-fit-tolerance") + 1], "0.002")
+
+
+class Full3dFeaToggleTest(IsolatedGuiDefaultsTest):
+    def test_full_3d_fea_export_is_off_by_default(self) -> None:
+        import study_gui as gui
+
+        self.assertFalse(gui.shipped_defaults()["fea_export_vtk"])
+        self.assertEqual(gui.shipped_defaults()["fea_vtk_stride"], "1")
+
+    def test_export_and_viewer_toggles_are_editable(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+            self.assertFalse(app._gb("fea_export_vtk"))
+            self.assertTrue(app.tools_show_fea_3d.get())
+
+            def descendants(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descendants(child)
+
+            export_page = app.pages[4]  # "5. Output & Export"
+            labels = [child.cget("text") for child in descendants(export_page)
+                      if isinstance(child, (tk.Label, ttk.Label))]
+            self.assertIn("Export full 3D FEA stress animation", labels)
+            self.assertIn("FEA VTU frame stride", labels)
+
+            tool_labels = [child.cget("text") for child in descendants(app.tools_tab)
+                           if isinstance(child, (tk.Label, ttk.Checkbutton))]
+            self.assertIn("Load 3D FEA stress/deformation in ParaView (if valid)", tool_labels)
+
+            with tempfile.TemporaryDirectory(prefix="vtk_toggle_", dir="/tmp/opencode") as tmp:
+                app.vars["output_dir"].set(tmp)
+                app.vars["fea_export_vtk"].set(True)
+                app.vars["fea_vtk_stride"].set("3")
+                cfg = app._collect_cfg()
+                steps = gui.wiz.build_commands(cfg)
+                fea_cmd = next(s["command"] for s in steps if s["name"] == "one-way-FEA")
+                self.assertIn("--export-vtk", fea_cmd)
+                self.assertEqual(fea_cmd[fea_cmd.index("--vtk-stride") + 1], "3")
+
+                app.vars["fea_export_vtk"].set(False)
+                cfg = app._collect_cfg()
+                steps = gui.wiz.build_commands(cfg)
+                fea_cmd = next(s["command"] for s in steps if s["name"] == "one-way-FEA")
+                self.assertNotIn("--export-vtk", fea_cmd)
+                self.assertNotIn("--vtk-stride", fea_cmd)
+        finally:
+            root.destroy()
+
+
+class ParaViewFeaLoadTest(IsolatedGuiDefaultsTest):
+    def test_paraview_button_requests_fea_without_manifest(self) -> None:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+            self.assertTrue(app.tools_show_fea_3d.get())
+            with tempfile.TemporaryDirectory(prefix="pv_fea_", dir="/tmp/opencode") as tmp:
+                app.tools_study_dir.set(tmp)
+                calls = []
+
+                class FakeProc:
+                    stdout = None
+
+                def fake_popen(cmd, **kwargs):
+                    calls.append((cmd, kwargs))
+                    return FakeProc()
+
+                with patch.object(gui.shutil, "which",
+                                  side_effect=lambda name: None if name == "paraview" else "/usr/bin/pvpython"), \
+                     patch.object(gui.subprocess, "Popen", fake_popen), \
+                     patch.object(gui.threading, "Thread"):
+                    app._tool_paraview()
+                self.assertTrue(calls)
+                self.assertEqual(calls[0][1]["env"]["PYCHRONO_WITH_FEA"], "1")
+        finally:
+            root.destroy()
+
+
+class WizardParaViewLaunchTest(IsolatedGuiDefaultsTest):
+    def test_after_run_launch_requests_fea_and_marks_gui_mode(self) -> None:
+        import study_wizard as wiz
+
+        with tempfile.TemporaryDirectory(prefix="wiz_pv_", dir="/tmp/opencode") as tmp:
+            study_dir = Path(tmp)
+            paraview_dir = study_dir / "paraview"
+            paraview_dir.mkdir()
+            calls = []
+
+            def fake_popen(cmd, **kwargs):
+                calls.append((cmd, kwargs))
+                return type("Proc", (), {})()
+
+            with patch.object(wiz.shutil, "which", return_value="/usr/bin/paraview"), \
+                 patch.object(wiz.subprocess, "Popen", fake_popen):
+                ok = wiz.launch_paraview_viewer(
+                    ROOT / "view_study_paraview.py", paraview_dir, study_dir)
+            self.assertTrue(ok)
+            self.assertTrue(calls)
+            env = calls[0][1]["env"]
+            self.assertEqual(env["PYCHRONO_WITH_FEA"], "1")
+            self.assertEqual(env["PYCHRONO_PARAVIEW_GUI"], "1")
+            self.assertEqual(env["PYCHRONO_EXPORT_DIR"], str(paraview_dir))
+            self.assertEqual(env["PYCHRONO_SCRIPT_DIR"], str(ROOT))
+
+
+class MeshPreviewToolTest(IsolatedGuiDefaultsTest):
+    def test_preview_uses_the_full_run_mesher_then_geometry_comparison(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+
+            def descendants(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descendants(child)
+
+            labels = [
+                child.cget("text") for child in descendants(app.tools_tab)
+                if isinstance(child, (tk.Label, ttk.Label, ttk.Button))
+            ]
+            self.assertIn("Preview STEP mesh (full-run mesher + comparison)", labels)
+
+            with tempfile.TemporaryDirectory(prefix="mesh_preview_", dir="/tmp/opencode") as tmp:
+                step = Path(tmp) / "Assembly 1.step"
+                step.write_text("not parsed by this test")
+                app.vars["geometry"].set("step")
+                app.vars["step_file"].set(str(step))
+                app.vars["cad_axis"].set("Y")
+                mesh = app._mesh_settings()
+                prefix = ROOT / "geometry_checks" / "mesh_preview" / f"{step.stem}_fea"
+                expected = app._mesh_command(prefix, step, mesh)
+
+                self.assertEqual(expected[0], str(ROOT / "chrono-env" / "bin" / "python"))
+                self.assertEqual(expected[1], str(ROOT / "step_to_chrono_fea.py"))
+                self.assertEqual(expected[expected.index("--surface-target-faces") + 1], "8000")
+                self.assertEqual(expected[expected.index("--surface-fit-tolerance") + 1], "0.001")
+                self.assertIn("--part-aware-simplify", expected)
+
+                captured = {}
+
+                def fake_run(cmd, **kwargs):
+                    captured.update(cmd=cmd, **kwargs)
+
+                with patch.object(app, "_run_tool_cmd", fake_run):
+                    app._tool_mesh_preview()
+                self.assertEqual(captured["cmd"], expected)
+                self.assertEqual(captured["label"], "mesh-preview")
+
+                node = Path(app._mesh_preview_node)
+                node.parent.mkdir(parents=True, exist_ok=True)
+                node.write_text("stub")
+                popen_calls = []
+
+                def fake_popen(cmd, **kwargs):
+                    popen_calls.append((cmd, kwargs))
+                    return type("Proc", (), {})()
+
+                with patch.object(gui.subprocess, "Popen", fake_popen):
+                    app._launch_mesh_comparison()
+                self.assertTrue(popen_calls)
+                compare_cmd = popen_calls[0][0]
+                self.assertEqual(compare_cmd[1], str(ROOT / "view_geometry.py"))
+                self.assertEqual(compare_cmd[compare_cmd.index("--step") + 1], str(step))
+                self.assertEqual(compare_cmd[compare_cmd.index("--fea-node") + 1], str(node))
+                self.assertIn("--show", compare_cmd)
+        finally:
+            root.destroy()
+
+
+class ScrollFrameWheelTest(unittest.TestCase):
+    def test_wheel_over_child_widget_scrolls_page(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            frame = gui.ScrollFrame(root, width=120, height=80)
+            frame.pack()
+            for i in range(60):
+                ttk.Label(frame.inner, text=f"row {i}").grid(row=i, column=0, sticky="w")
+            root.update()  # lets after_idle install bindings and lays out scrollregion
+
+            labels = [child for child in frame.inner.winfo_children()
+                      if isinstance(child, ttk.Label)]
+            label = labels[10]
+            self.assertIn(frame._wheel_tag, label.bindtags())
+
+            start = frame.canvas.yview()[0]
+            label.event_generate("<Button-5>")  # X11 wheel down
+            root.update()
+            self.assertGreater(frame.canvas.yview()[0], start)
+
+            label.event_generate("<MouseWheel>", delta=-120)  # Windows/macOS wheel down
+            root.update()
+            after_two = frame.canvas.yview()[0]
+            self.assertGreater(after_two, start)
+
+            label.event_generate("<Button-4>")  # wheel up
+            root.update()
+            self.assertLess(frame.canvas.yview()[0], after_two)
+
+            # Extra wheel-up events must never drift above the first row.
+            for _ in range(30):
+                label.event_generate("<Button-4>")
+            root.update()
+            self.assertEqual(frame.canvas.yview()[0], 0.0)
+        finally:
+            root.destroy()
+
+
+class PreviewStyleSettingsTest(unittest.TestCase):
+    def test_style_defaults_are_shipped(self) -> None:
+        import study_gui as gui
+
+        self.assertEqual(gui.SHIPPED_SETTINGS["preview_particle_size"], 2)
+        self.assertEqual(gui.SHIPPED_SETTINGS["preview_line_width"], 1)
+
+    def test_style_settings_round_trip(self) -> None:
+        import study_gui as gui
+
+        original = gui.SETTINGS_FILE
+        try:
+            with tempfile.TemporaryDirectory(prefix="preview_style_", dir="/tmp/opencode") as tmp:
+                gui.SETTINGS_FILE = Path(tmp) / "settings.json"
+                values = dict(gui.SHIPPED_SETTINGS)
+                values["preview_particle_size"] = 7
+                values["preview_line_width"] = 4
+                gui.write_ui_settings(values)
+                loaded = gui.load_ui_settings()
+                self.assertEqual(loaded["preview_particle_size"], 7)
+                self.assertEqual(loaded["preview_line_width"], 4)
+        finally:
+            gui.SETTINGS_FILE = original
 
 
 if __name__ == "__main__":

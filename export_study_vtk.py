@@ -20,10 +20,11 @@ or stale animation behind.
       <out>/combined.pvd is written with the same content for backwards
       compatibility. Neither file ever includes FEA data.
 
-The one-way FEA driver no longer writes per-frame deformation VTU files; that
-visualization export dominated FEA runtime. Scalar FEA histories remain in
-<fea>/summary.csv and are displayed by the GUI's Output Preview. For backwards
-compatibility, a *legacy complete* VTK export is still accepted:
+The fast one-way FEA path writes scalar summaries only. Scalar FEA histories
+remain in <fea>/summary.csv and are displayed by the GUI's Output Preview. A
+compact <out>/fea_summary.csv is derived from it with MPa/mm units and is loaded
+as an XY chart by view_study_paraview.py. When the UI's full 3D FEA stress option
+is enabled, the driver also writes:
   <fea>/vtk/frame_*.vtu  and  <fea>/vtk/fea.pvd
 with point data (Displacement, DisplacementMagnitude) and cell data
 (von_mises_pa, von_mises_MPa). A validated copy is written to <out>/fea.pvd and
@@ -36,9 +37,9 @@ Typical use::
     ./chrono-env/bin/python export_study_vtk.py \
         --study-dir Output_study_20261119_144040
 
-    # then in ParaView (recommended, non-FEA by default):
+    # then in ParaView: CRM animation + FEA scalar charts when available
     pvpython /path/to/view_study_paraview.py Output_study_20261119_144040/paraview
-    # legacy FEA overlay, only when an older complete VTK export exists:
+    # 3D FEA stress overlay, only when a complete VTK series exists:
     pvpython /path/to/view_study_paraview.py Output_study_20261119_144040/paraview --with-fea
     # or ParaView GUI:
     # PYCHRONO_EXPORT_DIR=Output_study_20261119_144040/paraview paraview --script=/path/to/view_study_paraview.py
@@ -68,6 +69,9 @@ import numpy as np
 
 # Prefer vendored/conda env when run directly.
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+import fea_summary  # noqa: E402
+
 _VENV_PYTHON = ROOT / "chrono-env" / "bin" / "python"
 _REEXEC = "PYCHRONO_EXPORT_STUDY_VTK"
 if (
@@ -709,7 +713,22 @@ def main() -> int:
         remove_if_exists(animation)
         remove_if_exists(combined)
 
-    # FEA is opt-in and only when its PVD looks like a completed run.
+    # FEA scalar summary: always regenerate the tiny viewer table from the
+    # driver's CSV.  The deformation VTK series below remains opt-in.
+    fea_summary_source = fea_dir / "summary.csv"
+    fea_summary_out = out_dir / "fea_summary.csv"
+    has_fea_summary = (fea_summary_source.is_file()
+                       and fea_summary.write_fea_summary_csv(fea_summary_source, fea_summary_out))
+    if has_fea_summary:
+        print(f"  fea summary: {fea_summary_source.name} -> {fea_summary_out} (MPa/mm XY chart)")
+    else:
+        remove_if_exists(fea_summary_out)
+        if fea_summary_source.is_file():
+            print(f"  fea summary: {fea_summary_source} has no usable FEA scalar columns")
+        else:
+            print(f"  fea summary: no {fea_summary_source} (scalar FEA view unavailable)")
+
+    # Full 3D FEA stress/deformation VTK is opt-in and must look complete.
     fea_source = fea_dir / "vtk" / "fea.pvd"
     fea_valid, fea_status, fea_entries = validate_fea_pvd(
         fea_source, info["study_cfg"], fea_dir)
@@ -718,16 +737,16 @@ def main() -> int:
     if fea_valid:
         write_pvd([(t, str(p)) for t, p in fea_entries], fea_export)
         write_combined_pvd(crm_parts + [("fea", fea_export)], with_fea)
-        print(f"  fea: {fea_status} -> {fea_export} (+ {with_fea})")
+        print(f"  fea 3D VTK: {fea_status} -> {fea_export} (+ {with_fea})")
     else:
         # A previously valid export must not survive a later cancelled run.
         remove_if_exists(fea_export)
         remove_if_exists(with_fea)
         if fea_source.is_file():
-            print(f"  fea: ignoring {fea_source} ({fea_status}); non-FEA series is unaffected")
+            print(f"  fea 3D VTK: ignoring {fea_source} ({fea_status}); scalar charts remain available")
         else:
-            print(f"  fea: no VTK export found at {fea_source} "
-                  "(FEA deformation VTU export is disabled; scalar summaries remain in fea/summary.csv)")
+            print(f"  fea 3D VTK: no complete series at {fea_source} "
+                  "(enable 'Export full 3D FEA stress animation' and rerun FEA to create one)")
 
     def series_name(name: str) -> str | None:
         return name if (out_dir / name).is_file() else None
@@ -753,10 +772,18 @@ def main() -> int:
             "fea": series_name("fea.pvd") if fea_valid else None,
             "with_fea": series_name("with_fea.pvd") if fea_valid else None,
             "fea_source": str(fea_source.resolve()) if fea_source.is_file() else None,
+            "fea_summary": series_name("fea_summary.csv") if has_fea_summary else None,
+            "fea_summary_source": (str(fea_summary_source.resolve())
+                                   if has_fea_summary else None),
         },
         "has_particles": bool(crm_parts and crm_parts[0][0] == "crm_particles"),
         "has_excavator": bool(crm_parts and any(name == "excavator" for name, _ in crm_parts)),
-        "has_fea_vtk": fea_source.is_file(),
+        "has_fea_vtk_source": fea_source.is_file(),
+        "has_fea_vtk": bool(fea_valid),
+        "has_fea_summary": bool(has_fea_summary),
+        "fea_3d_requested": bool(info["study_cfg"].get("fea_export_vtk")),
+        "fea_3d_valid_frames": len(fea_entries) if fea_valid else 0,
+        "fea_3d_last_t_s": fea_entries[-1][0] if fea_valid else None,
         "fea_valid": fea_valid,
         "fea_status": fea_status,
     }
@@ -764,9 +791,11 @@ def main() -> int:
     print(f"  manifest: {out_dir / 'export_manifest.json'}")
     print("Done. Open in ParaView, e.g.:")
     print(f"  paraview {combined}")
-    print("  # recommended (non-FEA CRM animation; FEA excluded by default):")
+    print("  # CRM animation + lightweight FEA scalar charts when summary.csv exists:")
     print(f"  pvpython {ROOT / 'view_study_paraview.py'} {out_dir}")
-    print("  # legacy FEA overlay, only when an older complete VTK export exists:")
+    print("  # suppress all FEA views:")
+    print(f"  pvpython {ROOT / 'view_study_paraview.py'} {out_dir} --no-fea")
+    print("  # 3D FEA stress overlay, only when a complete VTK series exists:")
     print(f"  pvpython {ROOT / 'view_study_paraview.py'} {out_dir} --with-fea")
     return 0
 

@@ -280,6 +280,7 @@ def geometry_defaults(measured: dict[str, float | int] | None,
         # a very large starting target creates sliver tetrahedra that make the
         # FEA stiffness matrix ill-conditioned.
         "surface_target_faces": 8000,
+        "surface_fit_tolerance": 0.001,
         "min_solid_volume": 1.0e-5 if n_solids > 1 else 0.0,
         "mesh_size": clean(mesh_size),
         "bed_height": clean(bed_height),
@@ -293,6 +294,262 @@ def geometry_defaults(measured: dict[str, float | int] | None,
         "lowering_duration": clean(bed_height / descent_speed),
         "scale": clean(scale),
     }
+
+
+class StudyConfigError(ValueError):
+    """Raised when editable study fields disagree with the CAD/mesh being used."""
+
+
+_GEOMETRY_MEASURE_CACHE: dict[tuple, dict[str, float | int] | None] = {}
+
+
+def _measure_geometry_via_chrono_env(path: Path, *, is_step: bool, axis: str,
+                                     unit_scale: float,
+                                     metadata: dict[str, Any] | None = None
+                                     ) -> dict[str, float | int] | None:
+    """Fallback for callers (notably the Tk GUI) without OCP/trimesh installed.
+
+    The GUI deliberately runs under system Python for display scaling, so direct
+    STEP/OBJ measurement is unavailable there.  Delegate to the same project
+    environment used by every generated command instead of silently skipping the
+    geometry checks.
+    """
+    env_py = (ROOT / "chrono-env" / "bin" / "python").resolve()
+    if not env_py.is_file():
+        return None
+    try:
+        if Path(sys.executable).resolve() == env_py:
+            return None
+    except OSError:
+        pass
+
+    code = r"""
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+sys.path.insert(0, str(root / "crm"))
+import study_wizard as wiz
+
+path = Path(sys.argv[2])
+is_step = sys.argv[3] == "1"
+axis = sys.argv[4]
+unit_scale = float(sys.argv[5])
+metadata = json.loads(sys.argv[6]) if sys.argv[6] != "none" else None
+result = wiz.measure_geometry(
+    path, is_step=is_step, axis=axis, unit_scale=unit_scale, metadata=metadata
+)
+print(json.dumps({"measured": result}, default=float))
+"""
+    meta_json = json.dumps(metadata, sort_keys=True, default=str) if metadata else "none"
+    try:
+        run = subprocess.run(
+            [str(env_py), "-c", code, str(ROOT), str(path), "1" if is_step else "0",
+             axis, f"{unit_scale:g}", meta_json],
+            cwd=ROOT, capture_output=True, text=True, timeout=180,
+        )
+        if run.returncode != 0 or not run.stdout.strip():
+            return None
+        data = json.loads(run.stdout.strip().splitlines()[-1])
+        measured = data.get("measured") if isinstance(data, dict) else None
+        return measured if isinstance(measured, dict) else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def cached_measure_geometry(path: Path, *, is_step: bool, axis: str, unit_scale: float,
+                            metadata: dict[str, Any] | None = None
+                            ) -> dict[str, float | int] | None:
+    """``measure_geometry`` with a stat-keyed cache for repeat GUI previews."""
+    try:
+        stat = path.stat()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+    meta_key = json.dumps(metadata, sort_keys=True, default=str) if metadata else None
+    key = (str(path), is_step, axis, float(unit_scale), stamp, meta_key)
+    if key not in _GEOMETRY_MEASURE_CACHE:
+        measured = measure_geometry(
+            path, is_step=is_step, axis=axis, unit_scale=unit_scale, metadata=metadata
+        )
+        if measured is None:
+            measured = _measure_geometry_via_chrono_env(
+                path, is_step=is_step, axis=axis, unit_scale=unit_scale, metadata=metadata
+            )
+        _GEOMETRY_MEASURE_CACHE[key] = measured
+    return _GEOMETRY_MEASURE_CACHE[key]
+
+
+def measured_geometry_for_cfg(cfg: dict[str, Any]) -> dict[str, float | int] | None:
+    """Measure the CAD/mesh that the generated CRM command will actually load."""
+    if not isinstance(cfg, dict):  # pragma: no cover - defensive
+        return None
+    if str(cfg.get("geometry")) == "step":
+        step = cfg.get("step_file")
+        if not step:
+            return None
+        step_path = Path(step)
+        if not step_path.is_file():
+            return None
+        axis = str(cfg.get("cad_axis") or "Y").upper()
+        if axis == "AUTO":
+            axis = detect_cad_axis(step_path)
+        return cached_measure_geometry(
+            step_path, is_step=True, axis=axis,
+            unit_scale=float(cfg.get("unit_scale") or 0.001),
+        )
+
+    obj = cfg.get("crm_obj")
+    if not obj:
+        return None
+    obj_path = Path(obj)
+    if not obj_path.is_file():
+        return None
+    node_path = Path(cfg["fea_node"]) if cfg.get("fea_node") else None
+    metadata = read_mesh_metadata(node_path) if node_path and node_path.is_file() else None
+    return cached_measure_geometry(
+        obj_path, is_step=False, axis="Z", unit_scale=1.0, metadata=metadata
+    )
+
+
+def validate_study_geometry(cfg: dict[str, Any]) -> list[str]:
+    """Reject mixed geometry fields that make fill detection impossible.
+
+    The fill detector requires a particle centre to lie inside the nominal
+    cavity.  If the outer drum radius is edited without also replacing the
+    CAD/mesh and its derived cavity/schedule, that predicate can never be true.
+    This check leaves the detector and SPH/BCE counts untouched and only guards
+    the editable study configuration.
+    """
+    try:
+        radius = float(cfg["drum_radius"])
+        half_length = float(cfg["drum_half_length"])
+        inner_radius = float(cfg["inner_radius"])
+        spacing = float(cfg["spacing"])
+        descent_speed = float(cfg["descent_speed"])
+        bed_height = float(cfg["bed_height"])
+        duration = float(cfg["duration"])
+    except (KeyError, TypeError, ValueError):
+        return []
+
+    measured = measured_geometry_for_cfg(cfg)
+    if measured:
+        measured_radius = float(measured["drum_radius"])
+        measured_half = float(measured["drum_half_length"])
+        radius_tol = max(2.0e-3, 0.02 * measured_radius)
+        half_tol = max(2.0e-3, 0.05 * measured_half)
+        if abs(radius - measured_radius) > radius_tol:
+            raise StudyConfigError(
+                f"drum_radius={radius:g} m disagrees with the CAD/mesh radius "
+                f"{measured_radius:g} m (tolerance {radius_tol:g} m). Re-run "
+                "'Apply CAD/mesh defaults' or use a mesh that matches this radius."
+            )
+        if abs(half_length - measured_half) > half_tol:
+            raise StudyConfigError(
+                f"drum_half_length={half_length:g} m disagrees with the CAD/mesh "
+                f"half-length {measured_half:g} m (tolerance {half_tol:g} m)."
+            )
+        outer_limit = min(radius, measured_radius)
+    else:
+        outer_limit = radius
+
+    if inner_radius + max(spacing, 0.0) >= outer_limit:
+        raise StudyConfigError(
+            f"inner_radius ({inner_radius:g} m) + spacing ({spacing:g} m) must be "
+            f"smaller than the outer drum radius ({outer_limit:g} m); otherwise no "
+            "SPH particle can satisfy the fill containment test."
+        )
+
+    warnings: list[str] = []
+    if descent_speed > 0.0:
+        full_descent = bed_height / descent_speed
+        if duration < full_descent:
+            warnings.append(
+                f"CRM duration {duration:g} s is shorter than the estimated "
+                f"{full_descent:g} s full descent; fill will likely stay near zero."
+            )
+    return warnings
+
+
+def auto_correct_study_geometry(cfg: dict[str, Any]) -> list[str]:
+    """Repair CAD/mesh-derived fields that were edited out of sync.
+
+    This is intentionally limited to generated/default studies (``auto_geometry``
+    on).  It does not touch the fill detector, SPH/BCE bookkeeping, or spacing;
+    it only restores the outer dimensions actually loaded by CRM, a cavity that
+    can hold a particle, and a descent long enough to reach the soil.  Explicit
+    configurations (``auto_geometry`` off) still fail in
+    :func:`validate_study_geometry` rather than being silently changed.
+    """
+    if not isinstance(cfg, dict) or not cfg.get("auto_geometry", True):
+        return []
+    measured = measured_geometry_for_cfg(cfg)
+    if not measured:
+        return []
+
+    radius = float(measured["drum_radius"])
+    half_length = float(measured["drum_half_length"])
+    defaults = geometry_defaults(measured, auto=True)
+    corrections: list[str] = []
+
+    def restore(key: str, value: float, relative_tol: float) -> None:
+        old = cfg.get(key)
+        try:
+            unchanged = old is not None and abs(float(old) - float(value)) <= max(
+                2.0e-3, relative_tol * abs(float(value))
+            )
+        except (TypeError, ValueError):
+            unchanged = False
+        if not unchanged:
+            cfg[key] = float(value)
+            corrections.append(f"{key}: {old} -> {float(value):g} m (measured CAD/mesh)")
+
+    restore("drum_radius", radius, 0.02)
+    restore("drum_half_length", half_length, 0.05)
+
+    try:
+        spacing = max(0.0, float(cfg["spacing"]))
+        inner_radius = float(cfg["inner_radius"])
+    except (KeyError, TypeError, ValueError):
+        spacing = inner_radius = 0.0
+    if inner_radius + spacing >= radius:
+        cfg["inner_radius"] = float(defaults["inner_radius"])
+        corrections.append(
+            f"inner_radius: {inner_radius} -> {defaults['inner_radius']:g} m "
+            "(original cavity could not contain an SPH particle)"
+        )
+
+    try:
+        descent_speed = float(cfg["descent_speed"])
+        bed_height = float(cfg["bed_height"])
+        duration = float(cfg["duration"])
+    except (KeyError, TypeError, ValueError):
+        descent_speed = 0.0
+        bed_height = duration = 0.0
+    if descent_speed > 0.0:
+        needed = bed_height / descent_speed
+        if duration < needed:
+            corrected = max(duration, float(defaults["lowering_duration"]), needed * 1.05)
+            cfg["duration"] = float(corrected)
+            corrections.append(
+                f"duration: {duration} -> {corrected:g} s "
+                f"(full descent needs about {needed:g} s)"
+            )
+            try:
+                fea_duration = float(cfg.get("fea_duration", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                fea_duration = 0.0
+            if fea_duration > corrected:
+                cfg["fea_duration"] = float(corrected)
+                corrections.append(f"fea_duration: {fea_duration} -> {corrected:g} s")
+
+    if corrections:
+        cfg["geometry_corrections"] = corrections
+        for item in corrections:
+            print(f"Auto-corrected geometry {item}", file=sys.stderr)
+    return corrections
 
 
 def estimate_sph_particles(*, drum_radius: float, drum_half_length: float,
@@ -411,12 +668,26 @@ def build_parser() -> argparse.ArgumentParser:
                         "when needed to keep the surface watertight")
     p.add_argument("--surface-max-faces", type=int, default=None,
                    help="upper bound for watertight decimation retry (default: 256000)")
+    p.add_argument("--surface-fit-tolerance", type=float, default=None,
+                   help="maximum measured exterior STEP surface deviation in m; the converter "
+                        "raises the face target until this fit and TetGen pass (default: 0.001; "
+                        "0 disables)")
     p.add_argument("--surface-repair-order", choices=("none", "before", "after"), default=None,
                    help="legacy MeshFix route (default: none; OCC unify + topology-preserving "
                         "decimation is used instead)")
     p.add_argument("--min-solid-volume", type=float, default=None,
                    help="drop STEP assembly solids smaller than this volume in m^3 before meshing")
     p.add_argument("--hub-radius", type=float, default=None, help="rigid hub radius in m")
+    p.add_argument("--part-aware-simplify", action=argparse.BooleanOptionalAction, default=None,
+                   help="coarsen only hub/interior FEA surface faces while keeping exterior faces "
+                        "unchanged (default: on for STEP meshes; use --no-part-aware-simplify to disable)")
+    p.add_argument("--part-aware-radius", type=float, default=None,
+                   help="maximum radial distance in m from the drum axis for interior coarsening "
+                        "(default: 0.05)")
+    p.add_argument("--part-aware-reduction", type=float, default=None,
+                   help="fraction of eligible interior faces to remove (default: 0.75)")
+    p.add_argument("--part-aware-min-faces", type=int, default=None,
+                   help="skip interior coarsening below this many eligible faces (default: 500)")
 
     p.add_argument("--fea-dt", type=float, default=None, help="FEA structural timestep in s")
     p.add_argument("--pla-youngs-modulus", type=float, default=None, help="PLA Young's modulus in Pa")
@@ -439,11 +710,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-export-vtk", action="store_true",
                    help="do not export ParaView PVD/VTK time series")
     p.add_argument("--fea-export-vtk", action="store_true",
-                   help="deprecated no-op: FEA VTU deformation export is disabled")
+                   help="export the full 3D FEA stress/deformation animation (expensive; default off)")
     p.add_argument("--no-fea-export-vtk", action="store_true",
-                   help="deprecated no-op: FEA VTU deformation export is disabled")
+                   help="do not export the full 3D FEA stress/deformation animation (default)")
     p.add_argument("--vtk-stride", type=int, default=None,
-                   help="deprecated no-op: FEA VTU deformation export is disabled")
+                   help="export every Nth recorded FEA frame as a VTU frame (default: 1 = full)")
     p.add_argument("--paraview-stride", type=int, default=None,
                    help="export every Nth CRM/excavator frame to ParaView (default: 1)")
     p.add_argument("--paraview-particle-stride", type=int, default=None,
@@ -634,9 +905,18 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
     mesh_size = args.mesh_size if args.mesh_size is not None else 0.012
     surface_faces = args.surface_target_faces if args.surface_target_faces is not None else 8000
     surface_max_faces = args.surface_max_faces if args.surface_max_faces is not None else 256000
+    surface_fit_tolerance = (
+        args.surface_fit_tolerance if args.surface_fit_tolerance is not None else 0.001
+    )
+    if surface_fit_tolerance < 0.0:
+        raise SystemExit("--surface-fit-tolerance must be non-negative")
     surface_repair_order = args.surface_repair_order or "none"
     hub_radius = args.hub_radius if args.hub_radius is not None else 0.0015
     min_solid_volume = args.min_solid_volume if args.min_solid_volume is not None else 0.0
+    part_aware_simplify = True if args.part_aware_simplify is None else bool(args.part_aware_simplify)
+    part_aware_radius = args.part_aware_radius if args.part_aware_radius is not None else 0.05
+    part_aware_reduction = args.part_aware_reduction if args.part_aware_reduction is not None else 0.75
+    part_aware_min_faces = args.part_aware_min_faces if args.part_aware_min_faces is not None else 500
 
     if geometry == "supplied":
         crm_obj = DEFAULT_CRM_OBJ
@@ -690,7 +970,9 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             )
         if auto_geo:
             print("Reading STEP geometry...")
-            measured = measure_geometry(step_file, is_step=True, axis=cad_axis, unit_scale=unit_scale)
+            measured = cached_measure_geometry(
+                step_file, is_step=True, axis=cad_axis, unit_scale=unit_scale
+            )
             if measured is None:
                 print("Could not measure STEP geometry; using legacy defaults.")
         else:
@@ -698,11 +980,15 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
     else:
         if auto_geo:
             if geometry == "files":
-                measured = measure_geometry(crm_obj, is_step=False, axis="Z", unit_scale=1.0,
-                                            metadata=read_mesh_metadata(fea_node))
+                measured = cached_measure_geometry(
+                    crm_obj, is_step=False, axis="Z", unit_scale=1.0,
+                    metadata=read_mesh_metadata(fea_node)
+                )
             else:
-                measured = measure_geometry(crm_obj, is_step=False, axis="Z", unit_scale=1.0,
-                                            metadata=read_mesh_metadata(fea_node))
+                measured = cached_measure_geometry(
+                    crm_obj, is_step=False, axis="Z", unit_scale=1.0,
+                    metadata=read_mesh_metadata(fea_node)
+                )
 
     if geometry != "step":
         for label, path in (("CRM surface OBJ", crm_obj), ("FEA .node file", fea_node),
@@ -716,6 +1002,8 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             mesh_size = float(geo.get("mesh_size", mesh_size))
         if args.surface_target_faces is None:
             surface_faces = int(geo["surface_target_faces"])
+        if args.surface_fit_tolerance is None:
+            surface_fit_tolerance = float(geo.get("surface_fit_tolerance", 0.001))
         if args.min_solid_volume is None:
             min_solid_volume = float(geo["min_solid_volume"])
         if args.hub_radius is None and auto_geo and measured is not None:
@@ -734,8 +1022,8 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         if geometry == "step":
             print(
                 f"  mesh: tet size={geo.get('mesh_size', mesh_size):g} m, "
-                f"faces={geo['surface_target_faces']}, min solid={geo['min_solid_volume']:g} m^3, "
-                f"hub R={geo['hub_radius']:g} m"
+                f"faces={geo['surface_target_faces']}, fit={surface_fit_tolerance:g} m, "
+                f"min solid={geo['min_solid_volume']:g} m^3, hub R={geo['hub_radius']:g} m"
             )
 
     if geometry == "step":
@@ -756,6 +1044,15 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
                 detail="Retry ceiling for the watertight decimation search; raise it if the "
                        "converter cannot find a valid surface.",
             )
+        if args.surface_fit_tolerance is None:
+            surface_fit_tolerance = prompt_float(
+                "Exterior surface fit tolerance (m)", surface_fit_tolerance, minimum=0.0,
+                detail="Maximum measured deviation of the exterior/screw surface from the raw "
+                       "OCC tessellation. The converter raises the face target until this fit "
+                       "and TetGen pass. 0 disables the fit check.",
+            )
+        if surface_fit_tolerance < 0.0:
+            raise SystemExit("--surface-fit-tolerance must be non-negative")
         if args.min_solid_volume is None:
             min_solid_volume = prompt_float(
                 "Drop assembly solids smaller than (m^3)", min_solid_volume, minimum=0.0,
@@ -768,6 +1065,43 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
                 detail="'none' unifies fused CAD faces and retries decimation until watertight; "
                        "'before'/'after' are legacy MeshFix routes.",
             )
+        if args.part_aware_simplify is None:
+            part_aware_simplify = prompt_bool(
+                "Coarsen hub/interior FEA mesh?", part_aware_simplify,
+                detail="Keeps all exterior/screw-flight faces unchanged and decimates only faces "
+                       "inside the interior radius. Recommended: the hub is rigid in FEA and is "
+                       "over-refined by the CAD's tight curves.",
+            )
+        if part_aware_simplify:
+            if args.part_aware_radius is None:
+                part_aware_radius = prompt_float(
+                    "Interior coarsening radius (m)", part_aware_radius, minimum=1e-4,
+                    detail="Faces wholly inside this radial distance from the drum axis may be "
+                           "decimated. Use a little more than the rigid hub radius.",
+                )
+            if args.part_aware_reduction is None:
+                part_aware_reduction = prompt_float(
+                    "Interior reduction fraction", part_aware_reduction,
+                    minimum=0.0, maximum=0.99,
+                    detail="Fraction of eligible interior surface faces to remove with "
+                           "topology-preserving, boundary-fixed decimation.",
+                )
+            if args.part_aware_min_faces is None:
+                part_aware_min_faces = prompt_int(
+                    "Interior min faces to coarsen", part_aware_min_faces, minimum=0,
+                    detail="Skip interior coarsening unless at least this many faces qualify.",
+                )
+        if part_aware_simplify and surface_repair_order == "after":
+            raise SystemExit(
+                "--part-aware-simplify is not compatible with --surface-repair-order after; "
+                "use 'none' (recommended) or 'before'."
+            )
+        if part_aware_radius <= 0.0:
+            raise SystemExit("--part-aware-radius must be positive")
+        if not 0.0 <= part_aware_reduction < 1.0:
+            raise SystemExit("--part-aware-reduction must be in [0, 1)")
+        if part_aware_min_faces < 0:
+            raise SystemExit("--part-aware-min-faces must be non-negative")
 
         mesh_dir = out_dir / "mesh"
         mesh_dir.mkdir(parents=True, exist_ok=True)
@@ -812,6 +1146,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
                 "--mesh-size", f"{mesh_size:g}",
                 "--surface-target-faces", str(surface_faces),
                 "--surface-max-faces", str(surface_max_faces),
+                "--surface-fit-tolerance", f"{surface_fit_tolerance:g}",
                 "--min-solid-volume", f"{min_solid_volume:g}",
                 "--hub-radius", f"{hub_radius:g}",
                 "--axis", cad_axis,
@@ -820,6 +1155,13 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
                 "--time-stages",
             ],
         })
+        if part_aware_simplify:
+            mesh_steps[0]["command"].extend([
+                "--part-aware-simplify",
+                "--part-aware-radius", f"{part_aware_radius:g}",
+                "--part-aware-reduction", f"{part_aware_reduction:g}",
+                "--part-aware-min-faces", str(part_aware_min_faces),
+            ])
         if surface_repair_order == "after":
             mesh_steps[0]["command"].append("--repair-after-decimation")
         mesh_steps.append({
@@ -1080,10 +1422,25 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             detail="Write per-frame particle positions from CRM (useful for visualization, uses disk space).",
         )
 
-    # FEA VTU deformation export was a visualization-only hotspot and is now
-    # disabled in the one-way driver.  Keep the config keys for compatibility.
-    fea_export_vtk = False
-    fea_vtk_stride = 1
+    # Full 3D FEA stress animation is opt-in: its per-frame stress scans/VTU
+    # writes were a visualization-only hotspot on large meshes.
+    if args.fea_export_vtk:
+        fea_export_vtk = True
+    elif args.no_fea_export_vtk:
+        fea_export_vtk = False
+    else:
+        fea_export_vtk = prompt_bool(
+            "Export full 3D FEA stress/deformation animation?", False,
+            detail="Writes per-frame VTU files with von Mises stress and displacement. "
+                   "This is expensive and is off by default; scalar charts stay available either way.",
+        )
+    fea_vtk_stride = (
+        max(1, int(args.vtk_stride))
+        if args.vtk_stride is not None else
+        (prompt_int("FEA VTU frame stride (1 = every recorded frame)", 1, minimum=1,
+                    detail="Use >1 to reduce 3D animation size/time; the final frame is always included.")
+         if fea_export_vtk else 1)
+    )
 
     if args.export_vtk:
         export_vtk = True
@@ -1129,7 +1486,9 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             f"Study:        {name}",
             f"Output:       {out_dir}",
             f"CRM mesh:     {crm_obj}",
-            f"FEA mesh:     {fea_node} / {fea_ele}",
+            f"FEA mesh:     {fea_node} / {fea_ele}"
+            + (f" (interior coarsened within {part_aware_radius:g} m)"
+               if part_aware_simplify else ""),
             f"Duration:     CRM {duration:g} s, FEA {fea_duration:g} s",
             f"Cadence:      CRM summary {crm_fps:g} Hz, FEA summary {fea_fps:g} Hz, "
             f"loads {loads_fps:g} Hz, particles {particle_fps:g} Hz",
@@ -1140,7 +1499,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             f"Bed:          height={bed_height:g} m, padding={bed_padding:g} R, "
             f"box={','.join(f'{v:g}' for v in active_box)} m, descent={descent_speed:g} m/s",
             f"FEA:          dt={fea_dt:g} s, solver={solver}, threads={num_threads} "
-            f"(VTU deformation export disabled)",
+            f"(3D stress VTU: {'stride ' + str(fea_vtk_stride) if fea_export_vtk else 'off'})",
             f"ParaView:     export={export_vtk} (frame stride {paraview_stride}, "
             f"particle frame stride {paraview_particle_stride or paraview_stride}, "
             f"particle render stride {paraview_particle_render_stride})",
@@ -1172,8 +1531,13 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "mesh_size": mesh_size,
         "surface_faces": surface_faces,
         "surface_max_faces": surface_max_faces,
+        "surface_fit_tolerance": surface_fit_tolerance,
         "surface_repair_order": surface_repair_order,
         "hub_radius": hub_radius,
+        "part_aware_simplify": bool(part_aware_simplify),
+        "part_aware_radius": float(part_aware_radius),
+        "part_aware_reduction": float(part_aware_reduction),
+        "part_aware_min_faces": int(part_aware_min_faces),
         "drum_radius": drum_radius,
         "drum_half_length": drum_half_length,
         "min_solid_volume": min_solid_volume,
@@ -1223,6 +1587,9 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    auto_correct_study_geometry(cfg)
+    for warning in validate_study_geometry(cfg):
+        print(f"WARNING: {warning}", file=sys.stderr)
     out_dir: Path = cfg["output_dir"]
     crm_dir = out_dir / "crm"
     fea_dir = out_dir / "fea"
@@ -1309,8 +1676,11 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     }
     for key, value in cfg["pla"].items():
         fea_cmd.extend([pla_flags[key], f"{value:g}"])
-    # FEA VTU deformation export is intentionally disabled; the driver still
-    # writes every scalar field used by the GUI preview and result plots.
+    # Full 3D FEA stress/deformation output is opt-in.  The driver still writes
+    # every scalar field used by the GUI preview and result plots either way.
+    if cfg.get("fea_export_vtk"):
+        fea_cmd.extend(["--export-vtk",
+                        "--vtk-stride", str(max(1, int(cfg.get("fea_vtk_stride", 1))))])
     steps.append({"name": "one-way-FEA", "command": fea_cmd})
 
     if cfg.get("export_vtk", True):
@@ -1422,11 +1792,19 @@ def launch_paraview_viewer(paraview_script: Path, paraview_dir: Path, study_dir:
     env = os.environ.copy()
     env["PYCHRONO_EXPORT_DIR"] = str(paraview_dir)
     env["PYCHRONO_STUDY_DIR"] = str(study_dir)
+    # --script does not define __file__, so the viewer needs its helper path.
+    env["PYCHRONO_SCRIPT_DIR"] = str(ROOT)
+    env["PYCHRONO_ROOT"] = str(ROOT)
+    # The viewer validates the PVD before loading it.  Requesting it here makes
+    # the "Open ParaView after run" button show FEA just like the Tools button;
+    # an absent/incomplete series is skipped rather than breaking the scene.
+    env["PYCHRONO_WITH_FEA"] = "1"
     # ParaView 6.2 can abort on Wayland; use X11/XWayland unless overridden.
     env["QT_QPA_PLATFORM"] = os.environ.get("PYCHRONO_PARAVIEW_QT_PLATFORM", "xcb")
     paraview_bin = shutil.which("paraview")
     if paraview_bin:
         try:
+            env["PYCHRONO_PARAVIEW_GUI"] = "1"
             subprocess.Popen(
                 [paraview_bin, f"--script={paraview_script}"], cwd=ROOT, env=env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -1434,6 +1812,7 @@ def launch_paraview_viewer(paraview_script: Path, paraview_dir: Path, study_dir:
             )
             return True
         except OSError:
+            env.pop("PYCHRONO_PARAVIEW_GUI", None)
             pass
     try:
         subprocess.Popen(
@@ -1542,7 +1921,10 @@ def main() -> int:
     ACCEPT_DEFAULTS = bool(args.yes)
     started = time.perf_counter()
     cfg = collect_settings(args)
-    steps = build_commands(cfg)
+    try:
+        steps = build_commands(cfg)
+    except StudyConfigError as exc:
+        raise SystemExit(f"invalid study configuration: {exc}") from exc
     write_reproducibility_files(cfg, steps)
 
     out_dir: Path = cfg["output_dir"]
