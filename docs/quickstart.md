@@ -69,8 +69,8 @@ The GUI opens on the **Study Wizard** tab with six pages. Work left to right; us
 
 ### Page 1 — Study
 
-- **Study name**: a short label. The default output folder is `Output_<name>` in the project root.
-- **Output directory**: where configs, logs, meshes, and results go. Use a fresh folder for each study.
+- **Study name**: a short label. In the GUI, editing it immediately sets the output directory to `Output_<name>` in the project root.
+- **Output directory**: where configs, logs, meshes, and results go. It follows the study name until you change it yourself; use a fresh folder for each study.
 - **Geometry source**: `step` if you are converting CAD, otherwise `files`/`supplied`.
 - **Auto-scale from CAD/mesh**: leave on. It measures the drum and suggests compatible dimensions.
 

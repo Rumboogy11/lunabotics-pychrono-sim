@@ -35,8 +35,8 @@ There is an **Info** button next to most fields. It opens a short explanation th
 
 ### Page 1 — Study
 
-- **Study name** — short label; included in the default output folder name.
-- **Output directory** — the folder that will hold the config, commands, logs, meshes, and result subfolders. Browse to a new or empty folder.
+- **Study name** — short label. Editing it immediately sets the output directory to `Output_<study name>` under the project folder.
+- **Output directory** — the folder that will hold the config, commands, logs, meshes, and result subfolders. It follows the study name until you edit it yourself; browse to a new or empty folder to preserve earlier runs.
 - **Geometry source** — `supplied` / `files` use the mesh paths on page 2; `step` converts a CAD file into meshes before the simulation.
 - **Auto-scale from CAD/mesh** — measure the chosen geometry and refresh suggested drum, bed, domain, spacing, and mesh values. All suggested values stay editable.
 

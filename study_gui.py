@@ -129,11 +129,11 @@ def _info(control: str, impact: str) -> str:
 PARAM_INFO: dict[str, str] = {
     # Study
     "study_name": _info(
-        "Short label for this run; it becomes the default output folder name.",
+        "Short label for this run. Editing it immediately resets the output directory to Output_<study name> under the project folder; you can still edit the output directory afterwards.",
         "Cost: none for the simulation; it only names files and folders.",
     ),
     "output_dir": _info(
-        "Folder for meshes, logs, configs, and results. It is created if needed; use a new folder to preserve earlier runs.",
+        "Folder for meshes, logs, configs, and results. It is created if needed; use a new folder to preserve earlier runs. Editing the study name resets this field to Output_<study name>.",
         "Cost: a slow or network drive makes every log/CSV write slower; a local empty folder is fastest.",
     ),
     "geometry": _info(
@@ -1132,10 +1132,16 @@ class StudyGUI:
             store[key] = StringVar(value="" if value is None else str(value))
         return store[key]
 
+    def _on_study_name_changed(self, *_):
+        """Keep the default output folder aligned with the study name."""
+        name = self._g("study_name").strip()
+        self.vars["output_dir"].set(str(ROOT / f"Output_{name}"))
+
     def _build_vars(self):
         name = datetime.now().strftime("study_%Y%m%d_%H%M%S")
         self._v("study_name", name)
         self._v("output_dir", str(ROOT / f"Output_{name}"))
+        self.vars["study_name"].trace_add("write", self._on_study_name_changed)
         defaults = shipped_defaults()
         defaults.update(load_saved_defaults())
         for key, value in defaults.items():

@@ -35,6 +35,51 @@ class IsolatedGuiDefaultsTest(unittest.TestCase):
         self._tmp.cleanup()
 
 
+class StudyNameOutputDirSyncTest(IsolatedGuiDefaultsTest):
+    def test_study_name_resets_output_directory(self) -> None:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+            initial_name = app.vars["study_name"].get()
+            self.assertEqual(app.vars["output_dir"].get(),
+                             str(gui.ROOT / f"Output_{initial_name}"))
+
+            app.vars["study_name"].set("moon_dig")
+            root.update_idletasks()
+            self.assertEqual(app.vars["output_dir"].get(),
+                             str(gui.ROOT / "Output_moon_dig"))
+
+            app.vars["output_dir"].set("/tmp/manual_dir")
+            self.assertEqual(app.vars["study_name"].get(), "moon_dig")
+            self.assertEqual(app.vars["output_dir"].get(), "/tmp/manual_dir")
+
+            app.vars["study_name"].set("  lunar_2  ")
+            self.assertEqual(app.vars["output_dir"].get(),
+                             str(gui.ROOT / "Output_lunar_2"))
+        finally:
+            root.destroy()
+
+    def test_loading_config_preserves_its_output_directory(self) -> None:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = gui.StudyGUI(root)
+            app._apply_config({"study_name": "loaded", "output_dir": "/tmp/loaded_out"})
+            self.assertEqual(app.vars["study_name"].get(), "loaded")
+            self.assertEqual(app.vars["output_dir"].get(), "/tmp/loaded_out")
+        finally:
+            root.destroy()
+
+
 class WizardCadenceFieldsTest(IsolatedGuiDefaultsTest):
     def test_preview_particle_sample_default_is_5000(self) -> None:
         import study_gui as gui
