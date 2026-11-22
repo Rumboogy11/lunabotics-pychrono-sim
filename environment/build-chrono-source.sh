@@ -15,7 +15,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$PROJECT_ROOT/environment/activate-chrono-source.sh"
 
 CLEAN=0
-JOBS="$(nproc 2>/dev/null || printf '1\n')"
+JOBS="$(env -u OMP_NUM_THREADS nproc 2>/dev/null || printf '1\n')"
 [[ "$JOBS" =~ ^[0-9]+$ ]] || JOBS=1
 JOBS=$(( JOBS / 2 ))
 (( JOBS < 1 )) && JOBS=1

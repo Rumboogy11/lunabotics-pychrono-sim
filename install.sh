@@ -49,14 +49,16 @@ SKIP_PATCH=0
 # build parallelism is deliberately half the available threads. Users on smaller
 # hosts can pick a lower value explicitly with --jobs (for example --jobs 1).
 cap_build_jobs() {
-  local thread_jobs
-  thread_jobs="$(nproc 2>/dev/null || printf '1\n')"
-  [[ "$thread_jobs" =~ ^[0-9]+$ ]] || thread_jobs=1
-  thread_jobs=$(( thread_jobs / 2 ))
+  # nproc honours OMP_NUM_THREADS; ignore it so re-running from an already
+  # activated environment still sees the machine's real CPU count.
+  local total_threads thread_jobs
+  total_threads="$(env -u OMP_NUM_THREADS nproc 2>/dev/null || printf '1\n')"
+  [[ "$total_threads" =~ ^[0-9]+$ ]] || total_threads=1
+  thread_jobs=$(( total_threads / 2 ))
   (( thread_jobs < 1 )) && thread_jobs=1
 
   if (( build_jobs > thread_jobs )); then
-    warn "Reducing Chrono build parallelism from $build_jobs to $thread_jobs (half of $(nproc) threads)"
+    warn "Reducing Chrono build parallelism from $build_jobs to $thread_jobs (half of $total_threads threads)"
     build_jobs="$thread_jobs"
   fi
 }
@@ -339,6 +341,31 @@ apply_chrono_patch() {
   fi
 }
 
+prepare_reference_geometry() {
+  # geometry/ is intentionally gitignored, but the smoke test needs the
+  # reference drum OBJ. Generate it from the metre-scale STLs shipped in fea/.
+  mkdir -p "$PROJECT_ROOT/geometry"
+  local pairs=(
+    "fea/LunarDrumScrew_m_fea_contact_2000_m.stl:geometry/LunarDrumScrew_m_coarse.obj"
+    "fea/LunarDrumScrew_m_fea_contact_3000_m.stl:geometry/LunarDrumScrew_m_medium.obj"
+  )
+  local pair stl obj generated
+  for pair in "${pairs[@]}"; do
+    stl="${pair%%:*}"
+    obj="${pair##*:}"
+    [[ -f "$PROJECT_ROOT/$obj" ]] && continue
+    if [[ ! -f "$PROJECT_ROOT/$stl" ]]; then
+      warn "Reference mesh $stl not found; the CRM smoke test needs a drum OBJ"
+      continue
+    fi
+    log "Generating $obj from $stl"
+    (cd "$PROJECT_ROOT" && "$ENV_DIR/bin/python" stl_to_obj.py "$stl") >/dev/null
+    generated="$PROJECT_ROOT/$(dirname "$stl")/$(basename "${stl%.stl}").obj"
+    [[ -f "$generated" ]] || die "stl_to_obj.py did not produce $generated"
+    mv -f "$generated" "$PROJECT_ROOT/$obj"
+  done
+}
+
 verify_environment() {
   log "Verifying installation"
   # shellcheck disable=SC1091
@@ -389,6 +416,7 @@ link_project_paths
 install_system_packages
 bootstrap_micromamba
 create_environment "$MAMBA_EXE"
+prepare_reference_geometry
 fetch_chrono_source
 verify_chrono_source
 apply_chrono_patch

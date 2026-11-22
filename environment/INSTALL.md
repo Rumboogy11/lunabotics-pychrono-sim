@@ -49,6 +49,7 @@ build and install trees.
 | `chrono-install/` | Installed Chrono libraries and `pychrono` Python modules |
 | `.tools/` | Downloaded micromamba binary |
 | `.mamba/` | Downloaded conda packages cache |
+| `geometry/*_coarse.obj`, `geometry/*_medium.obj` | Reference drum meshes generated from the metre-scale STLs in `fea/` so the smoke test works on a fresh clone (`geometry/` is gitignored) |
 
 If the checkout is on NTFS, exFAT, FUSE, CIFS, or another filesystem that
 cannot host conda's symlinks, the installer automatically places all six
@@ -67,6 +68,9 @@ The installer uses half of the machine's available threads for the Chrono build
 to half of the available threads. Use `--jobs 1` for the most conservative
 build. An explicit `OMP_NUM_THREADS` is never overridden. The build-job cap
 applies only to the Chrono build.
+
+Thread detection ignores `OMP_NUM_THREADS`, so re-running the installer from an
+already activated shell still selects half of the machine's real CPUs.
 
 The PyPI/conda-forge `pychrono` package is deliberately **not** used: it lacks
 `pychrono.fsi`/`pychrono.vehicle`, and its shared libraries conflict with the
