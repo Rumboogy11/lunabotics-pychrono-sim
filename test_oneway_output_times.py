@@ -49,5 +49,34 @@ class OneWayOutputTimeTest(unittest.TestCase):
             oneway.output_target_time(1, 0.0)
 
 
+class OneWayDurationLimitTest(unittest.TestCase):
+    def test_requested_duration_is_used_when_crm_frames_cover_it(self) -> None:
+        for requested, last_frame in ((0.5, 0.5), (0.2, 0.5)):
+            with self.subTest(requested=requested, last_frame=last_frame):
+                duration, notice = oneway.fea_duration_from_crm_frames(
+                    requested, last_frame, 5
+                )
+                self.assertAlmostEqual(duration, requested)
+                self.assertIsNone(notice)
+
+    def test_run_is_clamped_to_last_crm_frame_without_failing(self) -> None:
+        duration, notice = oneway.fea_duration_from_crm_frames(0.5, 0.2, 5)
+
+        self.assertAlmostEqual(duration, 0.2)
+        self.assertIsNotNone(notice)
+        self.assertIn("limited", notice)
+        self.assertIn("CRM load frames", notice)
+        self.assertIn("5 samples", notice)
+        self.assertIn("0.2 s", notice)
+        self.assertIn("0.5 s", notice)
+        self.assertIn("not a failure", notice)
+
+    def test_tiny_float_gap_is_not_treated_as_missing_frames(self) -> None:
+        duration, notice = oneway.fea_duration_from_crm_frames(0.2, 0.2 - 1.0e-13, 5)
+
+        self.assertAlmostEqual(duration, 0.2, places=12)
+        self.assertIsNone(notice)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -118,6 +118,10 @@ Remember that `--drum-gravity` is off by default and only changes force-mode dyn
 
 The CSV is missing required telemetry, has too few or unsorted samples, uses a different descent mode, or—in kinematic mode—has a Z trajectory inconsistent with the configured settle time, descent speed, and bed geometry. Re-run rigid CRM with matching motion/gravity options, or use **Run one-way FEA only (existing CRM)** from the GUI with a matching configuration. The replay interpolates loads by time; gravity, spin, and actuator-force settings are not validated from the CSV, so keep those matched manually.
 
+### One-way FEA finishes earlier than requested
+
+A `NOTICE: one-way FEA duration limited by the available CRM load frames` message means the FEA duration was longer than the recorded load history. The replay stops at the last row of `soil_loads.csv` and exits normally; this is not a failure. Run rigid CRM longer (or with a higher `--loads-fps`) and re-run the replay if you need the extra time.
+
 ### FEA results look noisy or implausible
 
 One-way FEA is a screening tool: no soil feedback, PLA material assumptions, and a load radius fraction that limits where forces are applied. Adjust `--load-radius-fraction` (0.95 is cheaper, 0.8 applies loads more widely) and material/damping values only with a rationale. Two-way coupled FEA and `full_model.py` are diagnostics and are not validated.
@@ -130,6 +134,10 @@ The two are separate toggles:
 - **Load 3D FEA stress/deformation in ParaView** requires an explicitly exported, structurally usable multi-frame `fea/vtk/fea.pvd` (its VTU files live in `fea/vtk/frames/`). Enable **Export full 3D FEA stress animation** or `--fea-export-vtk`. A lone `t=0` frame is ignored, but a usable partial multi-frame series can be displayed.
 
 Check `paraview/export_manifest.json` for `has_fea_vtk`, `fea_valid`, and `fea_status` as export-time provenance. ParaView rechecks the actual PVD and frame files, so a manifest-marked partial multi-frame series may still display.
+
+### ParaView's first frame is white or logs a view-up warning
+
+The current `view_study_paraview.py` primes the camera-orbit track before its first render and picks a non-parallel view-up before any camera reset. Time 0 should open already framed, without stepping one frame backwards and forwards, and without the `Resetting view-up since view plane normal is parallel` warning. If either symptom persists, you are likely running an older copy of the viewer: relaunch from the GUI's Tools tab (which uses this checkout's script) or run `pvpython view_study_paraview.py <study>/paraview` directly. `--no-camera-orbit` disables the track entirely as a fallback; use ParaView's Reset Camera button to reframe the scene.
 
 ### The Output Preview tab is missing
 

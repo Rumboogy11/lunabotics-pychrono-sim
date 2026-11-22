@@ -35,7 +35,9 @@ Usage
 
 Use identical motion options (settle time, descent speed, bed height, spin axis,
 and omega) in both runs; the driver checks that the recorded drum trajectory
-matches the FEA motion.  The reported peak stress excludes tetrahedra below
+matches the FEA motion.  If ``--duration`` reaches past the last CRM load
+frame, the replay stops at that frame and prints a notice instead of holding a
+stale wrench.  The reported peak stress excludes tetrahedra below
 ``--min-stress-volume`` (default 1e-12 m^3) to avoid sliver-element artifacts;
 the raw peak is also written to the CSV.
 
@@ -136,6 +138,27 @@ def step_to_target(t: float, target: float, dt: float) -> tuple[float, float]:
     """Advance simulated time by at most *dt* without overshooting *target*."""
     h = min(dt, max(target - t, 0.0))
     return t + h, h
+
+
+def fea_duration_from_crm_frames(
+    requested_duration: float, last_frame_time: float, frame_count: int
+) -> tuple[float, str | None]:
+    """Bound the FEA replay by the CRM load frames that actually exist.
+
+    A one-way replay can only use soil wrenches recorded in ``soil_loads.csv``.
+    If the requested FEA duration reaches past the last recorded frame, stop at
+    that frame instead of inventing a tail by holding the final wrench.  This is
+    a normal shorter run, not an error: the second return value is a notice for
+    the user (``None`` when the requested duration is already covered).
+    """
+    if last_frame_time + 1.0e-12 < requested_duration:
+        return last_frame_time, (
+            "NOTICE: one-way FEA duration limited by the available CRM load frames: "
+            f"{frame_count} samples end at {last_frame_time:g} s, so the replay stops "
+            f"at {last_frame_time:g} s instead of the requested {requested_duration:g} s. "
+            "Continuing with the shorter run (this is not a failure)."
+        )
+    return requested_duration, None
 
 
 def read_tetgen_ele(path: Path) -> np.ndarray:
@@ -305,6 +328,9 @@ def build_parser() -> argparse.ArgumentParser:
             action.help = "spin ramp in s (default: 0, matching the rigid CRM load)"
         elif "--dt" in flags:
             action.help = "FEA structural step in s (default: 2e-3)"
+        elif "--duration" in flags:
+            action.help = ("FEA replay length in s (default: 60); capped at the last recorded "
+                           "CRM load frame when the load history is shorter")
         elif "--solver" in flags:
             # PardisoMKL lives in the optional pychrono.pardisomkl module.
             action.choices = ("gmres", "sparse-lu", "sparse-qr", "pardiso-mkl")
@@ -634,9 +660,12 @@ def main() -> int:
     args.initial_gap = 0.0
     node_path, ele_path = fea_driver.resolve_fea_mesh(args)
     loads = LoadHistory(args.loads)
-    if loads.t_end + 1.0e-12 < run.duration:
-        print(f"WARNING: load history ends at {loads.t_end:g} s but run duration is "
-              f"{run.duration:g} s; the final wrench will be held", flush=True)
+    effective_duration, duration_notice = fea_duration_from_crm_frames(
+        run.duration, loads.t_end, len(loads.times)
+    )
+    if duration_notice is not None:
+        print(duration_notice, flush=True)
+        run = replace(run, duration=effective_duration)
 
     motion = replace(
         MOTION_DEFAULT,

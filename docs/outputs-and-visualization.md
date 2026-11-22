@@ -136,7 +136,7 @@ The viewer shows particles as GPU point sprites with a glyph fallback and the ex
 
 A structurally usable 3D FEA stress PVD is loaded by default by the GUI-launched viewer (`PYCHRONO_WITH_FEA=1` or `--with-fea`); uncheck **Load 3D FEA stress/deformation** to skip it. The viewer checks the actual PVD and frame files rather than trusting an old manifest entry. `--fea-only` isolates the FEA series and `--fea-series COL1,COL2` selects other summary columns for charts.
 
-The viewer can add a camera-orbit track around the vertical Z axis. Orbit speed, radius (`0` auto-fits with clearance), inclination, start angle, and keyframe count are configurable on the GUI Tools tab and are passed through `PYCHRONO_ORBIT_*` variables.
+The viewer can add a camera-orbit track around the vertical Z axis. Orbit speed, radius (`0` auto-fits with clearance), inclination, start angle, and keyframe count are configurable on the GUI Tools tab and are passed through `PYCHRONO_ORBIT_*` variables. The viewer primes the track before the first render, so time 0 is already framed: you do not need to step back one frame before advancing, and ParaView does not log a `Resetting view-up since view plane normal is parallel` warning during setup.
 
 `QT_QPA_PLATFORM=xcb` is forced by the GUI because some ParaView builds abort on Wayland.
 

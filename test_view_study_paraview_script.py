@@ -93,5 +93,93 @@ class ParaViewCameraOrbitTest(unittest.TestCase):
             viewer._fit_orbit_radius(None, center, axis, u, v), 0.6)
 
 
+class ParaViewFirstFrameTest(unittest.TestCase):
+    """Regression coverage for the GUI's first-frame camera and view-up."""
+
+    class FakeCamera:
+        def __init__(self, up, normal):
+            self.up = tuple(float(v) for v in up)
+            self.normal = tuple(float(v) for v in normal)
+
+        def GetViewUp(self):
+            return list(self.up)
+
+        def GetViewPlaneNormal(self):
+            return list(self.normal)
+
+        def SetViewUp(self, *value):
+            self.up = tuple(float(v) for v in value)
+
+    class FakeScene:
+        def __init__(self, fail=False, view=None):
+            self.calls: list[str] = []
+            self.fail = fail
+            self.view = view
+
+        def GoToNext(self):
+            if self.fail:
+                raise RuntimeError("no next frame")
+            self.calls.append("next")
+            if self.view is not None:
+                self.view.suppression_seen.append(self.view.SuppressRendering)
+
+        def GoToFirst(self):
+            self.calls.append("first")
+            if self.view is not None:
+                self.view.suppression_seen.append(self.view.SuppressRendering)
+
+    class FakeView:
+        def __init__(self):
+            self.SuppressRendering = 0
+            self.suppression_seen: list[int] = []
+
+    def test_parallel_view_up_is_replaced_before_reset_camera(self) -> None:
+        camera = self.FakeCamera((0.0, 0.0, 1.0), (0.0, 0.0, -1.0))
+
+        up = viewer._set_nonparallel_view_up(camera)
+
+        self.assertLess(abs(viewer._dot(up, camera.normal)), 0.9)
+        self.assertEqual(camera.up, up)
+
+    def test_orthogonal_view_up_is_preserved(self) -> None:
+        camera = self.FakeCamera((0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+
+        up = viewer._set_nonparallel_view_up(camera)
+
+        self.assertEqual(up, (0.0, 1.0, 0.0))
+        self.assertEqual(camera.up, (0.0, 1.0, 0.0))
+
+    def test_zero_view_up_is_replaced(self) -> None:
+        camera = self.FakeCamera((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+
+        up = viewer._set_nonparallel_view_up(camera)
+
+        self.assertNotEqual(up, (0.0, 0.0, 0.0))
+
+    def test_animation_scene_is_primed_forward_then_first(self) -> None:
+        view = self.FakeView()
+        scene = self.FakeScene(view=view)
+
+        self.assertTrue(viewer._prime_animation_scene(scene, view))
+        self.assertEqual(scene.calls, ["next", "first"])
+        self.assertEqual(view.suppression_seen, [True, True])
+        self.assertEqual(view.SuppressRendering, 0)
+
+    def test_priming_failure_is_nonfatal_and_restores_rendering(self) -> None:
+        view = self.FakeView()
+        view.SuppressRendering = 1
+
+        self.assertFalse(viewer._prime_animation_scene(self.FakeScene(fail=True), view))
+        self.assertEqual(view.SuppressRendering, 1)
+        self.assertFalse(viewer._prime_animation_scene(None))
+
+    def test_orbit_and_reset_camera_use_the_guards(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("_prime_animation_scene(scene, view)", source)
+        safe_up = source.index("_set_nonparallel_view_up(view.GetActiveCamera())")
+        self.assertLess(safe_up, source.index("ResetCamera(view)"))
+
+
 if __name__ == "__main__":
     unittest.main()

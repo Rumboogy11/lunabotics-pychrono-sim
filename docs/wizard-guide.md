@@ -59,7 +59,7 @@ Run `./run_study.sh --help` for the authoritative complete list. The tables belo
 
 | Flag | Purpose |
 | --- | --- |
-| `--duration T`, `--fea-duration T` | CRM duration and replay length (FEA cannot exceed the recorded load history). |
+| `--duration T`, `--fea-duration T` | CRM duration and replay length. The wizard rejects an FEA duration above the CRM duration, and the replay additionally stops at the last recorded load sample if the loads file is shorter (with a notice, not an error). |
 | `--spacing D`, `--crm-dt S` | SPH spacing and timestep; `--crm-dt auto` picks the suggested value. |
 | `--d0-multiplier F`, `--artificial-viscosity V`, `--shifting-ppst-push V` | SPH kernel and damping/particle-shift controls. |
 | `--fps F`, `--crm-fps F`, `--fea-fps F`, `--loads-fps F`, `--particle-fps F`, `--particle-writers N` | Independent output cadences and background particle writers. |

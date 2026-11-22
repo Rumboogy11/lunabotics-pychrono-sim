@@ -92,7 +92,7 @@ PYTHON="$CHRONO_ENV/bin/python" ./run.sh \
   --output-dir Output_OneWay/fea
 ```
 
-Use identical motion options in both stages; the replay checks trajectory/load consistency. For a force-driven CRM, pass `--descent-mode force` (and the same `--descent-force`/`--descent-force-ramp`) to **both** drivers. The one-way driver replays the recorded `drum_z_m` trajectory with a position motor and rejects a loads file recorded in the other mode; the two-way driver applies the actuator directly to the slider.
+Use identical motion options in both stages; the replay checks trajectory/load consistency. The one-way replay stops at the earlier of `--duration` and the last row of `soil_loads.csv`, printing a `NOTICE` when the available CRM frames shorten it; it does not invent load samples by holding the final wrench. For a force-driven CRM, pass `--descent-mode force` (and the same `--descent-force`/`--descent-force-ramp`) to **both** drivers. The one-way driver replays the recorded `drum_z_m` trajectory with a position motor and rejects a loads file recorded in the other mode; the two-way driver applies the actuator directly to the slider.
 
 ### Two-way FEA (diagnostic only)
 

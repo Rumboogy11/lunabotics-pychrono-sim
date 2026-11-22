@@ -78,6 +78,8 @@ This page controls time, motion, SPH resolution, and solver behaviour:
 | Group | Fields |
 | --- | --- |
 | Timing | CRM duration, FEA duration, CRM/FEA summary FPS, soil loads FPS, particle CSV FPS |
+
+The FEA duration is capped by the CRM load history: if `soil_loads.csv` ends before the requested replay length, the one-way driver prints a `NOTICE` and finishes at the last recorded frame instead of failing.
 | SPH | spacing, d0 multiplier, artificial viscosity, PPST shifting push, CRM dt (`auto` recommended) |
 | Bed/domain | bed height, bed padding (fraction of radius), active box X,Y,Z, settle time |
 | Gravity | gravity Z, apply gravity to CRM drum |
@@ -164,7 +166,7 @@ Checkboxes:
 
 Export controls: **Quick export stride**, **Particle frame stride** (`0` = same as quick), **Particle render stride**, and **Export workers** for parallel frame writes.
 
-Camera orbit controls: **Auto camera orbit around drum**, orbit speed (revolutions per simulation second), radius (`0` auto-fits the excavator bounds), inclination, start angle, and keyframe count. The viewer follows the vertical Z axis.
+Camera orbit controls: **Auto camera orbit around drum**, orbit speed (revolutions per simulation second), radius (`0` auto-fits the excavator bounds), inclination, start angle, and keyframe count. The viewer follows the vertical Z axis and primes the camera track before the first render, so the first frame opens framed instead of blank; no manual step back/forward is needed.
 
 ParaView is launched with `QT_QPA_PLATFORM=xcb` by default to avoid Wayland crashes in some builds. Set `PYCHRONO_PARAVIEW_QT_PLATFORM` to override that value.
 

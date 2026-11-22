@@ -72,7 +72,7 @@ Replays a recorded soil wrench; no SPH contact is simulated in this stage. The m
 | Flag | Purpose |
 | --- | --- |
 | `--loads PATH` | Required; `soil_loads.csv` recorded by rigid CRM. |
-| `--duration T`, `--dt S`, `--fps F` | Replay length, structural timestep, summary cadence. |
+| `--duration T`, `--dt S`, `--fps F` | Replay length, structural timestep, summary cadence. The replay runs for the smaller of `T` and the last recorded CRM load frame. |
 | `--fea-node PATH`, `--fea-ele PATH` | Solid tetrahedral mesh. |
 | `--solver {pardiso-mkl,sparse-lu,sparse-qr,gmres}`, `--num-threads N` | Linear solver. |
 | `--load-radius-fraction F`, `--load-scale F`, `--min-stress-volume V`, `--raw-stress-every N`, `--no-lock-sparsity-pattern` | Load spread/scaling, peak-stress filtering, scan cadence, and solver sparsity-pattern control. |
@@ -80,7 +80,7 @@ Replays a recorded soil wrench; no SPH contact is simulated in this stage. The m
 | Motion/gravity | Match the CRM stage: `--descent-mode`, `--descent-force*`, `--gravity`, `--omega`, `--reverse-spin`, `--spin-axis`, bed and buffer options. |
 | Material | `--pla-youngs-modulus`, `--pla-poisson-ratio`, `--pla-density`, `--rayleigh-beta`, `--hub-radius`. |
 
-The replay checks required telemetry, sample count/order, descent mode, and (in kinematic mode) the Z trajectory, then interpolates the wrench by time. Gravity, spin, and actuator-force settings are not validated from the CSV, so keep them matched manually. It rejects detector and SPH-only flags used by rigid CRM. The launcher adds local `PYTHONPATH`/`LD_LIBRARY_PATH` entries only when `--solver gmres`, `sparse-lu`, or `sparse-qr` is explicitly requested; the default PardisoMKL path uses the existing Python bindings.
+The replay checks required telemetry, sample count/order, descent mode, and (in kinematic mode) the Z trajectory, then interpolates the wrench by time. It runs for the minimum of `--duration` and the time of the last CRM load sample: if the loads file is shorter, it prints a `NOTICE` naming the shortened duration and finishes normally rather than holding the final wrench. Gravity, spin, and actuator-force settings are not validated from the CSV, so keep them matched manually. It rejects detector and SPH-only flags used by rigid CRM. The launcher adds local `PYTHONPATH`/`LD_LIBRARY_PATH` entries only when `--solver gmres`, `sparse-lu`, or `sparse-qr` is explicitly requested; the default PardisoMKL path uses the existing Python bindings.
 
 ### `./crm/run_fea.sh` — two-way FEA (diagnostic)
 
@@ -144,7 +144,7 @@ QT_QPA_PLATFORM=xcb PYCHRONO_EXPORT_DIR=Output_MyDrum/paraview \
   paraview --script="$PWD/view_study_paraview.py"
 ```
 
-or headlessly with `pvpython view_study_paraview.py Output_MyDrum/paraview`. Flags include `--warp-scale`, `--particle-radius`, `--particle-style {spheres,points}`, `--no-particles`, `--no-excavator`, `--no-fea`, `--show-fea-charts`, `--with-fea`, `--fea-only`, `--fea-series COL1,COL2`, and camera-orbit options. `PYCHRONO_FEA_CHARTS=1` and `PYCHRONO_WITH_FEA=1` are the environment equivalents used by the GUI.
+or headlessly with `pvpython view_study_paraview.py Output_MyDrum/paraview`. Flags include `--warp-scale`, `--particle-radius`, `--particle-style {spheres,points}`, `--no-particles`, `--no-excavator`, `--no-fea`, `--show-fea-charts`, `--with-fea`, `--fea-only`, `--fea-series COL1,COL2`, and camera-orbit options. `PYCHRONO_FEA_CHARTS=1` and `PYCHRONO_WITH_FEA=1` are the environment equivalents used by the GUI. The camera track is primed during setup, so the first frame opens framed instead of white and the view-up warning that older versions logged at startup is avoided.
 
 ### `view_results.py`
 

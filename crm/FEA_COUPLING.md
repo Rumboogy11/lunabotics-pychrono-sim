@@ -28,6 +28,13 @@ drum trajectory is checked against the FEA motion. The replay also aborts if
 the motor angle or descent position stops tracking its command, which is what
 made the earlier GMRES results unusable.
 
+The replay length is the minimum of the requested `--duration` and the time of
+the last recorded CRM load sample. When the loads file ends early, the driver
+prints a `NOTICE` that the run was limited by the available CRM frames and
+completes with the shorter history; it no longer extends the run by holding the
+final wrench. This is a normal non-fatal run: the FEA summary and optional VTU
+series cover only the time for which real CRM wrench samples exist.
+
 This avoids flex-BCE instability and gives stable short-run PLA stress
 estimates. It is a structural response to rigid-CRM loads, not two-way FSI:
 deformation cannot feed back into the soil, and the rigid drum wrench is only

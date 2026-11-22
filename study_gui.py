@@ -247,7 +247,7 @@ PARAM_INFO: dict[str, str] = {
         "Cost: a longer run is slower and writes more CSV rows; the particle and wrench cadences set how much extra disk space those rows use.",
     ),
     "fea_duration": _info(
-        "Length of the one-way FEA replay; it cannot exceed the recorded CRM load history. FEA replays the rigid soil-wrench CSV, not SPH particle contact.",
+        "Length of the one-way FEA replay. The replay stops at the last recorded CRM load frame if the loads file is shorter and prints a notice; it does not hold a stale wrench. FEA replays the rigid soil-wrench CSV, not SPH particle contact.",
         "Cost: each replayed second costs FEA solver time; the stress export stride can dominate that cost if full 3D VTK is on.",
     ),
     "spacing": _info(
@@ -429,7 +429,7 @@ PARAM_INFO: dict[str, str] = {
         "Cost: smaller VTP files and lighter ParaView scenes, with no change to frame count.",
     ),
     "tools_camera_orbit": _info(
-        "Add a ParaView camera track that automatically orbits the drum while the time animation plays, following the drum centre from the excavator frames. On by default.",
+        "Add a ParaView camera track that automatically orbits the drum while the time animation plays, following the drum centre from the excavator frames. On by default. The viewer primes the track before the first render, so the first frame is already framed and you do not need to step backwards and forwards to wake the camera.",
         "Cost: a tiny keyframe calculation, with no simulation or disk effect unless you record a movie.",
     ),
     "tools_orbit_speed": _info(
@@ -2197,6 +2197,7 @@ class StudyGUI:
             "• pvpython fallback: pvpython view_study_paraview.py <study>/paraview stays open until its render window is closed.\n"
             "• 'Preview STEP mesh' runs the current Geometry settings through the exact full-run mesher into geometry_checks/, then opens the STEP-vs-mesh comparison tool. Active study outputs are untouched.\n"
             "• Particles are rendered as 3D sphere point sprites (glyph fallback). Excavator is a separate source.\n"
+            "• The camera-orbit track is primed before the first render: the first frame is framed immediately, with no manual step back/forward and no VTK view-up warning.\n"
             "• One-way FEA scalar/deformation XY charts are hidden by default; check 'Show one-way FEA scalar/deformation history charts' to opt in (or pass --show-fea-charts to the viewer). A validated per-frame stress/deformation PVD is loaded by default; uncheck 'Load 3D FEA stress' to skip it.\n"
             "• The lightweight Output Preview tab reads CRM/FEA CSVs directly and draws a bounded 3D point cloud with editable particle/frame strides."
         )

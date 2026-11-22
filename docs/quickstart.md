@@ -154,6 +154,8 @@ QT_QPA_PLATFORM=xcb PYCHRONO_EXPORT_DIR=Output_<study_name>/paraview \
   paraview --script="$PWD/view_study_paraview.py"
 ```
 
+The camera-orbit track is primed, so the first frame opens already framed; press Play in ParaView's time controls to animate.
+
 See [Outputs and visualization](outputs-and-visualization.md) for the full tour.
 
 ## 5. Read the numbers

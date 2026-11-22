@@ -41,6 +41,11 @@ Tune it with --orbit-speed (revolutions per simulation second),
 --no-camera-orbit to disable it.
 The GUI launcher passes the same settings through PYCHRONO_ORBIT_* environment
 variables.  Press Play in ParaView to run the camera orbit with the time series.
+The viewer primes the camera track before the first render, so the first frame
+is already framed; you do not need to step backwards and forwards to wake the
+camera.  It also chooses a non-parallel view-up before any camera reset, which
+avoids VTK's "Resetting view-up since view plane normal is parallel" warning
+during GUI startup.
 """
 
 from __future__ import annotations
@@ -437,6 +442,72 @@ def _dot(a, b):
     return sum(float(x) * float(y) for x, y in zip(a, b))
 
 
+def _set_nonparallel_view_up(camera) -> tuple[float, float, float]:
+    """Give the camera a view-up axis that VTK's ResetCamera will accept.
+
+    VTK warns ("Resetting view-up since view plane normal is parallel") and
+    silently substitutes an arbitrary axis when the current view-up is nearly
+    parallel to the view-plane normal.  ParaView can start a GUI view in such an
+    orientation, so choose an orthogonal axis before calling ResetCamera().
+    """
+    try:
+        up = tuple(float(v) for v in camera.GetViewUp())
+        normal = tuple(float(v) for v in camera.GetViewPlaneNormal())
+    except Exception:
+        up, normal = (), ()
+    # A zero-length view-up is just as unusable as a parallel one.
+    if len(up) == 3 and math.sqrt(_dot(up, up)) > 1.0e-6:
+        if abs(_dot(up, normal)) < 0.99:
+            return up
+    for candidate in ((0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)):
+        if abs(_dot(candidate, normal)) < 0.9:
+            try:
+                camera.SetViewUp(*candidate)
+            except Exception:
+                pass
+            return candidate
+    # Degenerate camera (for example a zero view-plane normal): any axis works.
+    candidate = (0.0, 0.0, 1.0)
+    try:
+        camera.SetViewUp(*candidate)
+    except Exception:
+        pass
+    return candidate
+
+
+def _prime_animation_scene(scene, view=None) -> bool:
+    """Force ParaView's camera cue to evaluate its first keyframe.
+
+    With a normalized camera track the animation scene applies no camera at
+    exactly the first timestep until it has advanced once.  The uninitialized
+    camera sits at the origin, so the first frame renders as an empty (white)
+    view.  Advancing one frame and returning to the first frame primes the cue;
+    the user no longer has to step backwards and forwards manually.
+
+    Rendering is suppressed during the prime: the intermediate camera update
+    can otherwise make VTK log "Resetting view-up since view plane normal is
+    parallel" while the cue interpolates from its uninitialized state.
+    """
+    if scene is None:
+        return False
+    suppress = None
+    try:
+        if view is not None:
+            suppress = view.SuppressRendering
+            view.SuppressRendering = True
+        scene.GoToNext()
+        scene.GoToFirst()
+        return True
+    except Exception:
+        return False
+    finally:
+        if suppress is not None:
+            try:
+                view.SuppressRendering = suppress
+            except Exception:
+                pass
+
+
 def _bounds_at_time(reader, time_s: float, fallback_center):
     """Read one frame's bounds and center, or return a fallback center."""
     if reader is None:
@@ -554,6 +625,8 @@ def _install_camera_orbit(args, view, scene, excav_reader, times):
     camera.SetFocalPoint(*center)
     camera.SetPosition(*frames[0].Position)
     camera.SetViewUp(*axis)
+    # Prime the cue so the first frame is already framed instead of blank.
+    _prime_animation_scene(scene, view)
     return (f"{n + 1} keyframes, {speed:g} rev/s, {fit_note} radius {radius:g} m, "
             f"inclination {inclination:g} deg, axis Z, "
             f"center lowered {center_drop:g} m")
@@ -930,6 +1003,10 @@ def main():
         return 1
 
     try:
+        # Avoid VTK's "Resetting view-up since view plane normal is parallel"
+        # warning when the GUI starts from a top-down or otherwise degenerate
+        # camera orientation.
+        _set_nonparallel_view_up(view.GetActiveCamera())
         ResetCamera(view)
         view.ResetCamera()
     except Exception:
