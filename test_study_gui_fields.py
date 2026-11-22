@@ -537,6 +537,56 @@ class PreviewStyleSettingsTest(unittest.TestCase):
             gui.SETTINGS_FILE = original
 
 
+class GuiScaleSettingsTest(IsolatedGuiDefaultsTest):
+    def test_system_scaling_is_the_shipped_default(self) -> None:
+        import study_gui as gui
+
+        self.assertEqual(gui.SHIPPED_SETTINGS["ui_scale"], gui.UI_SCALE_AUTO)
+
+    def test_scale_setting_round_trip(self) -> None:
+        import study_gui as gui
+
+        original = gui.SETTINGS_FILE
+        try:
+            with tempfile.TemporaryDirectory(prefix="gui_scale_", dir="/tmp/opencode") as tmp:
+                gui.SETTINGS_FILE = Path(tmp) / "settings.json"
+                values = dict(gui.SHIPPED_SETTINGS)
+                values["ui_scale"] = 1.5
+                gui.write_ui_settings(values)
+                self.assertEqual(gui.load_ui_settings()["ui_scale"], 1.5)
+        finally:
+            gui.SETTINGS_FILE = original
+
+    def test_apply_updates_tk_scaling_and_auto_restores_system_value(self) -> None:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        with tempfile.TemporaryDirectory(prefix="gui_scale_apply_", dir="/tmp/opencode") as tmp:
+            settings_file = Path(tmp) / "settings.json"
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with patch.object(gui, "SETTINGS_FILE", settings_file):
+                    app = gui.StudyGUI(root)
+                    system_scaling = app._system_scaling
+                    self.assertAlmostEqual(
+                        float(root.tk.call("tk", "scaling")), system_scaling, delta=0.01)
+
+                    app.settings_vars["ui_scale"].set("1.5")
+                    app._apply_settings_now()
+                    self.assertAlmostEqual(
+                        float(root.tk.call("tk", "scaling")), 1.5, delta=0.01)
+                    self.assertEqual(app.settings["ui_scale"], 1.5)
+
+                    app.settings_vars["ui_scale"].set("0")
+                    app._apply_settings_now()
+                    self.assertAlmostEqual(
+                        float(root.tk.call("tk", "scaling")), system_scaling, delta=0.01)
+            finally:
+                root.destroy()
+
+
 class ReverseSpinToggleTest(IsolatedGuiDefaultsTest):
     def test_toggle_flips_signed_omega_and_command_flags(self) -> None:
         import tkinter as tk

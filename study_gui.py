@@ -223,8 +223,12 @@ DOC_HEADING_FONT = "StudyDocHeadingFont"
 DOC_CODE_FONT = "StudyDocCodeFont"
 LIGHT_TEXT = "#000000"
 DARK_TEXT = "#F2F2F2"
+UI_SCALE_MIN = 0.75
+UI_SCALE_MAX = 2.0
+UI_SCALE_AUTO = 0.0
 
 SHIPPED_SETTINGS: dict[str, object] = {
+    "ui_scale": UI_SCALE_AUTO,
     "font_size": 10,
     "window_width": 1100,
     "window_height": 1080,
@@ -238,6 +242,8 @@ SHIPPED_SETTINGS: dict[str, object] = {
 }
 
 SETTINGS_INFO: dict[str, str] = {
+    "ui_scale": "Whole-GUI scale factor. 0 follows the system Tk scaling; 1.0 is unscaled, and 0.75-2.0 "
+                "enlarges or shrinks fonts and font-sized widgets. Window width/height remain in pixels.",
     "font_size": "Base text size (7-24). Applies to labels, entries, buttons, and log panels immediately.",
     "window_width": "Window width in pixels used the next time the GUI starts (640-3840).",
     "window_height": "Window height in pixels used the next time the GUI starts (480-2160).",
@@ -280,6 +286,25 @@ def _setting_int(value: object, label: str, low: int, high: int, default: int, s
     return number
 
 
+def _setting_scale(value: object, strict: bool = False) -> float:
+    """Validate the GUI scale: 0 follows the system, otherwise 0.75-2.0."""
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError):
+        if strict:
+            raise ValueError("GUI scale must be 0 (system) or a number from 0.75 to 2.0.")
+        return float(UI_SCALE_AUTO)
+    if not math.isfinite(number):
+        if strict:
+            raise ValueError("GUI scale must be 0 (system) or a number from 0.75 to 2.0.")
+        return float(UI_SCALE_AUTO)
+    if number != UI_SCALE_AUTO and not (UI_SCALE_MIN <= number <= UI_SCALE_MAX):
+        if strict:
+            raise ValueError("GUI scale must be 0 (system) or a number from 0.75 to 2.0.")
+        return float(UI_SCALE_AUTO)
+    return number
+
+
 def load_ui_settings() -> dict[str, object]:
     """Load appearance preferences, falling back to shipped values per key."""
     values = dict(SHIPPED_SETTINGS)
@@ -291,6 +316,7 @@ def load_ui_settings() -> dict[str, object]:
         return values
     if not isinstance(data, dict):
         return values
+    values["ui_scale"] = _setting_scale(data.get("ui_scale"))
     values["font_size"] = _setting_int(
         data.get("font_size"), "Text size", 7, 24, int(SHIPPED_SETTINGS["font_size"]))
     values["window_width"] = _setting_int(
@@ -321,6 +347,7 @@ def load_ui_settings() -> dict[str, object]:
 def write_ui_settings(values: dict[str, object]) -> None:
     """Persist only validated appearance preferences."""
     clean = {
+        "ui_scale": _setting_scale(values.get("ui_scale")),
         "font_size": _setting_int(values.get("font_size"), "Text size", 7, 24, int(SHIPPED_SETTINGS["font_size"])),
         "window_width": _setting_int(values.get("window_width"), "Window width", 640, 3840, int(SHIPPED_SETTINGS["window_width"])),
         "window_height": _setting_int(values.get("window_height"), "Window height", 480, 2160, int(SHIPPED_SETTINGS["window_height"])),
@@ -724,6 +751,7 @@ class StudyGUI:
         self.settings_vars: dict[str, StringVar | BooleanVar] = {}
         self.text_widgets: list[tk.Text] = []
         self.ui_palette: dict[str, str] = {}
+        self._system_scaling = self._tk_scaling()
         self._apply_ui_settings(self.settings)
         self.proc: subprocess.Popen | None = None
         self.log_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
@@ -738,6 +766,13 @@ class StudyGUI:
         self._update_particle_estimate()
         self.root.after(100, self._drain_log)
         self.root.after(100, self._drain_tools_log)
+
+    def _tk_scaling(self) -> float:
+        """Read Tk's current pixel-per-point scaling, falling back to 1.0."""
+        try:
+            return float(self.root.tk.call("tk", "scaling"))
+        except (tk.TclError, TypeError, ValueError):
+            return 1.0
 
     def _v(self, key: str, value, is_bool: bool = False, target=None):
         store = target if target is not None else self.vars
@@ -1548,6 +1583,7 @@ class StudyGUI:
 
         values = self.settings
         self.settings_vars = {
+            "ui_scale": StringVar(value=str(values["ui_scale"])),
             "font_size": StringVar(value=str(values["font_size"])),
             "window_width": StringVar(value=str(values["window_width"])),
             "window_height": StringVar(value=str(values["window_height"])),
@@ -1559,6 +1595,7 @@ class StudyGUI:
             "preview_particle_size": StringVar(value=str(values["preview_particle_size"])),
             "preview_line_width": StringVar(value=str(values["preview_line_width"])),
         }
+        r = self._settings_row(p, r, "GUI scale (0 = system)", "ui_scale", kind="scale")
         r = self._settings_row(p, r, "Text size", "font_size", kind="size")
         r = self._settings_row(p, r, "Window width (px)", "window_width")
         r = self._settings_row(p, r, "Window height (px)", "window_height")
@@ -1582,7 +1619,7 @@ class StudyGUI:
         ttk.Label(
             p,
             text="Apply now changes this session only; Save settings also keeps the values for the next launch. "
-                 "Text size affects the whole GUI, including the log panels.",
+                 "GUI scale and text size affect the whole interface, including the log panels.",
             justify=LEFT,
         ).grid(row=r, column=0, columnspan=5, sticky=W, padx=8, pady=(2, 8)); r += 1
         self._refresh_color_preview()
@@ -1596,6 +1633,10 @@ class StudyGUI:
                             command=callback).grid(row=r, column=1, sticky=W, padx=4)
         elif kind == "size" and hasattr(ttk, "Spinbox"):
             ttk.Spinbox(parent, from_=7, to=24, width=8,
+                        textvariable=var).grid(row=r, column=1, sticky=W, padx=4)
+        elif kind == "scale" and hasattr(ttk, "Spinbox"):
+            ttk.Spinbox(parent, from_=UI_SCALE_AUTO, to=UI_SCALE_MAX,
+                        increment=0.05, width=8,
                         textvariable=var).grid(row=r, column=1, sticky=W, padx=4)
         else:
             ttk.Entry(parent, textvariable=var, width=12).grid(row=r, column=1, sticky=W, padx=4)
@@ -1644,6 +1685,7 @@ class StudyGUI:
                 raise ValueError("Text color must be a hex color such as #336699.")
             color = str(self.settings.get("text_color", SHIPPED_SETTINGS["text_color"]))
         return {
+            "ui_scale": _setting_scale(self.settings_vars["ui_scale"].get(), strict=strict),
             "font_size": _setting_int(self.settings_vars["font_size"].get(), "Text size",
                                       7, 24, int(self.settings["font_size"]), strict=strict),
             "window_width": _setting_int(self.settings_vars["window_width"].get(), "Window width",
@@ -1672,7 +1714,7 @@ class StudyGUI:
     def _sync_settings_vars(self, values: dict[str, object]) -> None:
         if not self.settings_vars:
             return
-        for key in ("font_size", "window_width", "window_height", "text_color",
+        for key in ("ui_scale", "font_size", "window_width", "window_height", "text_color",
                     "preview_particle_limit", "preview_frame_stride",
                     "preview_particle_size", "preview_line_width"):
             self.settings_vars[key].set(str(values[key]))
@@ -1693,6 +1735,12 @@ class StudyGUI:
     def _apply_ui_settings(self, values: dict[str, object] | None = None) -> None:
         """Apply appearance preferences to the live Tk widgets."""
         values = values or self.settings
+        scale = _setting_scale(values.get("ui_scale"))
+        effective_scale = scale if scale > 0 else getattr(self, "_system_scaling", 1.0)
+        try:
+            self.root.tk.call("tk", "scaling", effective_scale)
+        except tk.TclError:
+            pass
         size = _setting_int(values.get("font_size"), "Text size", 7, 24, 10)
         width = _setting_int(values.get("window_width"), "Window width", 640, 3840, 1100)
         height = _setting_int(values.get("window_height"), "Window height", 480, 2160, 1080)
@@ -1880,7 +1928,7 @@ class StudyGUI:
     def _reset_settings(self):
         if not messagebox.askyesno(
             "Settings",
-            "Reset text size, window size, text color, and dark mode to shipped defaults?",
+            "Reset GUI scale, text size, window size, text color, and dark mode to shipped defaults?",
         ):
             return
         values = dict(SHIPPED_SETTINGS)
