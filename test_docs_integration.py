@@ -45,14 +45,15 @@ class DocEntriesTest(unittest.TestCase):
         self.assertTrue(EXPECTED_DOCS.issubset(registered),
                         f"unregistered docs: {sorted(EXPECTED_DOCS - registered)}")
 
-    def test_gui_info_entries_explain_control_analogy_and_impact(self) -> None:
+    def test_gui_info_entries_explain_control_and_cost(self) -> None:
         import study_gui as gui
 
         for group_name, group in (("PARAM_INFO", gui.PARAM_INFO),
                                   ("SETTINGS_INFO", gui.SETTINGS_INFO)):
             for key, text in group.items():
                 with self.subTest(group=group_name, key=key):
-                    self.assertIn("Think of it as:", text)
+                    self.assertNotIn("Think of it as:", text)
+                    self.assertIn("Cost:", text)
                     self.assertGreater(len(text), 90)
 
     def test_gui_info_reflects_verified_behaviour(self) -> None:

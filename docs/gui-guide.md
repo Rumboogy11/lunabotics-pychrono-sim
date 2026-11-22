@@ -31,7 +31,7 @@ xvfb-run ./run_study_gui.sh
 
 The wizard occupies the left large area of the window. Six sub-tabs guide you through a study. Use **< Back** and **Next >** at the bottom to move between them; the pages are scrollable.
 
-There is an **Info** button next to most fields. It opens a short explanation that says what the value controls, gives a physical or visual analogy, and notes the runtime, disk, or display cost where it matters. The same help text is collected into the **GUI parameter reference** page in the Docs tab.
+There is an **Info** button next to most fields. It opens a short explanation that says what the value controls and notes the runtime, disk, or display cost where it matters. The same help text is collected into the **GUI parameter reference** page in the Docs tab.
 
 ### Page 1 — Study
 
