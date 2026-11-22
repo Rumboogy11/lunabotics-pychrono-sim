@@ -144,7 +144,7 @@ Fields are grouped by wizard page. Study name and output directory are intention
 
 ## Tools / View Results tab
 
-Set **Study/output directory** to the folder containing `study_config.json` (or an `Output_*` folder) and use **Browse** if needed. The actions are:
+**Study/output directory** starts at the study wizard's output directory and follows edits to that field. Set it to the folder containing `study_config.json` (or an `Output_*` folder) and use **Browse** if you want to inspect a different run. The actions are:
 
 | Button | What it does |
 | --- | --- |
@@ -177,7 +177,7 @@ A Tk-only viewer that reads `crm/particles_*.csv`, `crm/summary.csv`, and `fea/s
 - CRM and FEA scalar timelines with a lightweight Play control;
 - an editable particles-to-sample count (default 5,000), a particle-frame stride, marker size, and line width.
 
-Every row of the displayed frame is read, so the reported particle count is the true simulated count; the sample limit only bounds how many dots are drawn. You can also change the directory from the Tools tab.
+Every row of the displayed frame is read, so the reported particle count is the true simulated count; the sample limit only bounds how many dots are drawn. The preview starts on the study wizard's output directory and follows edits to that field; you can also change the directory from the Tools tab or from its own directory entry.
 
 ## Docs tab
 

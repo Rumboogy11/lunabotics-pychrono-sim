@@ -99,7 +99,7 @@ Three independent strides control export cost:
 
 ### 1. Output Preview tab (fastest)
 
-In the GUI: **Tools / View Results** → **Open lightweight CRM/FEA output preview**. It reads CSVs directly with Tkinter and `csv`; no VTK files needed. Drag to orbit, wheel to zoom, and use the frame slider or Play button. The sample limit (default 5,000) bounds drawn dots only; the true particle count is reported. An orange index mark follows the signed `spin_deg` so reverse spin is visible.
+In the GUI: **Tools / View Results** → **Open lightweight CRM/FEA output preview**. It reads CSVs directly with Tkinter and `csv`; no VTK files needed. The Tools directory and Output Preview start on the study wizard's output directory and follow edits to it; you can still browse to another run. Drag to orbit, wheel to zoom, and use the frame slider or Play button. The sample limit (default 5,000) bounds drawn dots only; the true particle count is reported. An orange index mark follows the signed `spin_deg` so reverse spin is visible.
 
 ### 2. Result plots
 

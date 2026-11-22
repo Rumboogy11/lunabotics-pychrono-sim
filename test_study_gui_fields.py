@@ -80,6 +80,88 @@ class StudyNameOutputDirSyncTest(IsolatedGuiDefaultsTest):
             root.destroy()
 
 
+class WizardOutputDirectorySyncTest(IsolatedGuiDefaultsTest):
+    @staticmethod
+    def _cancel_pending_refresh(root, app) -> None:
+        import tkinter as tk
+
+        pending = getattr(app, "_preview_refresh_after", None)
+        if pending is not None:
+            try:
+                root.after_cancel(pending)
+            except tk.TclError:
+                pass
+
+    def test_tools_and_preview_start_on_wizard_output_directory(self) -> None:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        app = None
+        try:
+            app = gui.StudyGUI(root)
+            expected = app.vars["output_dir"].get()
+            self.assertTrue(expected)
+            self.assertEqual(app.tools_study_dir.get(), expected)
+            self.assertEqual(app.output_preview.dir_var.get(), expected)
+        finally:
+            if app is not None:
+                self._cancel_pending_refresh(root, app)
+            root.destroy()
+
+    def test_output_directory_changes_propagate_to_tools_and_preview(self) -> None:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        app = None
+        try:
+            app = gui.StudyGUI(root)
+
+            app.vars["output_dir"].set("/tmp/wizard_out_a")
+            self.assertEqual(app.tools_study_dir.get(), "/tmp/wizard_out_a")
+            self.assertEqual(app.output_preview.dir_var.get(), "/tmp/wizard_out_a")
+
+            app.tools_study_dir.set("/tmp/manual_tools_dir")
+            app.vars["output_dir"].set("/tmp/wizard_out_b")
+            self.assertEqual(app.tools_study_dir.get(), "/tmp/wizard_out_b")
+            self.assertEqual(app.output_preview.dir_var.get(), "/tmp/wizard_out_b")
+
+            app.vars["study_name"].set("linked_run")
+            expected = str(gui.ROOT / "Output_linked_run")
+            self.assertEqual(app.vars["output_dir"].get(), expected)
+            self.assertEqual(app.tools_study_dir.get(), expected)
+            self.assertEqual(app.output_preview.dir_var.get(), expected)
+        finally:
+            if app is not None:
+                self._cancel_pending_refresh(root, app)
+            root.destroy()
+
+    def test_open_preview_uses_manual_tools_directory(self) -> None:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        root.withdraw()
+        app = None
+        try:
+            app = gui.StudyGUI(root)
+            app.tools_study_dir.set("/tmp/manual_tools_dir")
+            with patch.object(app, "_apply_settings_now"), \
+                 patch.object(app.output_preview, "refresh"):
+                app._open_output_preview()
+            self.assertEqual(app.output_preview.dir_var.get(), "/tmp/manual_tools_dir")
+        finally:
+            if app is not None:
+                self._cancel_pending_refresh(root, app)
+            root.destroy()
+
+
 class WizardCadenceFieldsTest(IsolatedGuiDefaultsTest):
     def test_preview_particle_sample_default_is_5000(self) -> None:
         import study_gui as gui

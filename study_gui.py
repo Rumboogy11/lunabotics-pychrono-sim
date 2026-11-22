@@ -413,7 +413,7 @@ PARAM_INFO: dict[str, str] = {
     ),
     # Tools tab
     "tools_study_dir": _info(
-        "Study/output directory the Tools tab inspects. Point it at the folder containing study_config.json or a previous Output_* run.",
+        "Study/output directory the Tools tab inspects. It starts at the study wizard's output directory and follows edits to that field; you can also point it at the folder containing study_config.json or a previous Output_* run.",
         "Cost: none until a tool runs; a wrong folder makes export or viewing fail with a clear status message.",
     ),
     "tools_stride": _info(
@@ -1132,16 +1132,43 @@ class StudyGUI:
             store[key] = StringVar(value="" if value is None else str(value))
         return store[key]
 
+    def _wizard_output_dir(self) -> str:
+        """Output directory currently configured in the study wizard."""
+        return self._g("output_dir").strip() or str(ROOT)
+
     def _on_study_name_changed(self, *_):
         """Keep the default output folder aligned with the study name."""
         name = self._g("study_name").strip()
         self.vars["output_dir"].set(str(ROOT / f"Output_{name}"))
+
+    def _on_output_dir_changed(self, *_):
+        """Mirror the wizard output directory into Tools and Output Preview."""
+        value = self._wizard_output_dir()
+        tools = getattr(self, "tools_study_dir", None)
+        if tools is not None and tools.get() != value:
+            tools.set(value)
+        preview = getattr(self, "output_preview", None)
+        if preview is None or preview.dir_var.get() == value:
+            return
+        preview.set_directory(value)
+        self._schedule_preview_refresh()
+
+    def _schedule_preview_refresh(self) -> None:
+        """Debounce the CSV read while the output directory is being typed."""
+        pending = getattr(self, "_preview_refresh_after", None)
+        if pending is not None:
+            try:
+                self.root.after_cancel(pending)
+            except tk.TclError:
+                pass
+        self._preview_refresh_after = self.root.after(300, self._refresh_output_preview)
 
     def _build_vars(self):
         name = datetime.now().strftime("study_%Y%m%d_%H%M%S")
         self._v("study_name", name)
         self._v("output_dir", str(ROOT / f"Output_{name}"))
         self.vars["study_name"].trace_add("write", self._on_study_name_changed)
+        self.vars["output_dir"].trace_add("write", self._on_output_dir_changed)
         defaults = shipped_defaults()
         defaults.update(load_saved_defaults())
         for key, value in defaults.items():
@@ -1183,25 +1210,8 @@ class StudyGUI:
         self._apply_ui_settings(self.settings)
 
     def _initial_preview_dir(self) -> str:
-        """Pick a useful starting directory for the output preview."""
-        tools = getattr(self, "tools_study_dir", None)
-        if tools is not None:
-            value = tools.get().strip()
-            if value and Path(value).is_dir():
-                return value
-        configured = Path(self._g("output_dir")).expanduser()
-        if configured.is_dir():
-            return str(configured)
-        try:
-            candidates = [
-                p for p in ROOT.glob("Output_*")
-                if p.is_dir() and ((p / "crm").is_dir() or (p / "fea").is_dir())
-            ]
-            if candidates:
-                return str(max(candidates, key=lambda p: p.stat().st_mtime))
-        except OSError:
-            pass
-        return str(ROOT)
+        """Start the output preview on the wizard's output directory."""
+        return self._wizard_output_dir()
 
     def _refresh_output_preview(self) -> None:
         preview = getattr(self, "output_preview", None)
@@ -1266,7 +1276,9 @@ class StudyGUI:
         self._apply_settings_now()
         self.notebook.select(self.preview_tab)
         if getattr(self, "output_preview", None) is not None:
-            self.output_preview.set_directory(self._initial_preview_dir())
+            tools = getattr(self, "tools_study_dir", None)
+            target = tools.get().strip() if tools is not None else ""
+            self.output_preview.set_directory(target or self._wizard_output_dir())
             self.output_preview.refresh()
 
     def _build_study_tab(self):
@@ -2130,7 +2142,7 @@ class StudyGUI:
         r = 0
         ttk.Label(p, text="Run/view tools for an existing study directory.",
                   font=HEADER_FONT).grid(row=r, column=0, columnspan=4, sticky=W, padx=8, pady=10); r += 1
-        self.tools_study_dir = StringVar(value=str(ROOT))
+        self.tools_study_dir = StringVar(value=self._wizard_output_dir())
         ttk.Label(p, text="Study/output directory").grid(row=r, column=0, sticky=W, padx=8, pady=4)
         ttk.Entry(p, textvariable=self.tools_study_dir, width=70).grid(row=r, column=1, sticky=W, padx=4)
         ttk.Button(p, text="Browse", command=self._browse_tools_dir).grid(row=r, column=2, sticky=W)
