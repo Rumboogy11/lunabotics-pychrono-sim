@@ -7,7 +7,7 @@ the Chrono::CRM driver and one-way FEA replay. Values are expressed in SI units
 
 Geometry note
 -------------
-The shipped reference drum mesh is measured as::
+The reference drum used for these defaults is measured as::
 
     x in [-0.061, 0.061], y in [-0.061, 0.061], z in [-0.033, 0.033]  [m]
 
@@ -27,10 +27,10 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parent
 GEOMETRY_DIR = ROOT / "geometry"
-STL_MEDIUM = GEOMETRY_DIR / "LunarDrumScrew_m_medium.stl"
-OBJ_MEDIUM = GEOMETRY_DIR / "LunarDrumScrew_m_medium.obj"
-STL_COARSE = GEOMETRY_DIR / "LunarDrumScrew_m_coarse.stl"
-OBJ_COARSE = GEOMETRY_DIR / "LunarDrumScrew_m_coarse.obj"
+STL_MEDIUM = GEOMETRY_DIR / "BucketDrumExcavator_m_medium.stl"
+OBJ_MEDIUM = GEOMETRY_DIR / "BucketDrumExcavator_m_medium.obj"
+STL_COARSE = GEOMETRY_DIR / "BucketDrumExcavator_m_coarse.stl"
+OBJ_COARSE = GEOMETRY_DIR / "BucketDrumExcavator_m_coarse.obj"
 
 # Extra soil beyond the drum footprint, per bed side, as a fraction of the
 # drum radius.  This keeps flung particles away from the BCE container walls.
@@ -53,7 +53,7 @@ class ExcavatorParams:
     drum_omega: float = 6.28 * 0.5          # rad/s, spin rate magnitude
     drum_half_length: float = 0.033         # m
     drum_radius: float = 0.061              # m (outer/crest radius)
-    stl_file: str = "LunarDrumScrew_m_medium.stl"
+    stl_file: str = "BucketDrumExcavator_m_medium.stl"
     drum_spin_axis: str = "X"               # global axis after initial orientation
 
     # ---- bed / motion sequencing ----

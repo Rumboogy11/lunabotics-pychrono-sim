@@ -366,31 +366,6 @@ apply_chrono_patch() {
   fi
 }
 
-prepare_reference_geometry() {
-  # geometry/ is intentionally gitignored, but the smoke test needs the
-  # reference drum OBJ. Generate it from the metre-scale STLs shipped in fea/.
-  mkdir -p "$PROJECT_ROOT/geometry"
-  local pairs=(
-    "fea/LunarDrumScrew_m_fea_contact_2000_m.stl:geometry/LunarDrumScrew_m_coarse.obj"
-    "fea/LunarDrumScrew_m_fea_contact_3000_m.stl:geometry/LunarDrumScrew_m_medium.obj"
-  )
-  local pair stl obj generated
-  for pair in "${pairs[@]}"; do
-    stl="${pair%%:*}"
-    obj="${pair##*:}"
-    [[ -f "$PROJECT_ROOT/$obj" ]] && continue
-    if [[ ! -f "$PROJECT_ROOT/$stl" ]]; then
-      warn "Reference mesh $stl not found; the CRM smoke test needs a drum OBJ"
-      continue
-    fi
-    log "Generating $obj from $stl"
-    (cd "$PROJECT_ROOT" && "$ENV_DIR/bin/python" stl_to_obj.py "$stl") >/dev/null
-    generated="$PROJECT_ROOT/$(dirname "$stl")/$(basename "${stl%.stl}").obj"
-    [[ -f "$generated" ]] || die "stl_to_obj.py did not produce $generated"
-    mv -f "$generated" "$PROJECT_ROOT/$obj"
-  done
-}
-
 verify_environment() {
   log "Verifying installation"
   # shellcheck disable=SC1091
@@ -459,7 +434,6 @@ PY
 link_project_paths
 bootstrap_micromamba
 create_environment "$MAMBA_EXE"
-prepare_reference_geometry
 fetch_chrono_source
 verify_chrono_source
 apply_chrono_patch

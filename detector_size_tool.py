@@ -10,7 +10,7 @@ while dragging so the study GUI can copy them into its fields in real time.
 Typical use from the GUI (or directly)::
 
     ./chrono-env/bin/python detector_size_tool.py \\
-        --step geometry/LunarDrumScrew_m.step \\
+        --step geometry/MyDrum.step \\
         --radius 0.061037 --length 0.066 --spacing 0.002 \\
         --source-axis Z --unit-scale 0.001 --show \\
         --result-json /tmp/detector_size.json

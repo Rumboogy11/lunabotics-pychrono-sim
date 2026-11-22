@@ -8,9 +8,8 @@ provided below. The earlier two-way-only state is preserved on the local branch
 `two-way-fea-wip` so the coupling diagnostics remain available.
 
 It uses the local Chrono 10 source build, a solid tetrahedral mesh of the STEP
-drum, and the same CRM SPH soil as the production driver. The default mesh is
-`fea/LunarDrumScrew_m_fea_decim8k.node` /
-`fea/LunarDrumScrew_m_fea_decim8k.ele`.
+drum, and the same CRM SPH soil as the production driver. Supply the mesh with
+`--fea-node` (and optionally `--fea-ele`); no mesh files are bundled.
 
 The two-way path is **not engineering-validated**. Treat it as a feasibility and
 diagnostic experiment only. The corrected fill/excavation metrics include SPH
@@ -293,11 +292,11 @@ wrapped. `FromTetGenFile` plus manual hub-node selection is the workable route.
 The supported converter is `step_to_chrono_fea.py`. New STEP models use `--axis
 Y` as the standard original-space drum axis; the converter rotates the exported
 mesh and CRM surface so that axis becomes local +Z for the FEA drivers. Pass
-`--axis Z` only when regenerating the legacy `LunarDrumScrew_m` model:
+`--axis Z` only for a legacy model whose source axis is Z:
 
 ```bash
-./chrono-env/bin/python step_to_chrono_fea.py geometry/LunarDrumScrew_m.step \
-    --out-prefix fea/LunarDrumScrew_m_fea_decim8k \
+./chrono-env/bin/python step_to_chrono_fea.py geometry/MyLegacyDrum.step \
+    --out-prefix fea/MyLegacyDrum_fea \
     --unit-scale 0.001 \
     --mesh-size 0.012 \
     --surface-target-faces 8000 \
@@ -314,7 +313,7 @@ mesh and CRM surface so that axis becomes local +Z for the FEA drivers. Pass
 Route: OpenCASCADE Boolean fusion -> `ShapeUpgrade_UnifySameDomain` ->
 STL triangulation -> topology-preserving quadric decimation -> optional
 part-aware interior decimation -> `trimesh.remesh.subdivide_to_size` -> TetGen
-with `pYQ`. Direct Gmsh 3D meshing was abandoned because screw/thread surfaces
+with `pYQ`. Direct Gmsh 3D meshing was abandoned because bucket drum excavator surfaces
 produce segment/facet intersection failures. OpenCASCADE's parallel
 tessellation mode is enabled by default; `--no-occ-parallel` disables it, and
 `--time-stages` reports time in fusion, tessellation, surface processing,
@@ -331,7 +330,7 @@ For multi-solid STEP assemblies, add:
 This drops sub-millimetre fasteners, removes the splitter edges left by Boolean
 fusion, and increases the decimation target automatically until the surface is
 watertight and TetGen accepts it. MeshFix is intentionally **not** used by the
-default route: on fused shells it can seal the wrong side and inflate the SPIKEY
+default route: on fused shells it can seal the wrong side and inflate the bucket drum excavator
 volume by several hundred percent. `--repair-after-decimation` remains as a
 legacy compatibility option.
 
@@ -342,11 +341,11 @@ models. It classifies the decimated surface by radial distance from the source
 drum axis, extracts the patch wholly inside `--part-aware-radius` (default
 0.05 m), and applies topology-preserving, boundary-fixed `vtkDecimatePro` only
 to that patch. Protected exterior faces are copied unchanged, so the CRM
-contact surface and screw-flight resolution are not reduced. The legacy
+contact surface and bucket drum excavator exterior resolution are not reduced. The legacy
 `--repair-after-decimation` route is incompatible; use MeshFix order `none` or
 `before`.
 
-On `geometry/spikey/Assembly 1.step` with
+On a bucket drum excavator CAD model with
 `--mesh-size 0.02 --surface-target-faces 80000 --surface-max-faces 256000
 --min-solid-volume 1e-05 --hub-radius 0.0357669 --axis Y`, the default
 `--part-aware-reduction 0.75` produced:
@@ -369,15 +368,15 @@ The promoted 8k mesh has:
 - volume error `0.763%` relative to the CAD solid;
 - edge lengths min/median/max `6.92e-5 / 4.09e-3 / 1.74e-2 m`.
 
-The original fine mesh (`fea/LunarDrumScrew_m_fea.*`) has 17,658 nodes and
-73,423 tets but is not the default. Surface targets below roughly 7,500 faces
+The original fine reference mesh has 17,658 nodes and 73,423 tets but is not the
+default. Surface targets below roughly 7,500 faces
 either lose the hub/volume or make TetGen report self-intersections. The
 converter now warns instead of aborting when decimation leaves no `HUB` nodes,
 because the FEA driver selects hub nodes from the loaded mesh.
 
-Production CRM geometry remains `geometry/LunarDrumScrew_m_coarse.obj` when using
-the supplied reference meshes. Avoid overly simplified meshes for production work
-because aggressive simplification can close physical holes and alter contact behavior.
+Use the CRM surface OBJ generated from your CAD for production work. Avoid
+overly simplified meshes because aggressive simplification can close physical
+holes and alter contact behavior.
 
 ### Verifying a conversion visually
 
@@ -388,8 +387,8 @@ overlay of the two (all in metres, in the FEA local frame):
 ./chrono-env/bin/python view_geometry.py --study-dir Output_my_study
 # or point at explicit files:
 ./chrono-env/bin/python view_geometry.py \
-    --step 'geometry/spikey/Assembly 1.step' \
-    --fea-node '/tmp/opencode/spikey_wizard_v2/mesh/Assembly 1_fea.node'
+    --step 'geometry/BucketDrumExcavator.step' \
+    --fea-node 'Output_my_study/mesh/BucketDrumExcavator_fea.node'
 ```
 
 By default it opens an interactive 3D window (drag to rotate, linked panels);
@@ -408,7 +407,7 @@ The FEA-specific defaults are:
 
 | Setting | Default | Why |
 |---|---:|---|
-| mesh | `fea/LunarDrumScrew_m_fea_decim8k.node/.ele` | promoted tetrahedral mesh; mesh promotion does not validate coupling |
+| mesh | user-supplied `--fea-node`/`--fea-ele` | promoted tetrahedral mesh; mesh promotion does not validate coupling |
 | SPH spacing | `0.012 m` | same smoke resolution as rigid CRM |
 | timestep | `2.5e-4 s` | FEA/SPH coupling is unstable at the former rigid production step `5e-4 s` |
 | BCE layers | `2` | best tested interacting setup; warning remains and the run diverges by 0.5 s |

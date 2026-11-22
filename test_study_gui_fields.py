@@ -142,8 +142,9 @@ class SurfaceFitToleranceFieldTest(unittest.TestCase):
     def test_wizard_config_and_mesh_command_carry_fit_tolerance(self) -> None:
         import study_wizard as wiz
 
-        step = ROOT / "geometry" / "spikey" / "Assembly 1.step"
         with tempfile.TemporaryDirectory(prefix="surface_fit_", dir="/tmp/opencode") as tmp:
+            step = Path(tmp) / "BucketDrumExcavator.step"
+            step.write_text("ISO-10303-21;\nEND-ISO-10303-21;\n", encoding="utf-8")
             args = wiz.build_parser().parse_args([
                 "--geometry", "step",
                 "--step-file", str(step),

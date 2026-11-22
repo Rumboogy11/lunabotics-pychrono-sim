@@ -3,8 +3,8 @@
 
 This converter uses OpenCASCADE to read and tessellate the STEP solid, MeshFix to
 repair the triangulated surface, and TetGen to generate linear tetrahedra.  That
-route is much more robust than Gmsh's direct 3D mesher for the supplied Onshape
-model, whose screw/thread surfaces make Gmsh report segment/facet intersections.
+route is much more robust than Gmsh's direct 3D mesher for bucket drum excavator
+CAD, whose curved bucket surfaces often make Gmsh report segment/facet intersections.
 
 Outputs
 -------
@@ -25,7 +25,7 @@ kinematic spindle while the rest of the solid remains free to deform.
 Units and frame
 ---------------
 STEP files carry no reliable SI unit metadata.  ``--unit-scale`` converts STEP
-coordinates to metres (use ``0.001`` for the supplied mm-valued file).  All size
+coordinates to metres (use ``0.001`` for mm-valued CAD).  All size
 options are specified in metres and converted internally.  ``--axis`` names the
 drum axis in the **original STEP space** and defaults to Y for new models; the
 exported mesh and CRM surface are rotated so that axis becomes local +Z, which
@@ -34,9 +34,9 @@ is the convention used by the FEA drivers.  Optional ``--rotate`` and
 
 Example
 -------
-    # Legacy model: source drum axis is Z.
-    ./chrono-env/bin/python step_to_chrono_fea.py geometry/LunarDrumScrew_m.step \\
-        --out-prefix fea/LunarDrumScrew_m_fea_decim8k --unit-scale 0.001 \\
+    # Legacy-style model: source drum axis is Z.
+    ./chrono-env/bin/python step_to_chrono_fea.py geometry/MyDrum.step \\
+        --out-prefix fea/MyDrum_fea --unit-scale 0.001 \\
         --mesh-size 0.012 --surface-target-faces 8000 \\
         --hub-radius 0.0015 --axis Z
 
@@ -45,11 +45,11 @@ Example
         --out-prefix fea/NewDrum_fea --unit-scale 0.001 \\
         --mesh-size 0.012 --axis Y --hub-radius 0.035
 
-    # Recommended for the spikey CAD: start at 8k faces, preserve exterior screw faces,
+    # Recommended for bucket drum excavator CAD: start at 8k faces, preserve exterior faces,
     # and raise the target automatically until the measured exterior fit and TetGen pass.
     # The wizard/GUI enable this by default.
-    ./chrono-env/bin/python step_to_chrono_fea.py "geometry/spikey/Assembly 1.step" \\
-        --out-prefix fea/PartAware_fea --unit-scale 0.001 \\
+    ./chrono-env/bin/python step_to_chrono_fea.py "geometry/BucketDrumExcavator.step" \\
+        --out-prefix fea/BucketDrumExcavator_fea --unit-scale 0.001 \\
         --mesh-size 0.02 --surface-target-faces 8000 --surface-fit-tolerance 0.001 --min-solid-volume 1e-05 \\
         --hub-radius 0.0357669 --axis Y \\
         --part-aware-simplify --part-aware-radius 0.05 --part-aware-reduction 0.75
@@ -655,7 +655,7 @@ def decimate_to_watertight(
     """Decimate as far as possible while keeping a watertight surface.
 
     Quadric decimation is topology-agnostic: an overly aggressive reduction
-    opens holes or creates non-manifold edges in complex screw assemblies.
+    opens holes or creates non-manifold edges in complex bucket drum excavator assemblies.
     MeshFix can close those holes, but on fused shells it often fills the wrong
     side and inflates the volume by hundreds of percent.  Retrying with a
     progressively larger target finds the coarsest topology-safe surface
@@ -759,7 +759,7 @@ def measure_exterior_fit(
     """Measure bidirectional exterior deviation from the raw OCC surface.
 
     Only faces outside the radial hub/interior band are sampled, so the fit
-    check protects the screw-flight/exterior detail while allowing the hub to
+    check protects the bucket drum excavator exterior detail while allowing the hub to
     be coarsened.  The reported error is the larger of the two p99.9 distances;
     maxima are retained for diagnostics.  Distances are measured in metres in
     the original CAD frame, before the export-axis rotation.

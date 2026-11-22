@@ -23,8 +23,9 @@ pychrono-env/
 output/
 geometry_checks/
 
-# Local CAD/geometry assets (not source-controlled).
+# Local CAD/FEA geometry assets (not source-controlled).
 /geometry/
+/fea/
 
 # User-edited GUI defaults (workspace-local, regenerated from shipped values).
 study_gui_defaults.json

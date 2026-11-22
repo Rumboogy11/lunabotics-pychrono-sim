@@ -11,8 +11,8 @@ Typical use::
 
     ./chrono-env/bin/python view_geometry.py --study-dir Output_my_study
     ./chrono-env/bin/python view_geometry.py \\
-        --step 'geometry/spikey/Assembly 1.step' \\
-        --fea-node '/tmp/opencode/spikey_wizard_v2/mesh/Assembly 1_fea.node'
+        --step 'geometry/BucketDrumExcavator.step' \\
+        --fea-node 'Output_my_study/mesh/BucketDrumExcavator_fea.node'
 
 By default it opens an interactive window when a display is available (drag to
 rotate; the three views are linked).  Pass ``--output PATH`` to save a PNG

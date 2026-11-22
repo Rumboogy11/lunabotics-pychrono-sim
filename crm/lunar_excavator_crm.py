@@ -32,9 +32,9 @@ leaves either condition.  Fill uses exactly this excavated set::
     capacity_mass = bulk_density * pi * inner_radius**2 * drum_length
     fill_ratio    = retained_mass / capacity_mass
 
-The cylindrical capacity denominator stays the nominal envelope; the screw
-flights displace some of it.  Pass ``--capacity-volume`` if a CAD-derived free
-volume is available.
+The cylindrical capacity denominator stays the nominal envelope; the bucket
+drum excavator flights displace some of it.  Pass ``--capacity-volume`` if a
+CAD-derived free volume is available.
 
 Requirements
 ------------
@@ -50,10 +50,11 @@ and CRM enabled.  ``--help`` works without those modules.
 
 Usage
 -----
-    ./crm/run.sh --smoke-test
-    ./crm/run.sh --duration 20 --fps 20 --output-dir Output_CRM_Baseline
-    ./crm/run.sh --mesh-file geometry/spiked_drum.obj \
-        --output-dir Output_CRM_Spiked
+    ./crm/run.sh --smoke-test --mesh-file /path/to/your_drum.obj
+    ./crm/run.sh --mesh-file /path/to/your_drum.obj \
+        --duration 20 --fps 20 --output-dir Output_CRM_Baseline
+    ./crm/run.sh --mesh-file /path/to/your_other_drum.obj \
+        --output-dir Output_CRM_BucketDrumVariant
 
     # Print the independent soil estimate (no CRM import needed):
     ./crm/run.sh --print-soil
@@ -299,9 +300,9 @@ def build_parser(*, include_drum_gravity: bool = True) -> argparse.ArgumentParse
                    help="half of drum axial length in m (default: shared config, 0.033)")
 
     p.add_argument("--mesh", choices=("coarse", "medium"), default="coarse",
-                   help="shipped OBJ: full coarse (default, holes preserved) or medium")
+                   help="local OBJ name: full coarse (default, holes preserved) or medium")
     p.add_argument("--mesh-file", type=Path, default=None,
-                   help="custom drum OBJ, e.g. a spiked variant (overrides --mesh)")
+                   help="custom drum OBJ, e.g. a bucket drum variant (overrides --mesh)")
     p.add_argument("--inner-radius", type=float, default=None,
                    help="nominal cavity radius for fill ratio in m (default: 0.055)")
     p.add_argument("--capacity-volume", type=float, default=None,
@@ -662,8 +663,8 @@ def resolve_mesh(args: argparse.Namespace) -> Path:
         mesh = OBJ_COARSE if args.mesh == "coarse" else OBJ_MEDIUM
     if not mesh.exists():
         raise SystemExit(
-            f"missing drum mesh {mesh}; run `python3 stl_to_obj.py` first, "
-            "or pass --mesh-file with a spiked variant OBJ"
+            f"missing drum mesh {mesh}; supply your own OBJ, "
+            "or pass --mesh-file with a bucket drum variant OBJ"
         )
     return mesh
 

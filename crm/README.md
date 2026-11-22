@@ -25,8 +25,11 @@ Use the local Chrono 10 source build with FSI-SPH and CRM enabled (see `../envir
 
 ```bash
 source ../environment/activate-chrono-source.sh
-PYTHON="$CHRONO_ENV/bin/python" ./run.sh --smoke-test
+PYTHON="$CHRONO_ENV/bin/python" ./run.sh --smoke-test --mesh-file /path/to/your_drum.obj
 ```
+
+Replace `/path/to/your_drum.obj` with a local CRM surface mesh; no geometry is
+bundled with the project.
 
 `./run.sh --help` and `./run.sh --print-soil` work without CRM modules because imports are deferred.
 
@@ -57,16 +60,17 @@ Override via CLI (e.g. `--density`, `--youngs-modulus`, `--friction`, `--cohesio
 ./run.sh --print-soil
 
 # Quick setup check
-PYTHON="$CHRONO_ENV/bin/python" ./run.sh --smoke-test
+PYTHON="$CHRONO_ENV/bin/python" ./run.sh --smoke-test --mesh-file /path/to/your_drum.obj
 
 # Baseline run
 PYTHON="$CHRONO_ENV/bin/python" ./run.sh \
+  --mesh-file /path/to/your_drum.obj \
   --duration 20 --fps 20 --output-dir Output_CRM_Baseline
 
 # Alternative geometry (same pose/scale)
 PYTHON="$CHRONO_ENV/bin/python" ./run.sh \
-  --mesh-file ../geometry/LunarDrumScrew_spiked.obj \
-  --output-dir Output_CRM_Spiked
+  --mesh-file /path/to/your_other_drum.obj \
+  --output-dir Output_CRM_BucketDrumVariant
 
 # Opt-in force-driven descent (kinematic is the default)
 PYTHON="$CHRONO_ENV/bin/python" ./run.sh \

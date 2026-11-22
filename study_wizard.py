@@ -57,10 +57,11 @@ def discover_default(relative: str) -> Path:
     return preferred
 
 
-DEFAULT_CRM_OBJ = discover_default("geometry/LunarDrumScrew_m_coarse.obj")
-DEFAULT_STEP_FILE = discover_default("geometry/LunarDrumScrew_m.step")
-DEFAULT_FEA_NODE = ROOT / "fea" / "LunarDrumScrew_m_fea_decim8k.node"
-DEFAULT_FEA_ELE = DEFAULT_FEA_NODE.with_suffix(".ele")
+DEFAULT_CRM_OBJ = discover_default("geometry/BucketDrumExcavator_m_coarse.obj")
+DEFAULT_STEP_FILE = discover_default("geometry/BucketDrumExcavator.step")
+# No FEA mesh is shipped. These must be supplied by the caller or prompted for.
+DEFAULT_FEA_NODE: Path | None = None
+DEFAULT_FEA_ELE: Path | None = None
 INTERACTIVE = sys.stdin.isatty()
 # Set from --yes so an interactive terminal can still be used for fully
 # scripted runs without requiring a here-document of blank prompt answers.
@@ -261,7 +262,7 @@ def geometry_defaults(measured: dict[str, float | int] | None,
         active_box = (LEGACY_ACTIVE_BOX, LEGACY_ACTIVE_BOX, 0.5 * scale)
     inner_radius = min(0.9 * radius, 0.055 * scale)
     # Multi-solid assemblies in this workspace have a much larger structural
-    # core than the legacy single-solid screw drum.  A generated mesh records
+    # core than the legacy single-solid bucket drum excavator.  A generated mesh records
     # the exact hub radius, which takes precedence over the heuristic.
     hub_radius = 0.2 * radius if n_solids > 1 else 0.0015 * scale
     if measured and measured.get("hub_radius") is not None:
@@ -621,7 +622,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--study-name", default=None, help="study name (default: prompted or timestamped)")
     p.add_argument("--output-dir", type=Path, default=None, help="root output directory")
     p.add_argument("--geometry", choices=("supplied", "step", "files"), default=None,
-                   help="geometry source: supplied defaults, new STEP CAD, or existing mesh files")
+                   help="geometry source: supplied mesh paths, new STEP CAD, or existing mesh files")
     p.add_argument("--step-file", type=Path, default=None,
                    help=f"new CAD STEP file for --geometry step (default: {DEFAULT_STEP_FILE})")
     p.add_argument("--crm-obj", type=Path, default=None, help="full-detail surface OBJ for CRM")
@@ -927,7 +928,8 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
 
     geometry = args.geometry or prompt_choice(
         "Geometry source", ("supplied", "step", "files"), "supplied",
-        detail="supplied = built-in meshes; step = convert a STEP CAD file; "
+        detail="supplied = use the CRM/FEA mesh paths supplied below; "
+               "step = convert a STEP CAD file; "
                "files = provide existing CRM .obj and FEA .node/.ele meshes.",
     )
 
@@ -954,10 +956,20 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
     part_aware_reduction = args.part_aware_reduction if args.part_aware_reduction is not None else 0.75
     part_aware_min_faces = args.part_aware_min_faces if args.part_aware_min_faces is not None else 500
 
-    if geometry == "supplied":
-        crm_obj = DEFAULT_CRM_OBJ
-        fea_node = DEFAULT_FEA_NODE
-        fea_ele = DEFAULT_FEA_ELE
+    if geometry in {"supplied", "files"}:
+        crm_obj = args.crm_obj or prompt_path(
+            "CRM surface OBJ", DEFAULT_CRM_OBJ,
+            detail="Triangulated drum surface for rigid CRM contact (metres, local +Z axis).",
+        )
+        fea_node = args.fea_node or prompt_path(
+            "FEA .node file", DEFAULT_FEA_NODE,
+            detail="TetGen node file for the solid drum mesh used in one-way FEA.",
+        )
+        default_ele = args.fea_ele or fea_node.with_suffix(".ele")
+        fea_ele = prompt_path(
+            "FEA .ele file", default_ele,
+            detail="TetGen element file paired with the .node mesh.",
+        )
     elif geometry == "step":
         step_file = args.step_file or prompt_path(
             "CAD STEP file", DEFAULT_STEP_FILE if DEFAULT_STEP_FILE.is_file() else None,
@@ -980,21 +992,6 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
                 "STEP coordinate scale to metres", unit_scale, minimum=1e-9,
                 detail="Multiply STEP coordinates by this factor (0.001 for mm-valued CAD).",
             )
-    else:
-        crm_obj = args.crm_obj or prompt_path(
-            "CRM surface OBJ", DEFAULT_CRM_OBJ,
-            detail="Triangulated drum surface for rigid CRM contact (metres, local +Z axis).",
-        )
-        fea_node = args.fea_node or prompt_path(
-            "FEA .node file", DEFAULT_FEA_NODE,
-            detail="TetGen node file for the solid drum mesh used in one-way FEA.",
-        )
-        default_ele = args.fea_ele or Path(f"{fea_node.with_suffix('')}.ele")
-        fea_ele = prompt_path(
-            "FEA .ele file", default_ele,
-            detail="TetGen element file paired with the .node mesh.",
-        )
-
     # Read geometry and offer auto-detected dimensions/mesh defaults.
     measured: dict[str, float | int] | None = None
     auto_geo = not args.no_auto_geometry
@@ -1072,7 +1069,8 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             surface_faces = prompt_int(
                 "STEP surface target faces", surface_faces, minimum=100,
                 detail="Minimum contact-surface triangle count. The converter raises it automatically "
-                       "if decimation would break watertightness (complex screws often need 50k-80k).",
+                       "if decimation would break watertightness (complex bucket drum excavator "
+                       "geometry often needs 50k-80k).",
             )
         if args.surface_max_faces is None:
             surface_max_faces = prompt_int(
@@ -1083,7 +1081,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         if args.surface_fit_tolerance is None:
             surface_fit_tolerance = prompt_float(
                 "Exterior surface fit tolerance (m)", surface_fit_tolerance, minimum=0.0,
-                detail="Maximum measured deviation of the exterior/screw surface from the raw "
+                detail="Maximum measured deviation of the bucket drum excavator exterior surface from the raw "
                        "OCC tessellation. The converter raises the face target until this fit "
                        "and TetGen pass. 0 disables the fit check.",
             )
@@ -1104,7 +1102,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         if args.part_aware_simplify is None:
             part_aware_simplify = prompt_bool(
                 "Coarsen hub/interior FEA mesh?", part_aware_simplify,
-                detail="Keeps all exterior/screw-flight faces unchanged and decimates only faces "
+                detail="Keeps all bucket drum excavator exterior faces unchanged and decimates only faces "
                        "inside the interior radius. Recommended: the hub is rigid in FEA and is "
                        "over-refined by the CAD's tight curves.",
             )

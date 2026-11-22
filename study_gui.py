@@ -105,7 +105,7 @@ PARAM_INFO: dict[str, str] = {
     # Study
     "study_name": "Short label for this run; used in the default output folder name.",
     "output_dir": "Folder for meshes, logs, configs, and results. Created if needed; use a new folder to preserve prior runs.",
-    "geometry": "supplied = built-in meshes; step = convert a STEP CAD file; files = provide existing CRM OBJ and FEA .node/.ele meshes.",
+    "geometry": "supplied/files = use the mesh paths entered below; step = convert a STEP CAD file. No geometry is bundled.",
     "auto_geometry": "Measure the selected CAD/mesh and refresh suggested drum, bed, domain, spacing, and mesh values. All values remain editable.",
     # Geometry
     "step_file": "CAD input (.step/.stp) used only when Geometry source is 'step'. New models use rotation axis Y in STEP space.",
@@ -117,13 +117,13 @@ PARAM_INFO: dict[str, str] = {
     "mesh_size": "Approximate tetrahedral edge length. Smaller gives a finer, slower FEA mesh.",
     "surface_target_faces": "Starting contact-surface triangle count from STEP. The converter raises it automatically until the measured exterior fit and TetGen both accept the surface. Keep it modest (8000 default); very large targets can create sliver tetrahedra that destabilize the FEA solve.",
     "surface_max_faces": "Upper bound for the watertight/fit-driven decimation retry used by STEP mesh generation.",
-    "surface_fit_tolerance": "Maximum measured deviation (m) of exterior/screw-flight faces from the raw OCC surface. Starting at 'Surface target faces', the converter doubles the target until this fit and TetGen pass, then records the achieved error in the mesh JSON. 0 disables the fit check.",
+    "surface_fit_tolerance": "Maximum measured deviation (m) of bucket drum excavator exterior faces from the raw OCC surface. Starting at 'Surface target faces', the converter doubles the target until this fit and TetGen pass, then records the achieved error in the mesh JSON. 0 disables the fit check.",
     "surface_repair_order": "'none' unifies fused CAD faces and retries decimation until watertight. 'before'/'after' are legacy MeshFix routes that can inflate volume.",
     "min_solid_volume": "Drop STEP assembly solids smaller than this volume (m^3) before meshing (fasteners/debris).",
     "hub_radius": "Nodes within this radius of the drum axis are tied rigidly to the spindle in FEA.",
-    "part_aware_simplify": "Recommended: coarsen only hub/interior surface faces before TetGen. Exterior and screw-flight faces are copied unchanged; the hub is rigid in FEA, so its dense CAD-driven triangulation is mostly wasted solver cost.",
+    "part_aware_simplify": "Recommended: coarsen only hub/interior surface faces before TetGen. Exterior bucket drum excavator faces are copied unchanged; the hub is rigid in FEA, so its dense CAD-driven triangulation is mostly wasted solver cost.",
     "part_aware_radius": "Faces wholly inside this radial distance from the drum axis may be coarsened. Use slightly more than the rigid hub radius. Incompatible with MeshFix order 'after'.",
-    "part_aware_reduction": "Fraction of eligible interior faces removed by topology-preserving, boundary-fixed decimation. 0.75 removed ~74% of eligible faces and ~23% of total nodes on the current spikey CAD.",
+    "part_aware_reduction": "Fraction of eligible interior faces removed by topology-preserving, boundary-fixed decimation. 0.75 removed ~74% of eligible faces and ~23% of total nodes on the current bucket drum excavator CAD.",
     "part_aware_min_faces": "Skip interior coarsening unless at least this many faces qualify; avoids changing already-coarse meshes.",
     "drum_radius": "Outer crest radius; sets initial drum height (bed + radius) and bed sizing.",
     "drum_half_length": "Half the drum length along its axis; used for bed box and CRM placement.",
@@ -160,7 +160,7 @@ PARAM_INFO: dict[str, str] = {
     "descent_force_ramp_s": "Linear ramp from zero to the descent actuator force in force mode. 0 applies full force immediately after settling.",
     "omega": "Drum angular speed magnitude about the spin axis (~3.14 rad/s = 30 rpm). Sign is controlled by Reverse spin.",
     "reverse_spin": "Flip rotation direction if the CAD excavator spins the wrong way. Signed omega is written as negative.",
-    "spin_axis": "Global axis the drum spins about during excavation (usually X for the supplied geometry).",
+    "spin_axis": "Global axis the drum spins about during excavation (X for the reference drum orientation).",
     "solver": "One-way FEA linear solver: pardiso-mkl is default; sparse-lu/qr are fallbacks; gmres is diagnostic only.",
     "num_threads": "Thread count for the FEA solver (pardiso-mkl) and the geometry comparison tool's OCC tessellation/fuse.",
     "load_radius_fraction": "Apply soil loads only to exterior nodes within this fraction of drum radius; 0.95 cuts per-step load work sharply.",
@@ -381,9 +381,9 @@ def shipped_defaults() -> dict[str, object]:
     defaults: dict[str, object] = {
         "geometry": "supplied",
         "step_file": str(wiz.DEFAULT_STEP_FILE),
-        "crm_obj": str(wiz.DEFAULT_CRM_OBJ),
-        "fea_node": str(wiz.DEFAULT_FEA_NODE),
-        "fea_ele": str(wiz.DEFAULT_FEA_ELE),
+        "crm_obj": str(wiz.DEFAULT_CRM_OBJ or ""),
+        "fea_node": str(wiz.DEFAULT_FEA_NODE or ""),
+        "fea_ele": str(wiz.DEFAULT_FEA_ELE or ""),
         "cad_axis": "Y",
         "unit_scale": "0.001",
         "mesh_size": "0.012",
@@ -976,7 +976,7 @@ class StudyGUI:
                   font=HEADER_FONT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8); r += 1
         r = self._row(p, r, "Study name", "study_name", help_text="Used for default output folder naming.")
         r = self._row(p, r, "Output directory", "output_dir", width=60, browse="dir", help_text="All configs, logs, meshes, and results go here.")
-        r = self._row(p, r, "Geometry source", "geometry", combo=["supplied", "step", "files"], help_text="supplied=built-in meshes, step=convert CAD, files=existing meshes.")
+        r = self._row(p, r, "Geometry source", "geometry", combo=["supplied", "step", "files"], help_text="supplied/files=mesh paths below, step=convert CAD; no geometry is bundled.")
         r = self._row(p, r, "Auto-scale from CAD/mesh", "auto_geometry", check=True, help_text="Derive bed/spacing/box defaults from drum size when possible.")
         ttk.Separator(p).grid(row=r, column=0, columnspan=4, sticky="ew", pady=8); r += 1
         ttk.Label(p, text="Tip: use 'Apply CAD/mesh defaults' after choosing geometry to refresh suggested dimensions."
