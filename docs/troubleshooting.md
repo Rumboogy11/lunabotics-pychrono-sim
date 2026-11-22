@@ -112,6 +112,10 @@ Kinematic descent is the historical default. Force mode requires matching option
 
 Remember that `--drum-gravity` is off by default and only changes force-mode dynamics; kinematic descent overrides the drum pose either way.
 
+### "Skip current step" stops the log instead of reaching FEA
+
+The CRM and export drivers spawn worker processes (for example, particle CSV writers) that inherit the runner's stdout pipe. Signalling only the step's parent PID leaves those workers alive, so the runner blocks reading stdout and never advances to the one-way FEA stage. The GUI now starts each step in its own process group and **Skip current step** / **Stop running process** signal the whole group, which closes the pipe and lets the pipeline continue (or abort cleanly). If you must skip CRM very early, `crm/soil_loads.csv` may not yet contain enough samples for FEA; in that case re-run CRM or use **Run one-way FEA only (existing CRM)** against a completed study.
+
 ## FEA and viewing
 
 ### One-way FEA rejects the loads file
