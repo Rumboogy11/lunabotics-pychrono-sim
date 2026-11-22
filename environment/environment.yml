@@ -24,9 +24,11 @@ dependencies:
   # CUDA 13 is not supported by that source.
   - cuda-toolkit=12.9.*
 
-  # Chrono C++ dependencies.
+  # Chrono C++ dependencies. mkl-devel supplies the oneMKL CMake package and
+  # headers required by Chrono's PardisoMKL module.
   - eigen=3.4.*
   - yaml-cpp
+  - mkl-devel=2025.2.0
 
   # Runtime libraries needed by pip wheels (VTK/PyVista/OCP) on headless hosts.
   - libgl

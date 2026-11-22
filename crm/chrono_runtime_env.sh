@@ -21,6 +21,7 @@ chrono_use_local_runtime() {
         libChronoModels_vehicle.so \
         libChronoModels_robot.so \
         libChrono_parsers.so \
+        libChrono_pardisomkl.so \
         libyaml-cpp.so.0.8.0; do
         if [[ -e "$lib_dir/$lib" ]]; then
             libs+=("$lib_dir/$lib")

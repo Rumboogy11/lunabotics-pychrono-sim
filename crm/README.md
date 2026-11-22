@@ -20,8 +20,8 @@ Generated studies keep `--drum-radius`/`--drum-half-length` tied to the CAD or m
 
 ## Requirements
 
-A standard PyPI `pychrono` wheel is not sufficient (it omits `pychrono.fsi` and `pychrono.vehicle`).
-Use the local Chrono 10 source build with FSI-SPH and CRM enabled (see `../environment/INSTALL.md`).
+A standard PyPI `pychrono` wheel is not sufficient (it omits `pychrono.fsi`, `pychrono.vehicle`, and the local PardisoMKL binding).
+Use the local Chrono 11 source build with FSI-SPH, CRM, and PardisoMKL enabled (see `../environment/INSTALL.md`).
 
 ```bash
 source ../environment/activate-chrono-source.sh
@@ -86,7 +86,7 @@ PYTHON="$CHRONO_ENV/bin/python" ./run.sh \
   --loads-file Output_OneWay/crm/soil_loads.csv \
   --output-dir Output_OneWay/crm
 
-# 2) Replay loads on solid mesh (defaults: PardisoMKL if available, dt=2e-3 s)
+# 2) Replay loads on solid mesh (local PardisoMKL default, dt=2e-3 s)
 ./run_oneway_fea.sh --duration 0.2 \
   --loads Output_OneWay/crm/soil_loads.csv \
   --output-dir Output_OneWay/fea

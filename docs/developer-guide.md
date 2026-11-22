@@ -53,7 +53,11 @@ Generated directories (`chrono-src`, `chrono-build`, `chrono-install`, `chrono-e
 
 `study_gui.py` imports the wizard module as `wiz` and calls the same helpers, so GUI and CLI studies remain equivalent. The GUI owns presentation, settings files, and interactive tools. Its `PARAM_INFO` and `SETTINGS_INFO` dictionaries are the single source of truth for the Info buttons and the generated Docs page.
 
-The drivers under `crm/` are standalone argparse programs. They defer Chrono imports so `--help`, `--print-soil`, and geometry checks work without a GPU or a built environment. The CRM launchers set `PYTHONPATH`/`LD_LIBRARY_PATH` as needed; `crm/run.sh` also sources `crm/chrono_runtime_env.sh` to pin `LD_PRELOAD` to the locally installed Chrono libraries. The one-way launcher sets those paths only for solvers that need them.
+The drivers under `crm/` are standalone argparse programs. They defer Chrono imports so `--help`, `--print-soil`, and geometry checks work without a GPU or a built environment. The CRM launchers set local `PYTHONPATH`/`LD_LIBRARY_PATH`, and `crm/run.sh` and `crm/run_oneway_fea.sh` source `crm/chrono_runtime_env.sh` to pin `LD_PRELOAD` to the locally installed Chrono libraries, including PardisoMKL. The one-way driver's opt-in 3D VTU export snapshots each frame into plain NumPy arrays and hands them to a `spawn`ed writer process through a bounded queue; the Chrono SWIG wrapper holds the GIL during solver steps, so a Python thread would not overlap file I/O.
+
+`environment/build-chrono-source.sh` builds the supported Chrono 11 checkout with FSI/FSI-SPH, vehicle, robot models, parsers, Python, and PardisoMKL enabled. It uses GCC 13.4, oneMKL, `-O2`, a four-job default cap, a raised compiler stack limit, and a serial retry after compiler front-end crashes. Keep those settings synchronized with `environment/environment.yml`, `install.sh`, `environment/INSTALL.md`, and `tests/test_installer_dependencies.py`.
+
+The CRM drivers detect a few renamed bindings so they still run against either Chrono 10 or 11: `crm/crm_soil.py` prefers `SoilProperties`/`SetCrmSPH` (Chrono 11) and falls back to `ElasticMaterialProperties`/`SetElasticSPH`; the terrain settle delay prefers `SetFreeFlowDuration` and falls back to `SetActiveDomainDelay`; and the flexible-BCE count prefers `GetNumFleaMeshMarkers` and falls back to `GetNumFlexBodyMarkers`. Chrono 11 also omits some methods rather than renaming them; the stress and shell-density guards are described in [Chrono 11 Python binding compatibility](#chrono-11-python-binding-compatibility). Keep these guards and their regression tests (`tests/test_chrono11_api_compat.py`) in sync if another binding changes.
 
 Several CLI tools re-exec themselves under `chrono-env/bin/python` once (guarded by internal `PYCHRONO_*REEXEC`/`PYCHRONO_*ENV` variables) so system-Python invocations get the local packages. The GUI is the reverse case: when started from `chrono-env`, it re-execs into a system Python with working Tkinter for display quality and records the Chrono interpreter in `PYCHRONO_CHRONO_PYTHON` so simulations still use the project environment.
 
@@ -110,7 +114,7 @@ The suite uses the standard library `unittest` module (no pytest needed):
 chrono-env/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Coverage includes GUI fields and settings, STEP/mesh geometry consistency, fill metrics, force descent, gravity controls, FEA summaries and export timing (including the one-way replay's CRM-frame duration limit), detector sizing, output preview, four-panel result plots and their blitted shared crosshair, ParaView script generation (including first-frame camera priming, the non-parallel view-up guard, and default display opacity/visibility), and installer dependency text. `tests/test_fill_metrics.py` covers the driver-side metric logic.
+Coverage includes GUI fields and settings, STEP/mesh geometry consistency, fill metrics, force descent, gravity controls, FEA summaries and export timing (including the one-way replay's CRM-frame duration limit), the background one-way VTU writer (frame ordering, flush, error propagation, and per-frame stress-array reuse), detector sizing, output preview, four-panel result plots and their blitted shared crosshair, ParaView script generation (including first-frame camera priming, the non-parallel view-up guard, and default display opacity/visibility), and installer dependency text. `tests/test_fill_metrics.py` covers the driver-side metric logic.
 
 All regression files live under `tests/`; `tests/__init__.py` keeps the repository root and the test directory importable. Run a single file as `chrono-env/bin/python tests/test_name.py` or `chrono-env/bin/python -m unittest tests.test_name`.
 
@@ -130,6 +134,15 @@ Useful quick checks that do not need a GPU:
 `--dry-run` writes `study_config.json` and `commands.sh`, which is the fastest way to verify that a parameter change produces the command line you expect.
 
 Keep run outputs under `Output_*` (gitignored) and prefer project-local paths over `/tmp` for large files. When you change a default, update its documentation and the corresponding regression test in the same commit.
+
+## Chrono 11 Python binding compatibility
+
+Chrono 11's SWIG wrappers omit a few C++ methods that the drivers previously called directly:
+
+- `ChStressTensorD.GetEquivalentVonMises()` is not wrapped. `environment/patches/chrono-python-von-mises.patch` exposes the native C++ formula as `VonMises()`, and `install.sh` applies that patch alongside the SPH patch. `crm/lunar_excavator_crm_fea.py::von_mises_pa()` calls the patched method (or the original name if a future binding provides it). Principal-stress reconstruction is intentionally not used: `ComputePrincipalStresses()` returns NaNs for hydrostatic/zero tensors and would corrupt exported stress arrays. Both the scalar FEA summary and the per-element VTU stress arrays use this helper, so the one-way production metric is unchanged.
+- `ChMaterialShellKirchhoff.SetDensity()` is not wrapped. The diagnostic-only two-way driver guards that call and relies on the explicit contact-skin node masses assigned in `create_contact_skin()`. Production one-way replay does not create a shell material.
+
+`tests/test_chrono11_api_compat.py` covers these shims. When adding a Chrono call, prefer a runtime capability check (`hasattr`) over assuming a method exists in every supported wrapper.
 
 ## Documentation conventions
 

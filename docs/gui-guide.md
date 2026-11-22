@@ -105,8 +105,8 @@ Two groups of editable material parameters:
 ### Page 5 — Output & Export
 
 - **Save CRM particle CSV frames** — needed for 3D particle visualization in ParaView; large but useful.
-- **Export full 3D FEA stress animation** — writes per-frame VTU files. Expensive; off by default. Scalar FEA summaries are written regardless.
-- **FEA VTU frame stride** — `1` exports every recorded frame; larger values sample frames, and the final frame is always included.
+- **Export full 3D FEA stress animation** — writes per-frame VTU files from a background writer process. Expensive; off by default. Scalar FEA summaries are written regardless.
+- **FEA VTU frame stride** — `1` exports every recorded frame; larger values sample frames, reduce background VTU writes, and the final frame is always included. Scalar summary stress scans follow their own cadence.
 - **Export ParaView datasets after run** — writes PVD/VTK time series into `<study>/paraview`.
 - **ParaView export stride** — general frame stride.
 - **ParaView particle stride** — `0` follows the general stride; larger values skip particle frames independently.

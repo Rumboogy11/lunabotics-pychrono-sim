@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Configure, build, and install the project-local Chrono 10.0.0 source build.
+# Configure, build, and install the project-local Chrono 11 source build.
 #
 # Usage:
 #   ./environment/build-chrono-source.sh [--clean] [--jobs N] [--cuda-arch ARCH]
@@ -19,6 +19,9 @@ JOBS="$(env -u OMP_NUM_THREADS nproc 2>/dev/null || printf '1\n')"
 [[ "$JOBS" =~ ^[0-9]+$ ]] || JOBS=1
 JOBS=$(( JOBS / 2 ))
 (( JOBS < 1 )) && JOBS=1
+# More than four parallel GCC processes is not reliable for this Eigen-heavy
+# source tree; an explicit --jobs can still override this default.
+(( JOBS > 4 )) && JOBS=4
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --clean) CLEAN=1; shift ;;
@@ -76,6 +79,11 @@ fi
 # -O2 unless a different toolchain is known to handle another setting.
 CHRONO_CXX_RELEASE_FLAGS="${CHRONO_CXX_RELEASE_FLAGS:--O2 -DNDEBUG}"
 
+# Eigen-heavy Chrono sources can overflow the default 8 MiB compiler stack and
+# surface as a cc1plus segmentation fault.  Raise the soft limit when the host
+# permits it; the serial retry below still covers other transient failures.
+ulimit -s unlimited 2>/dev/null || true
+
 cmake -S "$CHRONO_SRC" -B "$CHRONO_BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CXX_FLAGS_RELEASE="$CHRONO_CXX_RELEASE_FLAGS" \
@@ -88,8 +96,15 @@ cmake -S "$CHRONO_SRC" -B "$CHRONO_BUILD" -G Ninja \
   -DCH_ENABLE_MODULE_FSI=ON \
   -DCH_ENABLE_MODULE_FSI_SPH=ON \
   -DCH_ENABLE_MODULE_VEHICLE=ON \
+  -DCH_ENABLE_MODULE_ROBOT_MODELS=ON \
   -DCH_ENABLE_MODULE_PARSERS=ON \
   -DCH_ENABLE_MODULE_PYTHON=ON \
+  -DCH_ENABLE_MODULE_PARDISO_MKL=ON \
+  -DMKL_ROOT="$CHRONO_ENV" \
+  -DMKL_ARCH=intel64 \
+  -DMKL_LINK=dynamic \
+  -DMKL_THREADING=gnu_thread \
+  -DMKL_INTERFACE=lp64 \
   -DCH_ENABLE_MODULE_IRRLICHT=OFF \
   -DCH_ENABLE_MODULE_VSG=OFF \
   -DCH_ENABLE_MODULE_SENSOR=OFF \
@@ -103,7 +118,14 @@ cmake -S "$CHRONO_SRC" -B "$CHRONO_BUILD" -G Ninja \
   -DCUDAToolkit_ROOT="$CHRONO_ENV" \
   -DCHRONO_CUDA_ARCHITECTURES="$CHRONO_CUDA_ARCHITECTURES"
 
-cmake --build "$CHRONO_BUILD" --parallel "$JOBS"
+# GCC 13.4 can rarely hit an internal compiler error in Eigen-heavy Chrono
+# sources when several large translation units compile at once.  Ninja keeps
+# completed objects, so retrying serially finishes the remaining work without
+# masking real source errors (a genuine compile error fails again).
+if ! cmake --build "$CHRONO_BUILD" --parallel "$JOBS"; then
+  echo "Parallel Chrono build failed; retrying serially to isolate compiler failures" >&2
+  cmake --build "$CHRONO_BUILD" --parallel 1
+fi
 cmake --install "$CHRONO_BUILD"
 
 PYTHONPATH="$CHRONO_INSTALL/share/chrono/python${PYTHONPATH:+:$PYTHONPATH}" \
@@ -112,11 +134,13 @@ LD_LIBRARY_PATH="$CHRONO_INSTALL/lib:${LD_LIBRARY_PATH:-}" \
 import pychrono.core as chrono
 import pychrono.fsi as fsi
 import pychrono.vehicle as veh
+import pychrono.pardisomkl as pardiso
 
 print("Chrono Python modules imported from source build")
 print("  core:   ", chrono.__file__)
 print("  fsi:    ", fsi.__file__)
 print("  vehicle:", veh.__file__)
+print("  pardiso:", pardiso.__file__)
 print("  CRMTerrain:", veh.CRMTerrain)
 PY
 

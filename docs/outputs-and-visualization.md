@@ -71,7 +71,7 @@ Records the measured CAD drum dimensions, mesh volumes and errors, target/achiev
 
 ## ParaView exports
 
-`export_study_vtk.py` converts existing CSVs into time series. It **regenerates all CRM particle and excavator frames on every run**, so a cancelled or shorter study cannot leave stale frames in those animations. FEA VTU frames are written by the FEA driver; the exporter validates and references them rather than regenerating them.
+`export_study_vtk.py` converts existing CSVs into time series. It **regenerates all CRM particle and excavator frames on every run**, so a cancelled or shorter study cannot leave stale frames in those animations. FEA VTU frames are written by the FEA driver; the exporter validates and references them rather than regenerating them. The one-way driver snapshots each FEA frame into plain arrays and writes it from a separate bounded-queue writer process, so VTK construction and disk I/O overlap later solver steps. It joins that writer before printing the final summary, so `fea.pvd` is complete whenever the run reports success.
 
 | File | Contents |
 | --- | --- |

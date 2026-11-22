@@ -1,0 +1,17 @@
+diff --git a/src/chrono_swig/interface/core/ChTensors.i b/src/chrono_swig/interface/core/ChTensors.i
+index 99532e5eff..afec71c3f4 100644
+--- a/src/chrono_swig/interface/core/ChTensors.i
++++ b/src/chrono_swig/interface/core/ChTensors.i
+@@ -36,6 +36,12 @@
+ // Parse the header file to generate wrappers
+ %include "../../../chrono/core/ChTensors.h"
+ 
++// Expose the native von Mises formula that the SWIG parser skips in ChTensors.h.
++%extend chrono::ChStressTensor<double> {
++	public:
++		double VonMises() const { return $self->GetEquivalentVonMises(); }
++	};
++
+ // Tensors are templated by type
+ %template(ChStressTensorD) chrono::ChStressTensor<double>;
+ %template(ChStrainEngTensorD) chrono::ChStrainTensor<double>;

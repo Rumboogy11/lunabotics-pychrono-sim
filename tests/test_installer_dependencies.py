@@ -61,6 +61,62 @@ class InstallerPackageListsTest(unittest.TestCase):
             self.assertNotIn(unprivileged_command, self.installer)
 
 
+class Chrono11BuildConfigurationTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.env_spec = (ROOT / "environment/environment.yml").read_text(encoding="utf-8")
+        cls.build_script = (ROOT / "environment/build-chrono-source.sh").read_text(encoding="utf-8")
+        cls.installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        cls.oneway_launcher = (ROOT / "crm/run_oneway_fea.sh").read_text(encoding="utf-8")
+        cls.runtime_env = (ROOT / "crm/chrono_runtime_env.sh").read_text(encoding="utf-8")
+
+    def test_environment_spec_pins_supported_toolchain_and_mkl(self) -> None:
+        for fragment in (
+            "gcc=13.4.*",
+            "gxx=13.4.*",
+            "cuda-toolkit=12.9.*",
+            "mkl-devel=2025.2.0",
+        ):
+            self.assertIn(fragment, self.env_spec, fragment)
+
+    def test_build_script_enables_pardiso_mkl_and_robot_models(self) -> None:
+        for fragment in (
+            "-DCH_ENABLE_MODULE_ROBOT_MODELS=ON",
+            "-DCH_ENABLE_MODULE_PARDISO_MKL=ON",
+            "-DMKL_ROOT=\"$CHRONO_ENV\"",
+            "-DMKL_THREADING=gnu_thread",
+            "-DMKL_INTERFACE=lp64",
+            "import pychrono.pardisomkl as pardiso",
+        ):
+            self.assertIn(fragment, self.build_script, fragment)
+
+    def test_build_script_recovers_from_parallel_compiler_crash(self) -> None:
+        self.assertIn("if ! cmake --build \"$CHRONO_BUILD\" --parallel \"$JOBS\"; then", self.build_script)
+        self.assertIn("cmake --build \"$CHRONO_BUILD\" --parallel 1", self.build_script)
+        self.assertIn("ulimit -s unlimited 2>/dev/null || true", self.build_script)
+
+    def test_installer_caps_default_build_parallelism(self) -> None:
+        self.assertIn("(( thread_jobs > 4 )) && thread_jobs=4", self.installer)
+
+    def test_installer_verifies_chrono11_and_pardiso_binding(self) -> None:
+        self.assertIn("set(CH_VERSION 0x00110000)", self.installer)
+        self.assertIn("import pychrono.pardisomkl as pardiso", self.installer)
+
+    def test_installer_applies_both_chrono_patches(self) -> None:
+        self.assertIn('PY_PATCH_FILE="$PROJECT_ROOT/environment/patches/chrono-python-von-mises.patch"', self.installer)
+        self.assertIn('for patch in "$PATCH_FILE" "$PY_PATCH_FILE"; do', self.installer)
+        self.assertTrue((ROOT / "environment/patches/chrono-python-von-mises.patch").is_file())
+
+    def test_oneway_launcher_always_uses_local_chrono_bindings(self) -> None:
+        self.assertIn("chrono-install/share/chrono/python", self.oneway_launcher)
+        self.assertIn("chrono-install/lib", self.oneway_launcher)
+        self.assertIn("chrono_use_local_runtime", self.oneway_launcher)
+        self.assertNotIn("if [[ \"$solver\" == \"gmres\"", self.oneway_launcher)
+
+    def test_runtime_preload_includes_pardiso_mkl(self) -> None:
+        self.assertIn("libChrono_pardisomkl.so", self.runtime_env)
+
+
 class StudyGuiLauncherTest(unittest.TestCase):
     def test_launcher_selects_a_python_with_tkinter(self) -> None:
         launcher = (ROOT / "run_study_gui.sh").read_text(encoding="utf-8")
