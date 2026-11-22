@@ -917,10 +917,12 @@ def main():
         sources_shown.append(('fea', disp_source))
     elif want_3d_fea:
         print(f"  FEA VTK: not loaded ({fea_status}). Enable 'Export full 3D FEA stress animation' "
-              "in the UI and rerun FEA, or use an older complete fea.pvd; scalar charts are opt-in.")
+              "in the UI and rerun FEA, or use an existing structurally usable multi-frame "
+              "fea.pvd; scalar charts are opt-in.")
     elif include_fea:
-        print("  FEA VTK: excluded. Use --with-fea (or the GUI Tools toggle) to overlay a validated "
-              "3D FEA stress series; scalar charts are opt-in and do not need VTK frames.")
+        print("  FEA VTK: excluded. Use --with-fea (or the GUI Tools toggle) to overlay a "
+              "structurally usable 3D FEA stress series; scalar charts are opt-in and do not "
+              "need VTK frames.")
 
     if not sources_shown and not fea_charts:
         print("[view_study_paraview] nothing loaded. Expected crm_particles.pvd/excavator.pvd, "

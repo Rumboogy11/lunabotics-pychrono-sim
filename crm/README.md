@@ -150,7 +150,7 @@ write reproducible `study_config.json`/`commands.sh`, run both one-way stages, a
 | `--detector-radius R` | manual nominal detector radius in m (requires `--no-detector-auto-size`) |
 | `--detector-length L` | manual nominal detector **full** axial length in m; stored as half-length internally (requires `--no-detector-auto-size`) |
 | `--active-box X,Y,Z` | active SPH full size (default: padded bed + 2 drum diameters laterally; bed + initial excavator height + 2 diameters + padding vertically) |
-| `--mesh {coarse,medium}` | shipped OBJ selection |
+| `--mesh {coarse,medium}` | legacy local OBJ name from `lunar_excavator_config.py` (files not bundled; prefer `--mesh-file`) |
 | `--mesh-file PATH` | custom OBJ geometry |
 | `--loads-file PATH` | write soil wrench for one-way FEA replay at `--loads-fps` cadence |
 | `--save-particles` | write per-frame SPH particle CSV (large) |

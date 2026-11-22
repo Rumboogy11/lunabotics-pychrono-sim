@@ -735,9 +735,9 @@ def build_parser() -> argparse.ArgumentParser:
                    default=None, help="one-way FEA linear solver")
     p.add_argument("--num-threads", type=int, default=None, help="FEA solver threads")
     p.add_argument("--load-radius-fraction", type=float, default=None,
-                   help="apply soil loads to nodes with r >= fraction * drum radius (default: 0.8; 0.95 is cheaper)")
+                   help="apply soil loads to nodes with r >= fraction * drum radius (default: 0.95; lower spreads loads wider)")
     p.add_argument("--raw-stress-every", type=int, default=None,
-                   help="compute peak stress on every Nth recorded frame (default: 1)")
+                   help="compute peak stress on every Nth recorded frame (default: 5)")
     p.add_argument("--export-workers", type=int, default=None,
                    help="parallel worker processes for ParaView frame export (default: 1)")
     p.add_argument("--save-particles", action="store_true", help="write CRM particle CSV frames")

@@ -13,7 +13,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import webbrowser
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 
 def _is_chrono_python(current: Path, chrono_py: Path) -> bool:
@@ -183,9 +185,9 @@ PARAM_INFO: dict[str, str] = {
     "export_workers": "Number of processes used to write ParaView frame files in parallel.",
     # Output & export
     "save_particles": "Write CRM particle positions as CSV at the particle output FPS. Needed for ParaView particle spheres; uses disk space.",
-    "fea_export_vtk": "Write the full 3D FEA stress/deformation animation as per-frame VTU files (fea/vtk/fea.pvd). This adds a stress scan and file write per recorded frame and can dominate runtime/disk, so it is off by default. Scalar FEA summaries are always written.",
+    "fea_export_vtk": "Write the full 3D FEA stress/deformation animation as per-frame VTU files under fea/vtk/frames/ with fea/vtk/fea.pvd. This adds a stress scan and file write per recorded frame and can dominate runtime/disk, so it is off by default. Scalar FEA summaries are always written.",
     "fea_vtk_stride": "Export every Nth recorded FEA frame to the 3D VTU animation. 1 means every frame (full animation); the final frame is always included. Higher values reduce cost.",
-    "tools_show_fea_3d": "Load the validated 3D FEA stress/deformation PVD in ParaView when the study produced one. On by default; uncheck to view only CRM particles. This is the 3D overlay only; it does not enable the one-way FEA history charts. Requires the 'Export full 3D FEA stress animation' option (or an older complete fea.pvd).",
+    "tools_show_fea_3d": "Load a structurally usable multi-frame 3D FEA stress/deformation PVD in ParaView when the study produced one. The viewer rechecks the PVD and frame files, so a lone t=0 frame is ignored. On by default; uncheck to view only CRM particles. This is the 3D overlay only; it does not enable the one-way FEA history charts. Requires the 'Export full 3D FEA stress animation' option (or an existing usable multi-frame fea.pvd).",
     "tools_show_fea_charts": "Display the one-way FEA scalar stress and deformation history XY charts in ParaView. Off by default; check to opt in. Unchecking clears an inherited PYCHRONO_FEA_CHARTS setting. This is independent of the 3D FEA overlay, and --no-fea still suppresses all FEA views.",
     "export_vtk": "Create separate ParaView series (crm_particles.pvd, excavator.pvd, optional fea.pvd) plus combined.pvd and a manifest after the run.",
     "paraview_stride": "Export every Nth CRM frame for both particles and excavator. Use 1 for all frames; all series stay time-aligned.",
@@ -235,9 +237,17 @@ HEADER_FONT = "StudyHeaderFont"
 SECTION_FONT = "StudySectionFont"
 DOC_TITLE_FONT = "StudyDocTitleFont"
 DOC_HEADING_FONT = "StudyDocHeadingFont"
+DOC_SUBHEADING_FONT = "StudyDocSubheadingFont"
 DOC_CODE_FONT = "StudyDocCodeFont"
+DOC_BOLD_FONT = "StudyDocBoldFont"
+DOC_ITALIC_FONT = "StudyDocItalicFont"
+DOC_TABLE_HEADER_FONT = "StudyDocTableHeaderFont"
+DOC_TABLE_BOLD_FONT = "StudyDocTableBoldFont"
 LIGHT_TEXT = "#000000"
 DARK_TEXT = "#F2F2F2"
+_DOC_INLINE_RE = re.compile(
+    r"(\[[^\]\n]+\]\([^)\n]+\)|\*\*[^*\n]+\*\*|\*[^*\n]+\*|`[^`\n]+`)"
+)
 UI_SCALE_MIN = 0.75
 UI_SCALE_MAX = 2.0
 UI_SCALE_DEFAULT = 1.0
@@ -275,12 +285,24 @@ SETTINGS_INFO: dict[str, str] = {
 GENERATED_DOC_ID = "<generated>"
 
 # Docs tab entries. ``None`` means generated from the GUI's own help tables.
+# File paths are relative to ROOT and are re-read on every selection/Refresh.
 DOC_ENTRIES: tuple[tuple[str, str | None], ...] = (
-    ("Getting started", "README.md"),
+    ("Documentation home", "docs/README.md"),
+    ("Quick start (beginners)", "docs/quickstart.md"),
+    ("Glossary", "docs/glossary.md"),
+    ("GUI guide", "docs/gui-guide.md"),
+    ("Study wizard (CLI)", "docs/wizard-guide.md"),
+    ("Command-line reference", "docs/cli-reference.md"),
+    ("Outputs and visualization", "docs/outputs-and-visualization.md"),
+    ("Troubleshooting", "docs/troubleshooting.md"),
+    ("How it works (in depth)", "docs/how-it-works.md"),
+    ("Developer guide", "docs/developer-guide.md"),
     ("GUI parameter reference", None),
+    ("Getting started (project README)", "README.md"),
     ("CRM solver", "crm/README.md"),
     ("One-way FEA coupling", "crm/FEA_COUPLING.md"),
     ("Full model notes", "FULL_MODEL.md"),
+    ("Environment and install", "environment/INSTALL.md"),
 )
 
 
@@ -1127,7 +1149,7 @@ class StudyGUI:
         ttk.Label(p, text="ParaView note: run 'pvpython view_study_paraview.py <study>/paraview' for a preconfigured 3D view\n"
                           "(particles as spheres and a separate excavator). One-way FEA history charts are hidden\n"
                           "by default; add --show-fea-charts to display them. Enable the 3D FEA stress option\n"
-                          "above and the Tools toggle 'Load 3D FEA stress' for the validated deformation animation.",
+                          "above and the Tools toggle 'Load 3D FEA stress' for a usable multi-frame deformation animation.",
                   justify=LEFT).grid(row=r, column=0, columnspan=4, sticky=W, padx=6, pady=8)
 
     def _page_review(self):
@@ -1201,6 +1223,11 @@ class StudyGUI:
         frame.pack(fill=BOTH, expand=True, padx=4, pady=(0, 4))
         self.doc_text = tk.Text(frame, wrap="word", height=20, spacing1=1, spacing3=1)
         self.text_widgets.append(self.doc_text)
+        self._doc_link_tags: dict[str, str] = {}
+        self._doc_heading_lines: list[tuple[str, str, int]] = []
+        self._doc_embedded: list[tk.Misc] = []
+        self._doc_tables: list[ttk.Treeview] = []
+        self._current_doc_path: Path | None = None
         vs = ttk.Scrollbar(frame, orient=VERTICAL, command=self.doc_text.yview)
         self.doc_text.configure(yscrollcommand=vs.set)
         self.doc_text.grid(row=0, column=0, sticky="nsew")
@@ -1208,13 +1235,7 @@ class StudyGUI:
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
 
-        self.doc_text.tag_configure("doc_title", font=DOC_TITLE_FONT, spacing3=8)
-        self.doc_text.tag_configure("doc_heading", font=DOC_HEADING_FONT, spacing1=10, spacing3=4)
-        self.doc_text.tag_configure("doc_code", font=DOC_CODE_FONT, lmargin1=16, spacing1=2, spacing3=2)
-        self.doc_text.tag_configure("doc_bullet", lmargin1=16, lmargin2=26, spacing3=2)
-        self.doc_text.tag_configure("doc_quote", lmargin1=16, lmargin2=16, spacing1=4, spacing3=4)
-        self.doc_text.tag_configure("doc_rule", spacing1=6, spacing3=6)
-        self.doc_text.tag_configure("doc_search", background="#FFD400", foreground="#000000")
+        self._configure_doc_tags()
         self.doc_text.configure(state=DISABLED)
 
         first = None
@@ -1227,48 +1248,481 @@ class StudyGUI:
         if first is not None:
             self.docs_tree.selection_set(first)
 
+    def _configure_doc_tags(self) -> None:
+        """Apply readable colors and fonts to the Docs tab text tags."""
+        doc_text = getattr(self, "doc_text", None)
+        if doc_text is None:
+            return
+
+        dark = bool(self.settings.get("dark_mode"))
+        palette = getattr(self, "ui_palette", {})
+        text = str(palette.get("text") or (DARK_TEXT if dark else LIGHT_TEXT))
+        field = str(palette.get("field") or ("#2D2D30" if dark else "#FFFFFF"))
+        frame = str(palette.get("frame") or ("#252526" if dark else "#F4F4F4"))
+        code_bg = "#252526" if dark else "#F2F4F7"
+        quote_bg = "#2B2B2C" if dark else "#F7F4E8"
+        title_fg = "#D2A8FF" if dark else "#5B2A86"
+        heading_fg = "#79C0FF" if dark else "#0B5394"
+        sub_fg = "#7EE787" if dark else "#1B7F3A"
+        link_fg = "#8AB4F8" if dark else "#1456A6"
+        muted = "#B8B8B8" if dark else "#5A5A5A"
+        self._doc_palette = {
+            "text": text, "field": field, "frame": frame,
+            "code_bg": code_bg, "quote_bg": quote_bg,
+            "title": title_fg, "heading": heading_fg, "sub": sub_fg,
+            "link": link_fg, "muted": muted,
+        }
+
+        tags: dict[str, dict[str, object]] = {
+            "doc_title": {
+                "font": DOC_TITLE_FONT, "foreground": title_fg,
+                "spacing1": 2, "spacing3": 10,
+            },
+            "doc_heading": {
+                "font": DOC_HEADING_FONT, "foreground": heading_fg,
+                "spacing1": 12, "spacing3": 5,
+            },
+            "doc_subheading": {
+                "font": DOC_SUBHEADING_FONT, "foreground": sub_fg,
+                "spacing1": 10, "spacing3": 3,
+            },
+            "doc_bold": {"font": DOC_BOLD_FONT, "foreground": text},
+            "doc_italic": {"font": DOC_ITALIC_FONT, "foreground": text},
+            "doc_inline_code": {
+                "font": DOC_CODE_FONT, "background": code_bg,
+                "foreground": sub_fg,
+            },
+            "doc_link": {"foreground": link_fg, "underline": 1},
+            "doc_code": {
+                "font": DOC_CODE_FONT, "background": code_bg,
+                "foreground": text, "lmargin1": 18, "lmargin2": 18,
+                "rmargin": 12, "spacing1": 2, "spacing3": 2,
+            },
+            "doc_code_box": {
+                "font": DOC_CODE_FONT, "background": code_bg,
+                "foreground": text, "lmargin1": 18, "lmargin2": 18,
+                "rmargin": 12, "spacing1": 0, "spacing3": 0,
+                "relief": "groove", "borderwidth": 1,
+            },
+            "doc_table": {
+                "font": DOC_CODE_FONT, "foreground": text,
+                "lmargin1": 10, "spacing1": 0, "spacing3": 0,
+            },
+            "doc_table_header": {
+                "font": DOC_TABLE_HEADER_FONT, "foreground": heading_fg,
+                "lmargin1": 10, "spacing1": 4, "spacing3": 2,
+            },
+            "doc_table_bold": {"font": DOC_TABLE_BOLD_FONT, "foreground": text},
+            "doc_table_separator": {
+                "font": DOC_CODE_FONT, "foreground": muted, "lmargin1": 10,
+            },
+            "doc_bullet": {"lmargin1": 16, "lmargin2": 28, "spacing3": 2},
+            "doc_quote": {
+                "background": quote_bg, "foreground": text,
+                "lmargin1": 18, "lmargin2": 18, "rmargin": 10,
+                "spacing1": 4, "spacing3": 4,
+            },
+            "doc_quote_bar": {"foreground": sub_fg, "lmargin1": 18},
+            "doc_rule": {"foreground": muted, "spacing1": 6, "spacing3": 6},
+            "doc_search": {"background": "#FFD400", "foreground": "#000000"},
+        }
+        for name, options in tags.items():
+            doc_text.tag_configure(name, **options)
+        for depth in range(5):
+            indent = 10 + 12 * depth
+            doc_text.tag_configure(
+                f"doc_indent_{depth}",
+                lmargin1=indent, lmargin2=indent + 12, spacing3=2,
+            )
+        for tag_name in getattr(self, "_doc_link_tags", {}).values():
+            doc_text.tag_configure(tag_name, foreground=link_fg, underline=1)
+        try:
+            doc_text.tag_raise("doc_search")
+        except tk.TclError:
+            pass
+
+        style = ttk.Style()
+        row_height = max(20, int(self.settings.get("font_size", 10)) + 9)
+        try:
+            style.configure(
+                "DocTable.Treeview",
+                background=field, fieldbackground=field, foreground=text,
+                borderwidth=1, relief="groove", font=DOC_CODE_FONT,
+                rowheight=row_height,
+            )
+            style.configure(
+                "DocTable.Treeview.Heading",
+                background=frame, foreground=heading_fg,
+                font=DOC_TABLE_HEADER_FONT,
+            )
+            style.map(
+                "DocTable.Treeview.Heading",
+                background=[("active", frame)],
+            )
+        except tk.TclError:
+            pass
+
+    def _clear_doc_embeds(self) -> None:
+        """Destroy embedded Docs-tab widgets from the previous render."""
+        for widget in getattr(self, "_doc_embedded", []):
+            try:
+                widget.destroy()
+            except tk.TclError:
+                pass
+        self._doc_embedded = []
+        self._doc_tables = []
+
+    def _doc_link_tag(self, target: str) -> str:
+        """Return a stable Tk tag for a Markdown link target."""
+        mapping = getattr(self, "_doc_link_tags", None)
+        if mapping is None:
+            mapping = self._doc_link_tags = {}
+        if target not in mapping:
+            tag_name = f"doc_link_{len(mapping)}"
+            mapping[target] = tag_name
+            self.doc_text.tag_configure(
+                tag_name,
+                foreground=self._doc_palette.get("link", "#1456A6"),
+                underline=1,
+            )
+            self.doc_text.tag_bind(
+                tag_name, "<Button-1>",
+                lambda _event, value=target: self._on_doc_link_click(value),
+            )
+            self.doc_text.tag_bind(
+                tag_name, "<Enter>", lambda _event: self.doc_text.configure(cursor="hand2")
+            )
+            self.doc_text.tag_bind(
+                tag_name, "<Leave>", lambda _event: self.doc_text.configure(cursor="")
+            )
+        return mapping[target]
+
+    def _on_doc_link_click(self, target: str) -> str:
+        self._doc_follow_link(target)
+        return "break"
+
+    def _doc_link_target(self, raw: str) -> tuple[str, str, str]:
+        """Classify a Markdown target as url, anchor, file, or none."""
+        target = raw.strip()
+        if not target:
+            return "none", "", ""
+        if target.startswith("#"):
+            return "anchor", unquote(target[1:]), ""
+
+        parsed = urlparse(target)
+        if parsed.scheme in {"http", "https", "mailto", "tel", "ftp"}:
+            return "url", target, ""
+        if parsed.scheme and parsed.scheme != "file":
+            return "url", target, ""
+
+        path_part = unquote(parsed.path or target)
+        base = getattr(self, "_current_doc_path", None)
+        candidate = (Path(path_part) if parsed.scheme == "file"
+                     else (base.parent if base else ROOT) / path_part)
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(ROOT.resolve())
+        except (OSError, RuntimeError, ValueError):
+            return "url", target, ""
+        return "file", str(resolved), parsed.fragment
+
+    def _doc_follow_link(self, raw: str) -> None:
+        """Open a Docs-tab link: registered pages in-tab, web links in browser."""
+        kind, value, fragment = self._doc_link_target(raw)
+        status = getattr(self, "status_var", None)
+        if kind == "url":
+            try:
+                webbrowser.open(value)
+                message = f"Docs: opened '{value}' in your browser."
+            except Exception as exc:
+                message = f"Docs: could not open '{value}': {exc}"
+            if status is not None:
+                status.set(message)
+            return
+        if kind == "anchor":
+            if not self._doc_scroll_to_heading(value):
+                self._set_doc_status(f"Docs: heading '{value}' not found.")
+            return
+        if kind != "file":
+            return
+
+        path = Path(value)
+        for index, (_title, relative) in enumerate(DOC_ENTRIES):
+            if relative and (ROOT / relative).resolve() == path:
+                self.docs_tree.selection_set(f"doc_{index}")
+                self._show_doc()
+                if fragment:
+                    self._doc_scroll_to_heading(fragment)
+                return
+        self._set_doc_status(
+            f"Docs: '{path.name}' is not registered in the Docs tab."
+        )
+
+    def _set_doc_status(self, message: str) -> None:
+        status = getattr(self, "status_var", None)
+        if status is not None:
+            status.set(message)
+
+    @classmethod
+    def _doc_heading_slug(cls, text: str) -> str:
+        """Return the GitHub-style anchor for a heading or link fragment."""
+        clean = cls._clean_doc_inline(unquote(text)).strip().lower()
+        clean = re.sub(r"[^\w\s-]", "", clean)
+        return re.sub(r"\s+", "-", clean).strip("-")
+
+    def _doc_scroll_to_heading(self, fragment: str) -> bool:
+        """Scroll to a heading anchor recorded while rendering the current page."""
+        needle = self._doc_heading_slug(fragment)
+        if not needle:
+            return False
+        for slug, title, line_no in getattr(self, "_doc_heading_lines", []):
+            if slug == needle or (len(needle) > 3 and needle in slug):
+                self.doc_text.see(f"{line_no}.0")
+                self._set_doc_status(f"Docs: jumped to '{title}'.")
+                return True
+        self._set_doc_status(f"Docs: heading '{fragment}' not found.")
+        return False
+
     @staticmethod
     def _clean_doc_inline(line: str) -> str:
+        """Return the visible text of an inline Markdown line."""
         line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
+        line = re.sub(r"\*([^*]+)\*", r"\1", line)
         line = re.sub(r"`([^`]+)`", r"\1", line)
         line = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", line)
         return line
 
+    def _insert_doc_inline(self, text: str, base_tags: tuple[str, ...] = ()) -> None:
+        """Insert text with styled bold, italic, inline code, and links."""
+        last = 0
+        for match in _DOC_INLINE_RE.finditer(text):
+            if match.start() > last:
+                self.doc_text.insert(END, text[last:match.start()], base_tags)
+            token = match.group(0)
+            if token.startswith("["):
+                link = re.fullmatch(r"\[([^\]]+)\]\(([^)]+)\)", token)
+                if link:
+                    label, target = link.groups()
+                    self.doc_text.insert(
+                        END, label, base_tags + (self._doc_link_tag(target),)
+                    )
+            elif token.startswith("**"):
+                tag = ("doc_table_bold" if any(t.startswith("doc_table") for t in base_tags)
+                       else "doc_bold")
+                self.doc_text.insert(END, token[2:-2], base_tags + (tag,))
+            elif token.startswith("`"):
+                self.doc_text.insert(END, token[1:-1], base_tags + ("doc_inline_code",))
+            else:
+                self.doc_text.insert(END, token[1:-1], base_tags + ("doc_italic",))
+            last = match.end()
+        if last < len(text):
+            self.doc_text.insert(END, text[last:], base_tags)
+
+    @staticmethod
+    def _doc_table_cells(line: str) -> list[str]:
+        """Split one Markdown table row into trimmed cell strings."""
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            stripped = stripped[1:]
+        if stripped.endswith("|"):
+            stripped = stripped[:-1]
+        return [cell.strip() for cell in stripped.split("|")]
+
+    @classmethod
+    def _is_doc_table_separator(cls, line: str) -> bool:
+        cells = cls._doc_table_cells(line)
+        return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
+
+    def _render_doc_table(self, lines: list[str], start: int) -> int:
+        """Insert a real, scrollable table widget and return the next line index."""
+        header = [cell.strip() for cell in self._doc_table_cells(lines[start])]
+        rows: list[list[str]] = []
+        index = start + 2
+        while index < len(lines) and "|" in lines[index] and lines[index].strip().startswith("|"):
+            rows.append([cell.strip() for cell in self._doc_table_cells(lines[index])])
+            index += 1
+        if not header:
+            return index
+
+        container = ttk.Frame(self.doc_text)
+        tree = ttk.Treeview(
+            container,
+            columns=[f"col{i}" for i in range(len(header))],
+            show="headings",
+            height=max(1, len(rows)),
+            selectmode="none",
+            style="DocTable.Treeview",
+        )
+        xscroll = ttk.Scrollbar(container, orient=HORIZONTAL, command=tree.xview)
+        tree.configure(xscrollcommand=xscroll.set)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+        tree.grid(row=0, column=0, sticky="nsew")
+        xscroll.grid(row=1, column=0, sticky="ew")
+
+        try:
+            measure = tkfont.nametofont(DOC_CODE_FONT)
+        except tk.TclError:
+            measure = tkfont.nametofont("TkFixedFont")
+        widths: list[int] = []
+        for col, title in enumerate(header):
+            cells = [title] + [row[col] for row in rows if col < len(row)]
+            plain = [self._clean_doc_inline(cell) for cell in cells]
+            longest = max(plain, key=len) if plain else ""
+            try:
+                pixels = measure.measure(longest)
+            except tk.TclError:
+                pixels = len(longest) * 8
+            widths.append(max(70, min(2200, pixels + 24)))
+
+        link_targets: dict[tuple[str, str], str] = {}
+        cell_links: dict[tuple[str, str], tuple[str, list[tuple[int, int, str]]]] = {}
+        for col, title in enumerate(header):
+            column = f"col{col}"
+            tree.heading(column, text=self._clean_doc_inline(title), anchor=W)
+            tree.column(column, width=widths[col], minwidth=60, anchor=W, stretch=False)
+
+        for row in rows:
+            item = tree.insert("", END)
+            cleaned: list[str] = []
+            for col, cell in enumerate(row):
+                plain = self._clean_doc_inline(cell)
+                cleaned.append(plain)
+                spans: list[tuple[int, int, str]] = []
+                for link in re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", cell):
+                    start = len(self._clean_doc_inline(cell[:link.start()]))
+                    end = start + len(self._clean_doc_inline(link.group(1)))
+                    spans.append((start, end, link.group(2)))
+                if spans:
+                    key = (item, f"#{col + 1}")
+                    cell_links[key] = (plain, spans)
+                    link_targets[key] = spans[0][2]
+            tree.item(item, values=cleaned)
+
+        def link_at(event, widget=tree, cells=cell_links):
+            item = widget.identify_row(event.y)
+            column = widget.identify_column(event.x)
+            meta = cells.get((item, column))
+            if not meta:
+                return None
+            plain, spans = meta
+            bbox = widget.bbox(item, column)
+            if not bbox:
+                return None
+            offset = event.x - bbox[0] - 3
+            for start, end, target in spans:
+                left = measure.measure(plain[:start]) - 3
+                right = measure.measure(plain[:end]) + 3
+                if left <= offset <= right:
+                    return target
+            return None
+
+        def on_click(event):
+            target = link_at(event)
+            if target:
+                self._doc_follow_link(target)
+                return "break"
+            return None
+
+        def on_motion(event, widget=tree):
+            widget.configure(cursor="hand2" if link_at(event) else "")
+
+        tree.bind("<Button-1>", on_click)
+        tree.bind("<Motion>", on_motion)
+        tree._doc_table_links = link_targets
+        tree._doc_table_cell_links = cell_links
+
+        try:
+            available = max(360, self.doc_text.winfo_width() - 40)
+        except tk.TclError:
+            available = 760
+        container.configure(width=min(available, 1020))
+        self.doc_text.window_create(
+            END, window=container, padx=4, pady=2, stretch=False
+        )
+        self.doc_text.insert(END, "\n")
+        self._doc_embedded.append(container)
+        self._doc_tables.append(tree)
+        return index
+
     def _render_doc_markdown(self, body: str) -> None:
+        self._clear_doc_embeds()
+        lines = body.splitlines()
+        self._doc_heading_lines = []
         in_code = False
-        for raw in body.splitlines():
+        index = 0
+        while index < len(lines):
+            raw = lines[index]
             if raw.strip().startswith("```"):
+                self.doc_text.insert(END, "\n", "doc_code_box")
                 in_code = not in_code
+                index += 1
                 continue
             if in_code:
-                self.doc_text.insert(END, raw + "\n", "doc_code")
+                self.doc_text.insert(END, raw + "\n", "doc_code_box")
+                index += 1
                 continue
 
-            line = self._clean_doc_inline(raw.rstrip())
+            if (raw.strip().startswith("|") and index + 1 < len(lines)
+                    and self._is_doc_table_separator(lines[index + 1])):
+                index = self._render_doc_table(lines, index)
+                continue
+
+            line = raw.rstrip()
             stripped = line.strip()
             if not stripped:
                 self.doc_text.insert(END, "\n")
+                index += 1
                 continue
 
-            heading = re.match(r"^(#{1,4})\s+(.*)$", stripped)
+            heading = re.match(r"^(#{1,6})\s+(.*)$", stripped)
             if heading:
-                tag = "doc_title" if len(heading.group(1)) == 1 else "doc_heading"
-                self.doc_text.insert(END, heading.group(2) + "\n", tag)
+                level = len(heading.group(1))
+                tag = "doc_title" if level == 1 else (
+                    "doc_heading" if level == 2 else "doc_subheading"
+                )
+                line_no = int(self.doc_text.index(END).split(".", 1)[0])
+                title = self._clean_doc_inline(heading.group(2))
+                self._doc_heading_lines.append((self._doc_heading_slug(title), title, line_no))
+                self._insert_doc_inline(heading.group(2), (tag,))
+                self.doc_text.insert(END, "\n")
+                index += 1
                 continue
             if re.fullmatch(r"[-*_]\s*[-*_]\s*[-*_][-*_ ]*", stripped):
                 self.doc_text.insert(END, "─" * 60 + "\n", "doc_rule")
+                index += 1
                 continue
-            if re.match(r"^\s*[-*+]\s+", line):
-                bullet = re.sub(r"^\s*[-*+]\s+", "", line)
-                self.doc_text.insert(END, "• " + bullet + "\n", "doc_bullet")
+
+            bullet = re.match(r"^(\s*)[-*+]\s+(.*)$", line)
+            if bullet:
+                depth = min(4, len(bullet.group(1).expandtabs(2)) // 2)
+                tag = f"doc_indent_{depth}"
+                self.doc_text.insert(END, "• ", tag)
+                self._insert_doc_inline(bullet.group(2), (tag,))
+                self.doc_text.insert(END, "\n")
+                index += 1
                 continue
-            if re.match(r"^\s*\d+\.\s+", line):
-                self.doc_text.insert(END, line.lstrip() + "\n", "doc_bullet")
+            number = re.match(r"^(\s*)(\d+)\.\s+(.*)$", line)
+            if number:
+                depth = min(4, len(number.group(1).expandtabs(2)) // 2)
+                tag = f"doc_indent_{depth}"
+                self.doc_text.insert(END, f"{number.group(2)}. ", tag)
+                self._insert_doc_inline(number.group(3), (tag,))
+                self.doc_text.insert(END, "\n")
+                index += 1
                 continue
             if stripped.startswith(">"):
-                self.doc_text.insert(END, stripped.lstrip("> ") + "\n", "doc_quote")
+                self.doc_text.insert(END, "│ ", "doc_quote_bar")
+                self._insert_doc_inline(stripped.lstrip("> ").strip(), ("doc_quote",))
+                self.doc_text.insert(END, "\n")
+                index += 1
                 continue
-            self.doc_text.insert(END, line + "\n")
+
+            self._insert_doc_inline(line)
+            self.doc_text.insert(END, "\n")
+            index += 1
+        if in_code:
+            self.doc_text.insert(END, "\n", "doc_code_box")
 
     def _generated_doc_text(self) -> str:
         lines = [
@@ -1295,8 +1749,10 @@ class StudyGUI:
         if doc_id == GENERATED_DOC_ID:
             body = self._generated_doc_text()
             label = "Generated from the GUI help tables"
+            self._current_doc_path = None
         else:
             path = ROOT / doc_id
+            self._current_doc_path = path
             if not path.is_file():
                 messagebox.showerror("Docs", f"Documentation file not found:\n{path}")
                 return
@@ -1797,19 +2253,24 @@ class StudyGUI:
             fixed_family = tkfont.nametofont("TkFixedFont").cget("family")
         except tk.TclError:
             default_family, fixed_family = "sans-serif", "monospace"
-        for name, font_size, family, weight in (
-            (HEADER_FONT, size, default_family, "bold"),
-            (SECTION_FONT, max(7, size - 1), default_family, "bold"),
-            (DOC_TITLE_FONT, size + 4, default_family, "bold"),
-            (DOC_HEADING_FONT, size + 1, default_family, "bold"),
-            (DOC_CODE_FONT, size, fixed_family, "normal"),
+        for name, font_size, family, weight, slant in (
+            (HEADER_FONT, size, default_family, "bold", "roman"),
+            (SECTION_FONT, max(7, size - 1), default_family, "bold", "roman"),
+            (DOC_TITLE_FONT, size + 5, default_family, "bold", "roman"),
+            (DOC_HEADING_FONT, size + 2, default_family, "bold", "roman"),
+            (DOC_SUBHEADING_FONT, size + 1, default_family, "bold", "roman"),
+            (DOC_CODE_FONT, size, fixed_family, "normal", "roman"),
+            (DOC_BOLD_FONT, size, default_family, "bold", "roman"),
+            (DOC_ITALIC_FONT, size, default_family, "normal", "italic"),
+            (DOC_TABLE_HEADER_FONT, size, fixed_family, "bold", "roman"),
+            (DOC_TABLE_BOLD_FONT, size, fixed_family, "bold", "roman"),
         ):
             try:
                 font = tkfont.nametofont(name)
             except tk.TclError:
                 font = tkfont.Font(name=name, exists=False, family=family,
-                                   size=font_size, weight=weight)
-            font.configure(family=family, size=font_size, weight=weight)
+                                   size=font_size, weight=weight, slant=slant)
+            font.configure(family=family, size=font_size, weight=weight, slant=slant)
 
         style = ttk.Style()
         theme = "clam" if dark and "clam" in style.theme_names() else self._base_theme
@@ -1875,12 +2336,15 @@ class StudyGUI:
             self.root.option_add(pattern, value)
 
         self.root.configure(background=bg)
+        self._configure_doc_tags()
         for widget in self._walk_widgets():
             try:
                 wclass = widget.winfo_class()
                 if wclass == "Text":
+                    body_font = ("TkDefaultFont" if widget is getattr(self, "doc_text", None)
+                                 else "TkFixedFont")
                     widget.configure(background=field, foreground=color,
-                                     insertbackground=color, font="TkFixedFont")
+                                     insertbackground=color, font=body_font)
                 elif wclass == "Canvas":
                     widget.configure(background=bg)
                 elif wclass == "TCombobox":

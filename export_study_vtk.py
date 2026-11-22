@@ -2,9 +2,10 @@
 """Export a CRM/one-way-FEA study to ParaView-friendly VTK time series.
 
 This script converts existing study outputs into files that ParaView can load
-as time series. Every export regenerates the frames from the current CRM data;
-existing frames are never reused, so cancelled/older runs cannot leave a static
-or stale animation behind.
+as time series. Every export regenerates the CRM particle and excavator frames
+from the current CRM data; existing frames are never reused, so cancelled/older
+runs cannot leave a static or stale non-FEA animation behind. FEA VTU frames
+are produced by the FEA driver and are validated/referenced here.
 
   <out>/crm_particles.pvd + crm_particles/frame_*.vtp
       SPH/CRM particle positions per output frame (from crm/particles_*.csv),
@@ -26,13 +27,13 @@ compact <out>/fea_summary.csv is derived from it with MPa/mm units; ParaView
 history charts are opt-in via --show-fea-charts/PYCHRONO_FEA_CHARTS and are off
 by default. When the UI's full 3D FEA stress option is enabled, the driver also
 writes:
-  <fea>/vtk/frame_*.vtu  and  <fea>/vtk/fea.pvd
+  <fea>/vtk/frames/frame_*.vtu  and  <fea>/vtk/fea.pvd
 with point data (Displacement, DisplacementMagnitude) and cell data
-(von_mises_pa, von_mises_MPa). A validated copy is written to <out>/fea.pvd and
-the optional overlay <out>/with_fea.pvd adds FEA to the CRM animation. A
-multi-frame partial run is viewable and noted in the manifest; a one-frame
-t=0 FEA PVD (e.g. from a cancelled run) is ignored and never mixed into the
-non-FEA series.
+(von_mises_pa, von_mises_MPa). A revalidated copy is written to <out>/fea.pvd
+and the optional overlay <out>/with_fea.pvd adds FEA to the CRM animation. A
+structurally usable partial multi-frame run is viewable and noted in the
+manifest; a one-frame t=0 FEA PVD (e.g. from a cancelled run) is ignored and
+never mixed into the non-FEA series.
 
 Typical use::
 

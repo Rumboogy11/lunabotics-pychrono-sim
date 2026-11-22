@@ -309,7 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
             # PardisoMKL lives in the optional pychrono.pardisomkl module.
             action.choices = ("gmres", "sparse-lu", "sparse-qr", "pardiso-mkl")
             action.help = ("MBS linear solver for the FEA stiffness matrix; pardiso-mkl uses "
-                           "pychrono.pardisomkl (default: sparse-lu)")
+                           "pychrono.pardisomkl (default: pardiso-mkl)")
     p.add_argument("--loads", type=Path, required=True,
                    help="soil_loads.csv written by lunar_excavator_crm.py --loads-file")
     p.add_argument("--load-radius-fraction", type=float, default=0.8,

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Convert STL meshes to Wavefront OBJ.
 
-Chrono mesh loaders commonly consume OBJ files. The shipped excavator STL files
-are already in metres and centred on the drum axis, so this is a pure format
-conversion (no scaling or reorientation).
+Chrono mesh loaders commonly consume OBJ files. Converted study surfaces are
+already in metres and centred on the drum axis, so this is a pure format
+conversion (no scaling or reorientation). No meshes are bundled with the
+project; the legacy default names in ``lunar_excavator_config.py`` require local
+files.
 
 Usage
 -----

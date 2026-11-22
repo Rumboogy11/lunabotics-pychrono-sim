@@ -150,15 +150,16 @@ stress/deformation in ParaView" checkbox remains the 3D overlay control only.
 
 For a full 3D animation, enable the UI toggle before running FEA (wizard
 equivalents: `--fea-export-vtk` and optional `--vtk-stride N`, default `1`).
-The driver writes `fea/vtk/frame_*.vtu` and `fea.pvd` with per-element
-`von_mises_pa`/`von_mises_MPa`, point `Displacement`, `DisplacementMagnitude`,
-and `Deformation_mm`. Every exported frame adds a full stress scan and VTU
-write, so use a stride above 1 for long runs when a sampled animation is
-sufficient; the final frame is always included. Configure ParaView with the
-GUI **Tools** toggle "Load 3D FEA stress/deformation in ParaView" or pass
-`--with-fea`. ParaView warps by `Displacement` and colors by von Mises stress.
-A lone `t=0` VTU frame is deliberately ignored: the exporter/viewer require a
-complete, validated `fea.pvd` before showing 3D stress.
+The driver writes `fea/vtk/frames/frame_*.vtu` and `fea/vtk/fea.pvd` with
+per-element `von_mises_pa`/`von_mises_MPa`, point `Displacement`,
+`DisplacementMagnitude`, and `Deformation_mm`. Every exported frame adds a full
+stress scan and VTU write, so use a stride above 1 for long runs when a sampled
+animation is sufficient; the final frame is always included. Configure ParaView
+with the GUI **Tools** toggle "Load 3D FEA stress/deformation in ParaView" or
+pass `--with-fea`. ParaView warps by `Displacement` and colors by von Mises
+stress. The viewer rechecks the PVD and frame files rather than trusting the
+manifest: a lone `t=0` frame is ignored, while a structurally usable partial
+multi-frame series can be displayed.
 
 Driver and SPH-coupling fixes applied in the local source/runtime:
 

@@ -7,8 +7,8 @@ combined report.  The FEA stage is included intentionally even though its
 stress and fill results are not engineering-validated; see
 ``crm/FEA_COUPLING.md``.
 
-By default the rigid CRM stage uses the full coarse OBJ at 4 mm SPH spacing and
-a spacing-dependent timestep (8e-5 s at 4 mm).
+By default the rigid CRM stage uses the coarse OBJ at 2 mm SPH spacing and a
+spacing-dependent timestep (4e-5 s at 2 mm).
 The FEA stage uses the promoted 8k solid mesh at 12 mm spacing with diagnostic
 settings (2.5e-4 s timestep, 2 BCE layers, GMRES/diagonal). Coupling has not been
 validated and its mechanics diverge in longer runs. Use
