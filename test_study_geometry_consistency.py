@@ -124,6 +124,13 @@ class StudyGeometryConsistencyTest(unittest.TestCase):
                 wiz.build_commands(cfg)
 
     def test_capacity_volume_is_forwarded_without_mesh_detector_options(self) -> None:
+        # This test is about command forwarding, not mesh measurement. Mock the
+        # measurement like the surrounding tests so it does not depend on which
+        # (gitignored) reference OBJ happens to be present in geometry/.
+        wiz.measured_geometry_for_cfg = lambda cfg: {
+            "drum_radius": cfg["drum_radius"],
+            "drum_half_length": cfg["drum_half_length"],
+        }
         with tempfile.TemporaryDirectory(prefix="capacity_cfg_", dir="/tmp/opencode") as tmp:
             cfg = consistent_cfg(Path(tmp))
             cfg["auto_geometry"] = False
