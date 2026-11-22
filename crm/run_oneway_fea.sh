@@ -6,14 +6,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Expose project-local tools such as pvpython without requiring activation.
+if [[ -d "$PROJECT_ROOT/chrono-env/bin" ]]; then
+    PATH="$PROJECT_ROOT/chrono-env/bin:$PATH"
+    export PATH
+fi
+
 if [[ -z "${PYTHON:-}" && -x "$PROJECT_ROOT/chrono-env/bin/python" ]]; then
     PYTHON="$PROJECT_ROOT/chrono-env/bin/python"
 fi
 PYTHON="${PYTHON:-python3}"
 
-# PardisoMKL is provided by the conda-forge PyChrono package in chrono-env, not
-# by the local chrono-install build.  Do not shadow it with the local Python
-# package when that solver is requested.
+# The local Chrono build only provides the solvers it was configured with.
+# Do not put it ahead of other installed pychrono modules unless the caller
+# explicitly requests one of those solvers.
 solver=""
 prev=""
 for arg in "$@"; do
