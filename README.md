@@ -22,8 +22,11 @@ cd lunabotics-pychrono-sim
 ./install.sh
 ```
 
-It clones the custom Chrono 11 fork, builds it with FSI-SPH/vehicle/CRM and
-PardisoMKL modules plus CUDA 12.9 and oneMKL, and creates the project-local
+It clones the custom Chrono 11 fork and builds only the modules this project
+imports: FSI/FSI-SPH, FEA, a terrain-only `pychrono.vehicle` binding for
+`veh.CRMTerrain`, Python, and PardisoMKL, plus CUDA 12.9 and oneMKL. Vehicle models,
+robot models, parsers, and unused vehicle sources are not built; the serial
+compile retry remains only as a fallback. It also creates the project-local
 `chrono-env`. See `environment/INSTALL.md` for options (including
 `--no-system-packages`, `--cuda-arch`, ParaView, and no-root setups). On
 NTFS/FUSE checkouts the installer keeps the environment on a native filesystem

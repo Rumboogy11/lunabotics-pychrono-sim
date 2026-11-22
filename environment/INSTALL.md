@@ -3,8 +3,9 @@
 `./install.sh` turns a fresh Arch Linux, CachyOS, Debian, or Ubuntu host into a
 working checkout of this project. It installs system prerequisites, creates a
 project-local `chrono-env`, checks out the custom Chrono 11 fork, and builds/installs
-PyChrono with FSI-SPH, vehicle, robot-model, and PardisoMKL modules. Nothing is
-installed into the system Python.
+only the PyChrono modules this project imports: FSI/FSI-SPH, FEA, a terrain-only
+vehicle binding for `veh.CRMTerrain`, Python, and PardisoMKL. Nothing is installed
+into the system Python.
 
 ## Quick install
 
@@ -32,7 +33,7 @@ Common options:
 | `--jobs N` | Request parallel build jobs (default/ceiling: `nproc - 2`, minimum 1) |
 | `--clean` | Remove `chrono-build/` and `chrono-install/` before rebuilding |
 | `--skip-build` | Install env/source/deps only, do not compile Chrono |
-| `--skip-patch` | Do not apply the local SPH and Python stress patches to the Chrono checkout |
+| `--skip-patch` | Do not apply the local SPH, Python stress, and minimal-vehicle patches to the Chrono checkout |
 | `--chrono-repo URL` / `--chrono-ref REF` | Override the custom fork URL/commit |
 | `--work-root PATH` | Store env/build/source outside the checkout (useful on NTFS/FUSE mounts) |
 
@@ -44,7 +45,7 @@ build and install trees.
 
 | Path | Purpose |
 | --- | --- |
-| `chrono-src/` | Custom Chrono 11 checkout pinned to commit `757a75b3c3…` from `https://github.com/Rumboogy11/chrono.git`, plus `environment/patches/chrono-local-crm-sph.patch` (BVH-accelerated BCE generation) and `environment/patches/chrono-python-von-mises.patch` (native von Mises stress in Python) |
+| `chrono-src/` | Custom Chrono 11 checkout pinned to commit `757a75b3c3…` from `https://github.com/Rumboogy11/chrono.git`, plus `environment/patches/chrono-local-crm-sph.patch` (BVH-accelerated BCE generation), `environment/patches/chrono-python-von-mises.patch` (native von Mises stress in Python), and `environment/patches/chrono-python-minimal-vehicle.patch` (terrain-only vehicle bindings and library) |
 | `chrono-env/` | Project-local conda-forge env: Python 3.12, CMake 3.31, Ninja, SWIG 4.5.1, GCC 13.4, CUDA 12.9, Eigen, yaml-cpp, oneMKL 2025.2, Tk, X11/GL runtime libs, NumPy, Matplotlib, PyVista/VTK, trimesh, tetgen, pymeshfix, OCP |
 | `chrono-build/` | CMake/Ninja build tree |
 | `chrono-install/` | Installed Chrono libraries and `pychrono` Python modules |
@@ -82,6 +83,14 @@ the build script retries the remaining objects serially; genuine source errors
 still fail. The build script also raises the compiler's soft stack limit because
 Eigen-heavy Chrono sources can otherwise crash `cc1plus` with a segmentation
 fault.
+
+Only the modules used by this project are built: FSI/FSI-SPH, FEA, Python,
+PardisoMKL, and a trimmed Chrono::Vehicle that exposes `veh.CRMTerrain`.
+Vehicle models, robot models, parsers, vehicle-model Python bindings, and unused
+wheeled/tracked vehicle sources are disabled. This removes the large
+vehicle-model compilation phase that previously triggered a slow serial retry
+after a compiler front-end crash. The serial retry is still kept as a fallback
+for other transient crashes; a genuine source error still fails both passes.
 
 The PyPI/conda-forge `pychrono` package is deliberately **not** used: it lacks
 `pychrono.fsi`/`pychrono.vehicle` and the local PardisoMKL binding, and its

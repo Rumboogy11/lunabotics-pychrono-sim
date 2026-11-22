@@ -82,13 +82,20 @@ class Chrono11BuildConfigurationTest(unittest.TestCase):
         ):
             self.assertIn(fragment, self.env_spec, fragment)
 
-    def test_build_script_enables_pardiso_mkl_and_robot_models(self) -> None:
+    def test_build_script_enables_only_required_chrono_modules(self) -> None:
         for fragment in (
-            "-DCH_ENABLE_MODULE_ROBOT_MODELS=ON",
+            "-DCH_ENABLE_MODULE_VEHICLE=ON",
+            "-DCH_ENABLE_MODULE_VEHICLE_MODELS=OFF",
+            "-DCHRONO_VEHICLE_CRM_ONLY=ON",
+            "-DCHRONO_VEHICLE_SCM_GPU_BACKEND=NONE",
+            "-DCH_ENABLE_MODULE_ROBOT_MODELS=OFF",
+            "-DCH_ENABLE_MODULE_PARSERS=OFF",
             "-DCH_ENABLE_MODULE_PARDISO_MKL=ON",
             "-DMKL_ROOT=\"$CHRONO_ENV\"",
             "-DMKL_THREADING=gnu_thread",
             "-DMKL_INTERFACE=lp64",
+            "import pychrono.vehicle as veh",
+            "veh.CRMTerrain",
             "import pychrono.pardisomkl as pardiso",
         ):
             self.assertIn(fragment, self.build_script, fragment)
@@ -106,10 +113,25 @@ class Chrono11BuildConfigurationTest(unittest.TestCase):
         self.assertIn("set(CH_VERSION 0x00110000)", self.installer)
         self.assertIn("import pychrono.pardisomkl as pardiso", self.installer)
 
-    def test_installer_applies_both_chrono_patches(self) -> None:
+    def test_installer_applies_all_chrono_patches(self) -> None:
         self.assertIn('PY_PATCH_FILE="$PROJECT_ROOT/environment/patches/chrono-python-von-mises.patch"', self.installer)
-        self.assertIn('for patch in "$PATCH_FILE" "$PY_PATCH_FILE"; do', self.installer)
-        self.assertTrue((ROOT / "environment/patches/chrono-python-von-mises.patch").is_file())
+        self.assertIn(
+            'VEHICLE_PATCH_FILE="$PROJECT_ROOT/environment/patches/chrono-python-minimal-vehicle.patch"',
+            self.installer,
+        )
+        self.assertIn('for patch in "$PATCH_FILE" "$PY_PATCH_FILE" "$VEHICLE_PATCH_FILE"; do', self.installer)
+        for patch_name in (
+            "chrono-local-crm-sph.patch",
+            "chrono-python-von-mises.patch",
+            "chrono-python-minimal-vehicle.patch",
+        ):
+            self.assertTrue((ROOT / "environment/patches" / patch_name).is_file(), patch_name)
+
+    def test_minimal_vehicle_patch_keeps_crm_terrain(self) -> None:
+        patch = (ROOT / "environment/patches/chrono-python-minimal-vehicle.patch").read_text(encoding="utf-8")
+        self.assertIn('%include "ChTerrain.i"', patch)
+        self.assertIn("CHRONO_VEHICLE_CRM_ONLY", patch)
+        self.assertIn("veh.CRMTerrain", (ROOT / "environment/build-chrono-source.sh").read_text(encoding="utf-8"))
 
     def test_oneway_launcher_always_uses_local_chrono_bindings(self) -> None:
         self.assertIn("chrono-install/share/chrono/python", self.oneway_launcher)
@@ -153,6 +175,7 @@ class InstallerBuildThreadPolicyTest(unittest.TestCase):
         cls.install_doc = (ROOT / "environment/INSTALL.md").read_text(encoding="utf-8")
         cls.cli_doc = (ROOT / "docs/cli-reference.md").read_text(encoding="utf-8")
         cls.dev_doc = (ROOT / "docs/developer-guide.md").read_text(encoding="utf-8")
+        cls.readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     def _capped_jobs(self, total_threads: int, requested: int) -> int:
         with tempfile.TemporaryDirectory() as directory:
@@ -199,6 +222,19 @@ class InstallerBuildThreadPolicyTest(unittest.TestCase):
         self.assertIn("nproc - 2", self.dev_doc)
         self.assertNotIn("four-job default cap", self.dev_doc)
         self.assertNotIn("default/ceiling: half of `nproc`", self.install_doc)
+
+    def test_docs_describe_minimal_modules_and_retry_fallback(self) -> None:
+        for document, label in (
+            (self.install_doc, "environment/INSTALL.md"),
+            (self.cli_doc, "docs/cli-reference.md"),
+            (self.dev_doc, "docs/developer-guide.md"),
+            (self.readme, "README.md"),
+        ):
+            lowered = document.lower()
+            self.assertIn("vehicle models", lowered, label)
+            self.assertIn("serial", lowered, label)
+        self.assertIn("CRMTerrain", self.install_doc)
+        self.assertIn("CRMTerrain", self.dev_doc)
 
 
 if __name__ == "__main__":

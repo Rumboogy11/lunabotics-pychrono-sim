@@ -21,6 +21,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ENV_FILE="$PROJECT_ROOT/environment/environment.yml"
 PATCH_FILE="$PROJECT_ROOT/environment/patches/chrono-local-crm-sph.patch"
 PY_PATCH_FILE="$PROJECT_ROOT/environment/patches/chrono-python-von-mises.patch"
+VEHICLE_PATCH_FILE="$PROJECT_ROOT/environment/patches/chrono-python-minimal-vehicle.patch"
 
 # Custom Chrono 11 fork with the CRM/SPH fixes used by this project.
 # The repository patch supplies the newer BVH-accelerated BCE generation.
@@ -382,7 +383,7 @@ apply_chrono_patch() {
     warn "Chrono source is not a git checkout; skipping local patches."
     return
   fi
-  for patch in "$PATCH_FILE" "$PY_PATCH_FILE"; do
+  for patch in "$PATCH_FILE" "$PY_PATCH_FILE" "$VEHICLE_PATCH_FILE"; do
     [[ -f "$patch" ]] || continue
     label="$(basename "$patch")"
     if git -C "$SRC_DIR" apply --check --reverse "$patch" >/dev/null 2>&1; then

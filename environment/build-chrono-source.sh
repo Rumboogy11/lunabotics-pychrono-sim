@@ -16,7 +16,7 @@ source "$PROJECT_ROOT/environment/activate-chrono-source.sh"
 
 CLEAN=0
 # Leave two threads free by default; --jobs overrides this for direct builds.
-# The serial retry below covers compiler front-end crashes at higher job counts.
+# The serial retry below is only a fallback for compiler front-end crashes.
 JOBS="$(env -u OMP_NUM_THREADS nproc 2>/dev/null || printf '1\n')"
 [[ "$JOBS" =~ ^[0-9]+$ ]] || JOBS=1
 JOBS=$(( JOBS - 2 ))
@@ -83,6 +83,9 @@ CHRONO_CXX_RELEASE_FLAGS="${CHRONO_CXX_RELEASE_FLAGS:--O2 -DNDEBUG}"
 # permits it; the serial retry below still covers other transient failures.
 ulimit -s unlimited 2>/dev/null || true
 
+# Build only the modules this project imports.  Chrono::Vehicle is retained for
+# veh.CRMTerrain, but vehicle models, robot models, parsers, and unused vehicle
+# sources are disabled by the local patches and options below.
 cmake -S "$CHRONO_SRC" -B "$CHRONO_BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CXX_FLAGS_RELEASE="$CHRONO_CXX_RELEASE_FLAGS" \
@@ -95,8 +98,11 @@ cmake -S "$CHRONO_SRC" -B "$CHRONO_BUILD" -G Ninja \
   -DCH_ENABLE_MODULE_FSI=ON \
   -DCH_ENABLE_MODULE_FSI_SPH=ON \
   -DCH_ENABLE_MODULE_VEHICLE=ON \
-  -DCH_ENABLE_MODULE_ROBOT_MODELS=ON \
-  -DCH_ENABLE_MODULE_PARSERS=ON \
+  -DCH_ENABLE_MODULE_VEHICLE_MODELS=OFF \
+  -DCHRONO_VEHICLE_CRM_ONLY=ON \
+  -DCHRONO_VEHICLE_SCM_GPU_BACKEND=NONE \
+  -DCH_ENABLE_MODULE_ROBOT_MODELS=OFF \
+  -DCH_ENABLE_MODULE_PARSERS=OFF \
   -DCH_ENABLE_MODULE_PYTHON=ON \
   -DCH_ENABLE_MODULE_PARDISO_MKL=ON \
   -DMKL_ROOT="$CHRONO_ENV" \
