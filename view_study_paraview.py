@@ -15,7 +15,8 @@ can have its own render settings:
   - crm_particles.pvd : particle point cloud over time, rendered as 3D sphere
         point sprites (glyph fallback) sized from the study's SPH radius and
         colored by state.
-  - excavator.pvd     : rigid excavator/drum surface over time.
+  - excavator.pvd     : rigid excavator/drum surface over time, rendered at 40%
+                        opacity so it does not hide the FEA stress overlay.
 The equivalent combined collection is crm_animation.pvd (also written as the
 backwards-compatible combined.pvd); neither contains FEA data.
 
@@ -28,9 +29,11 @@ still suppresses all FEA output.
 The UI's "Export full 3D FEA stress animation" option writes a complete
 per-frame VTU series with von Mises stress and displacement.  Load it with
 --with-fea/--fea-only (or the GUI Tools toggle); it must pass validation against
-export_manifest.json (or local validation without a manifest).  A one-frame/t=0
-FEA PVD from a cancelled run is ignored, so it cannot obscure or freeze the
-excavation animation.
+export_manifest.json (or local validation without a manifest).  The raw
+undeformed FEA grid is shown and colored by von Mises stress by default; the
+Warp By Vector filter is created but hidden, so toggle it in the Pipeline
+Browser to see the deformed shape.  A one-frame/t=0 FEA PVD from a cancelled run
+is ignored, so it cannot obscure or freeze the excavation animation.
 
 If no argument is given, the script tries ./paraview in the current directory.
 
@@ -56,6 +59,15 @@ import math
 import os
 import sys
 from pathlib import Path
+
+
+# Default render settings.  The excavator (PVDReader2 in a fresh ParaView
+# session) is translucent so it does not hide the FEA stress overlay, and the
+# displacement warp is available in the pipeline but starts hidden so the raw
+# undeformed grid is what the user sees first.
+EXCAVATOR_OPACITY = 0.4
+FEA_WARP_VISIBLE = False
+
 
 def _script_directory() -> Path:
     """Find this script's folder under python, pvpython and paraview --script.
@@ -646,7 +658,8 @@ def main():
 
     try:
         from paraview.simple import (  # type: ignore
-            PVDReader, Show, Hide, ColorBy, GetDisplayProperties, GetActiveViewOrCreate,
+            PVDReader, Show, Hide, ColorBy, GetDisplayProperties, GetRepresentation,
+            GetActiveViewOrCreate,
             GetColorTransferFunction, GetOpacityTransferFunction, GetScalarBar, ResetCamera,
             Render, SetActiveSource, WarpByVector, Glyph, Sphere, _DisableFirstRenderCameraReset,
             GetAnimationScene, UpdatePipeline,
@@ -865,7 +878,7 @@ def main():
             pass
         try:
             disp.Representation = 'Surface'
-            disp.Opacity = 0.85
+            disp.Opacity = EXCAVATOR_OPACITY
             # neutral color to distinguish from particles/FEA
             disp.AmbientColor = [0.7, 0.7, 0.75]
             disp.DiffuseColor = [0.7, 0.7, 0.75]
@@ -902,11 +915,13 @@ def main():
             UpdatePipeline(proxy=fea)
         except Exception:
             pass
-        # Prefer showing deformed shape if Displacement exists
+        # Show the raw undeformed grid by default.  The warp filter is still
+        # created so it can be enabled in the Pipeline Browser, but hiding it
+        # avoids making a deformed overlay the first thing the user sees.
         fea_source = fea
         disp_source = fea
+        warp = None
         try:
-            # Try to warp by displacement for visible deformation
             warp = WarpByVector(Input=fea)
             try:
                 warp.Vectors = ['POINTS', 'Displacement']
@@ -917,10 +932,15 @@ def main():
                 UpdatePipeline(proxy=warp)
             except Exception:
                 pass
-            disp_source = warp
-            fea_source = warp
-            print(f"  FEA: Warp By Vector active (scale={args.warp_scale}). "
-                  "Increase --warp-scale to exaggerate elastic deformation.")
+            if FEA_WARP_VISIBLE:
+                disp_source = warp
+                fea_source = warp
+                print(f"  FEA: Warp By Vector active (scale={args.warp_scale}). "
+                      "Increase --warp-scale to exaggerate elastic deformation.")
+            else:
+                print(f"  FEA: Warp By Vector available but hidden by default "
+                      f"(scale={args.warp_scale}); toggle it in the Pipeline Browser "
+                      "to see the deformed grid.")
         except Exception as e:
             print(f"  (FEA warp unavailable, showing undeformed grid: {e})")
             disp_source = fea
@@ -980,12 +1000,18 @@ def main():
                 pass
             print("  FEA: no von_mises/displacement array found to color by (showing solid). "
                   "If you see 'vtkBlockColors', select von_mises_MPa/von_mises_pa in the Coloring menu.")
-        # hide raw grid if warped
-        if disp_source is not fea:
-            try:
-                Hide(fea, view)
-            except Exception:
-                pass
+        # Keep exactly one FEA grid visible by default: the raw reader is shown
+        # and the warp filter starts hidden.  If FEA_WARP_VISIBLE is enabled,
+        # reverse that so only the deformed grid is shown.
+        try:
+            if warp is not None and not FEA_WARP_VISIBLE:
+                # Hide() does not create a representation for a source that
+                # has never been shown, so set the display property directly.
+                GetRepresentation(warp, view).Visibility = 0
+            elif disp_source is not fea:
+                GetRepresentation(fea, view).Visibility = 0
+        except Exception:
+            pass
         SetActiveSource(disp_source)
         sources_shown.append(('fea', disp_source))
     elif want_3d_fea:
@@ -1060,8 +1086,9 @@ def main():
     else:
         print(f"  - FEA: no scalar summary available ({fea_summary_status}).")
     if fea_pvd is not None:
-        print("  - FEA 3D VTK: validated stress/deformation series, colored by von Mises stress and warped by "
-              "displacement by default. Adjust warp 'Scale Factor' to exaggerate deformation.")
+        print("  - FEA 3D VTK: validated stress/deformation series, colored by von Mises stress on the "
+              "undeformed grid by default. The excavator is translucent; toggle Warp By Vector in the "
+              "Pipeline Browser to show deformation and adjust its 'Scale Factor'.")
     elif want_3d_fea:
         print("  - FEA 3D VTK: no valid series loaded; the non-FEA animation remains available "
               "(scalar charts are opt-in).")

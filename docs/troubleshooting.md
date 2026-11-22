@@ -139,6 +139,8 @@ The two are separate toggles:
 
 Check `paraview/export_manifest.json` for `has_fea_vtk`, `fea_valid`, and `fea_status` as export-time provenance. ParaView rechecks the actual PVD and frame files, so a manifest-marked partial multi-frame series may still display.
 
+The 3D series opens on the **undeformed** grid with von Mises coloring; `WarpByVector1` is present but hidden by default. Toggle that filter in the Pipeline Browser if you expected a deformed shape. The excavator/drum source is at 40% opacity so it does not hide the stress overlay; raise its opacity in the Properties panel if you prefer a solid drum.
+
 ### ParaView's first frame is white or logs a view-up warning
 
 The current `view_study_paraview.py` primes the camera-orbit track before its first render and picks a non-parallel view-up before any camera reset. Time 0 should open already framed, without stepping one frame backwards and forwards, and without the `Resetting view-up since view plane normal is parallel` warning. If either symptom persists, you are likely running an older copy of the viewer: relaunch from the GUI's Tools tab (which uses this checkout's script) or run `pvpython view_study_paraview.py <study>/paraview` directly. `--no-camera-orbit` disables the track entirely as a fallback; use ParaView's Reset Camera button to reframe the scene.

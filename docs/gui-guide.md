@@ -161,7 +161,7 @@ Fields are grouped by wizard page. Study name and output directory are intention
 
 Checkboxes:
 
-- **Load 3D FEA stress/deformation in ParaView (if valid)** — on by default. The viewer rechecks the PVD and its frame files: a structurally usable multi-frame `fea/vtk/fea.pvd` can be loaded, but a lone `t=0` frame from a cancelled run is ignored.
+- **Load 3D FEA stress/deformation in ParaView (if valid)** — on by default. The viewer rechecks the PVD and its frame files: a structurally usable multi-frame `fea/vtk/fea.pvd` can be loaded, but a lone `t=0` frame from a cancelled run is ignored. It shows the raw grid colored by von Mises stress; the `Warp By Vector` filter starts hidden and can be toggled in the Pipeline Browser. The excavator/drum source is rendered at 40% opacity so it does not hide the overlay.
 - **Show one-way FEA scalar/deformation history charts** — off by default. Enables the XY charts and clears any inherited `PYCHRONO_FEA_CHARTS` setting when unchecked.
 
 Export controls: **Quick export stride**, **Particle frame stride** (`0` = same as quick), **Particle render stride**, and **Export workers** for parallel frame writes.

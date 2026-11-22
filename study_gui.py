@@ -381,7 +381,7 @@ PARAM_INFO: dict[str, str] = {
         "Cost: a larger stride means fewer VTU files, fewer stress scans, and less disk use; 1 gives the complete animation.",
     ),
     "tools_show_fea_3d": _info(
-        "When the Tools tab opens ParaView, load a revalidated multi-frame 3D FEA stress/deformation PVD if one exists. A lone t=0 frame is ignored. On by default; this is the stress overlay only, not the FEA history charts.",
+        "When the Tools tab opens ParaView, load a revalidated multi-frame 3D FEA stress/deformation PVD if one exists. A lone t=0 frame is ignored. The raw grid is shown colored by von Mises stress; the Warp By Vector filter starts hidden and can be toggled in the Pipeline Browser. On by default; this is the stress overlay only, not the FEA history charts.",
         "Cost: no simulation cost, but ParaView spends time rechecking the PVD and frames. Note that 'Open ParaView after run' always requests this overlay when a usable one exists.",
     ),
     "tools_show_fea_charts": _info(
@@ -2197,9 +2197,9 @@ class StudyGUI:
             "  (passing args after '--' may not work with some ParaView builds).\n"
             "• pvpython fallback: pvpython view_study_paraview.py <study>/paraview stays open until its render window is closed.\n"
             "• 'Preview STEP mesh' runs the current Geometry settings through the exact full-run mesher into geometry_checks/, then opens the STEP-vs-mesh comparison tool. Active study outputs are untouched.\n"
-            "• Particles are rendered as 3D sphere point sprites (glyph fallback). Excavator is a separate source.\n"
+            "• Particles are rendered as 3D sphere point sprites (glyph fallback). Excavator is a separate source at 40% opacity.\n"
             "• The camera-orbit track is primed before the first render: the first frame is framed immediately, with no manual step back/forward and no VTK view-up warning.\n"
-            "• One-way FEA scalar/deformation XY charts are hidden by default; check 'Show one-way FEA scalar/deformation history charts' to opt in (or pass --show-fea-charts to the viewer). A validated per-frame stress/deformation PVD is loaded by default; uncheck 'Load 3D FEA stress' to skip it.\n"
+            "• One-way FEA scalar/deformation XY charts are hidden by default; check 'Show one-way FEA scalar/deformation history charts' to opt in (or pass --show-fea-charts to the viewer). A validated per-frame stress/deformation PVD is loaded by default; uncheck 'Load 3D FEA stress' to skip it. Its raw grid is shown and the Warp By Vector filter starts hidden.\n"
             "• The lightweight Output Preview tab reads CRM/FEA CSVs directly and draws a bounded 3D point cloud with editable particle/frame strides."
         )
         ttk.Label(p, text=notes, justify=LEFT).grid(row=r, column=0, columnspan=4, sticky=W, padx=8, pady=4); r += 1

@@ -144,7 +144,7 @@ QT_QPA_PLATFORM=xcb PYCHRONO_EXPORT_DIR=Output_MyDrum/paraview \
   paraview --script="$PWD/view_study_paraview.py"
 ```
 
-or headlessly with `pvpython view_study_paraview.py Output_MyDrum/paraview`. Flags include `--warp-scale`, `--particle-radius`, `--particle-style {spheres,points}`, `--no-particles`, `--no-excavator`, `--no-fea`, `--show-fea-charts`, `--with-fea`, `--fea-only`, `--fea-series COL1,COL2`, and camera-orbit options. `PYCHRONO_FEA_CHARTS=1` and `PYCHRONO_WITH_FEA=1` are the environment equivalents used by the GUI. The camera track is primed during setup, so the first frame opens framed instead of white and the view-up warning that older versions logged at startup is avoided.
+or headlessly with `pvpython view_study_paraview.py Output_MyDrum/paraview`. Flags include `--warp-scale`, `--particle-radius`, `--particle-style {spheres,points}`, `--no-particles`, `--no-excavator`, `--no-fea`, `--show-fea-charts`, `--with-fea`, `--fea-only`, `--fea-series COL1,COL2`, and camera-orbit options. `PYCHRONO_FEA_CHARTS=1` and `PYCHRONO_WITH_FEA=1` are the environment equivalents used by the GUI. The excavator source opens at 40% opacity; the FEA raw grid is shown and `WarpByVector1` starts hidden (toggle it in the Pipeline Browser). The camera track is primed during setup, so the first frame opens framed instead of white and the view-up warning that older versions logged at startup is avoided.
 
 ### `view_results.py`
 

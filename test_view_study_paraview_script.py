@@ -60,6 +60,25 @@ class ParaViewParticleDisplayTest(unittest.TestCase):
         self.assertEqual(source.count("CreateXYPlotView()"), 1)
 
 
+class ParaViewDefaultDisplayTest(unittest.TestCase):
+    def test_excavator_opens_at_40_percent_opacity(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertAlmostEqual(viewer.EXCAVATOR_OPACITY, 0.4)
+        self.assertIn("disp.Opacity = EXCAVATOR_OPACITY", source)
+        self.assertNotIn("disp.Opacity = 0.85", source)
+        self.assertLess(source.index("excav = PVDReader"),
+                        source.index("disp.Opacity = EXCAVATOR_OPACITY"))
+
+    def test_fea_warp_starts_hidden(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertFalse(viewer.FEA_WARP_VISIBLE)
+        self.assertIn("GetRepresentation(warp, view).Visibility = 0", source)
+        self.assertLess(source.index("warp = WarpByVector(Input=fea)"),
+                        source.index("GetRepresentation(warp, view).Visibility = 0"))
+
+
 class ParaViewCameraOrbitTest(unittest.TestCase):
     def test_auto_fit_radius_uses_five_times_radial_clearance(self) -> None:
         axis, u, v = viewer._orbit_basis()

@@ -110,7 +110,7 @@ The suite uses the standard library `unittest` module (no pytest needed):
 chrono-env/bin/python -m unittest discover -s . -p 'test_*.py'
 ```
 
-Coverage includes GUI fields and settings, STEP/mesh geometry consistency, fill metrics, force descent, gravity controls, FEA summaries and export timing (including the one-way replay's CRM-frame duration limit), detector sizing, output preview, ParaView script generation (including first-frame camera priming and the non-parallel view-up guard), and installer dependency text. `crm/test_fill_metrics.py` covers the driver-side metric logic.
+Coverage includes GUI fields and settings, STEP/mesh geometry consistency, fill metrics, force descent, gravity controls, FEA summaries and export timing (including the one-way replay's CRM-frame duration limit), detector sizing, output preview, ParaView script generation (including first-frame camera priming, the non-parallel view-up guard, and default display opacity/visibility), and installer dependency text. `crm/test_fill_metrics.py` covers the driver-side metric logic.
 
 GUI tests create a `tk.Tk()` root, withdraw it, and instantiate `StudyGUI` directly. They locate widgets through app attributes (`app.pages[2]`, `app.doc_text`, `app.settings_vars[...]`) or by walking `winfo_children()` and checking label text. Set `PYCHRONO_GUI_NO_REEXEC=1` in tests to avoid the GUI's self-relaunch.
 

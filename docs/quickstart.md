@@ -154,7 +154,7 @@ QT_QPA_PLATFORM=xcb PYCHRONO_EXPORT_DIR=Output_<study_name>/paraview \
   paraview --script="$PWD/view_study_paraview.py"
 ```
 
-The camera-orbit track is primed, so the first frame opens already framed; press Play in ParaView's time controls to animate.
+The camera-orbit track is primed, so the first frame opens already framed; press Play in ParaView's time controls to animate. The drum is translucent (40% opacity) and any loaded 3D FEA grid opens undeformed; toggle `WarpByVector1` in the Pipeline Browser to see deformation.
 
 See [Outputs and visualization](outputs-and-visualization.md) for the full tour.
 

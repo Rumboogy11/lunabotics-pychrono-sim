@@ -163,10 +163,13 @@ per-element `von_mises_pa`/`von_mises_MPa`, point `Displacement`,
 stress scan and VTU write, so use a stride above 1 for long runs when a sampled
 animation is sufficient; the final frame is always included. Configure ParaView
 with the GUI **Tools** toggle "Load 3D FEA stress/deformation in ParaView" or
-pass `--with-fea`. ParaView warps by `Displacement` and colors by von Mises
-stress. The viewer rechecks the PVD and frame files rather than trusting the
-manifest: a lone `t=0` frame is ignored, while a structurally usable partial
-multi-frame series can be displayed.
+pass `--with-fea`. ParaView colors the raw undeformed grid by von Mises stress;
+the `Warp By Vector` filter is created from `Displacement` but starts hidden, so
+toggle it in the Pipeline Browser to see the deformed shape. The excavator
+source is rendered at 40% opacity so it does not hide the overlay. The viewer
+rechecks the PVD and frame files rather than trusting the manifest: a lone
+`t=0` frame is ignored, while a structurally usable partial multi-frame series
+can be displayed.
 
 Driver and SPH-coupling fixes applied in the local source/runtime:
 

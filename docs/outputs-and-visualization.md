@@ -132,9 +132,9 @@ or:
 pvpython view_study_paraview.py Output_<study_name>/paraview
 ```
 
-The viewer shows particles as GPU point sprites with a glyph fallback and the excavator as a separate source. By default, one-way FEA **history charts are hidden**; enable them with `--show-fea-charts` or `PYCHRONO_FEA_CHARTS=1`. The GUI Tools checkbox does the same and clears the environment variable when unchecked.
+The viewer shows particles as GPU point sprites with a glyph fallback and the excavator as a separate source at 40% opacity so it does not hide the FEA stress overlay. By default, one-way FEA **history charts are hidden**; enable them with `--show-fea-charts` or `PYCHRONO_FEA_CHARTS=1`. The GUI Tools checkbox does the same and clears the environment variable when unchecked.
 
-A structurally usable 3D FEA stress PVD is loaded by default by the GUI-launched viewer (`PYCHRONO_WITH_FEA=1` or `--with-fea`); uncheck **Load 3D FEA stress/deformation** to skip it. The viewer checks the actual PVD and frame files rather than trusting an old manifest entry. `--fea-only` isolates the FEA series and `--fea-series COL1,COL2` selects other summary columns for charts.
+A structurally usable 3D FEA stress PVD is loaded by default by the GUI-launched viewer (`PYCHRONO_WITH_FEA=1` or `--with-fea`); uncheck **Load 3D FEA stress/deformation** to skip it. The raw undeformed grid is shown with von Mises coloring; the `Warp By Vector` filter exists in the pipeline but starts hidden. Toggle `WarpByVector1` in the Pipeline Browser to display the deformed shape and adjust its **Scale Factor**. `--warp-scale` sets that factor at launch. The viewer checks the actual PVD and frame files rather than trusting an old manifest entry. `--fea-only` isolates the FEA series and `--fea-series COL1,COL2` selects other summary columns for charts.
 
 The viewer can add a camera-orbit track around the vertical Z axis. Orbit speed, radius (`0` auto-fits with clearance), inclination, start angle, and keyframe count are configurable on the GUI Tools tab and are passed through `PYCHRONO_ORBIT_*` variables. The viewer primes the track before the first render, so time 0 is already framed: you do not need to step back one frame before advancing, and ParaView does not log a `Resetting view-up since view plane normal is parallel` warning during setup.
 
