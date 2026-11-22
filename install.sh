@@ -2,13 +2,14 @@
 # Install the Lunar bucket-drum excavator simulation tools on a new Linux host.
 #
 # Supported distributions: Arch Linux (and derivatives such as CachyOS) and
-# Debian/Ubuntu. Everything except a few small system packages is installed
-# project-locally, so no global Python environment is modified.
+# Debian/Ubuntu. Everything except system tools, desktop libraries, and the
+# ParaView GUI is installed project-locally, so no global Python environment is
+# modified.
 #
 # Usage:
 #   ./install.sh                       # full install (system packages + env + Chrono build)
 #   ./install.sh --no-system-packages  # only use tools already on PATH
-#   ./install.sh --with-paraview       # also install ParaView via the system package manager
+#   ./install.sh --without-paraview    # skip the system ParaView GUI install
 #   ./install.sh --clean               # rebuild Chrono from scratch (keeps chrono-env)
 #   ./install.sh --skip-build          # install env/source/deps only
 #   ./install.sh --work-root /path     # store env/build outside the checkout
@@ -20,16 +21,6 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ENV_FILE="$PROJECT_ROOT/environment/environment.yml"
 PATCH_FILE="$PROJECT_ROOT/environment/patches/chrono-local-crm-sph.patch"
 
-# Conda packages contain symlinks and case-sensitive paths. Filesystems such as
-# NTFS/exFAT/FUSE cannot host them, so use a native work directory and symlink
-# the expected project paths back into the checkout.
-WORK_ROOT_OVERRIDE="${PYCHRONO_WORK_ROOT:-}"
-fstype="$(findmnt -no FSTYPE -T "$PROJECT_ROOT" 2>/dev/null || stat -f -c %T "$PROJECT_ROOT" 2>/dev/null || true)"
-case "$fstype" in
-  ntfs*|*7366746e*|fuseblk*|fuse*|exfat*|vfat*|cifs*|9p*) NEEDS_NATIVE_STORAGE=1 ;;
-  *) NEEDS_NATIVE_STORAGE=0 ;;
-esac
-
 # Custom Chrono fork with the CRM/SPH fixes used by this project.
 TESTED_CHRONO_REF="757a75b3c33af1cd4c42e6e21c30a24a0cecbfe0"
 CHRONO_REPO="${CHRONO_REPO:-https://github.com/Rumboogy11/chrono.git}"
@@ -37,10 +28,12 @@ CHRONO_REF="${CHRONO_REF:-$TESTED_CHRONO_REF}"
 MICROMAMBA_VERSION="2.10.0"
 MICROMAMBA_SHA256="9a97976244929bbae28fb1fae504e74a3e7e6d1932870e3a03321f01b7fbd07b"
 
-JOBS="$(nproc)"
+WORK_ROOT_OVERRIDE="${PYCHRONO_WORK_ROOT:-}"
+JOBS=1
+JOBS_SET=0
 CUDA_ARCH=""
 SYSTEM_PACKAGES=1
-INSTALL_PARAVIEW=0
+INSTALL_PARAVIEW=1
 CLEAN=0
 SKIP_BUILD=0
 SKIP_PATCH=0
@@ -71,11 +64,13 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-system-packages) SYSTEM_PACKAGES=0; shift ;;
     --with-paraview) INSTALL_PARAVIEW=1; shift ;;
+    --without-paraview) INSTALL_PARAVIEW=0; shift ;;
     --clean) CLEAN=1; shift ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --skip-patch) SKIP_PATCH=1; shift ;;
     --jobs)
       JOBS="${2:?--jobs requires a number}"
+      JOBS_SET=1
       shift 2
       ;;
     --cuda-arch)
@@ -96,7 +91,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      sed -n '2,16p' "${BASH_SOURCE[0]}"
+      sed -n '2,17p' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     *)
@@ -107,40 +102,11 @@ done
 
 [[ -z "$CUDA_ARCH" || "$CUDA_ARCH" =~ ^[0-9]+$ ]] || die "Invalid --cuda-arch value"
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "Invalid --jobs value"
-build_jobs="$JOBS"
-
-command -v git >/dev/null 2>&1 || die "git is required but not found"
-command -v curl >/dev/null 2>&1 || die "curl is required but not found"
-command -v tar >/dev/null 2>&1 || die "tar is required but not found"
-command -v bzip2 >/dev/null 2>&1 || die "bzip2 is required to unpack micromamba but not found"
-command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required to verify micromamba but not found"
-command -v nproc >/dev/null 2>&1 || die "nproc is required to size the build but not found"
-command -v awk >/dev/null 2>&1 || die "awk is required by the installer but not found"
-
-if [[ -n "$WORK_ROOT_OVERRIDE" ]]; then
-  WORK_ROOT="$WORK_ROOT_OVERRIDE"
-elif [[ "$NEEDS_NATIVE_STORAGE" -eq 1 ]]; then
-  project_key="$(printf '%s' "$PROJECT_ROOT" | sha256sum | cut -c1-12)"
-  WORK_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/pychrono/$project_key"
-  log "Project root is on $fstype; storing build artifacts in $WORK_ROOT"
-else
-  WORK_ROOT="$PROJECT_ROOT"
+if [[ "$JOBS_SET" -eq 0 ]]; then
+  JOBS="$(nproc 2>/dev/null || printf '1\n')"
+  [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || JOBS=1
 fi
-mkdir -p "$WORK_ROOT"
-WORK_ROOT="$(cd "$WORK_ROOT" && pwd -P)"
-work_fstype="$(findmnt -no FSTYPE -T "$WORK_ROOT" 2>/dev/null || stat -f -c %T "$WORK_ROOT" 2>/dev/null || true)"
-case "$work_fstype" in
-  ntfs*|*7366746e*|fuseblk*|fuse*|exfat*|vfat*|cifs*|9p*)
-    warn "Work root $WORK_ROOT is on $work_fstype; conda packages may fail to extract."
-    warn "Use --work-root on a native filesystem (for example under \$HOME)."
-    ;;
-esac
-ENV_DIR="$WORK_ROOT/chrono-env"
-SRC_DIR="$WORK_ROOT/chrono-src"
-BUILD_DIR="$WORK_ROOT/chrono-build"
-INSTALL_DIR="$WORK_ROOT/chrono-install"
-TOOLS_DIR="$WORK_ROOT/.tools"
-MAMBA_ROOT="$WORK_ROOT/.mamba"
+build_jobs="$JOBS"
 
 link_project_paths() {
   local name target current
@@ -183,19 +149,27 @@ fi
 install_system_packages() {
   if [[ "$SYSTEM_PACKAGES" -eq 0 ]]; then
     log "Skipping system packages (--no-system-packages)"
+    warn "ParaView (paraview/pvpython), Xvfb, Qt/X11/GL libraries, and a display"
+    warn "server must already exist on the host when system packages are skipped."
     return
   fi
   if [[ "$EUID" -ne 0 && "${#sudo_cmd[@]}" -eq 0 ]]; then
     warn "No root/sudo access: skipping system packages."
-    warn "Install git, curl, bzip2, python3, python3-tk and basic X11/GL libraries manually,"
-    warn "or re-run this script as root. The project-local env will still be created."
+    warn "Install git, curl, bzip2, python3, python3-tk, ParaView, Xvfb, and the"
+    warn "Qt/X11/GL runtime libraries manually, or re-run this script as root."
+    warn "The project-local env will still be created."
     return
   fi
 
   case " $os_like $os_id " in
     *arch*|*cachyos*)
       log "Installing Arch system prerequisites"
-      packages=(git curl bzip2 tar python tk libgl glu libx11 libxext libxrender libxkbcommon glib2 xdg-utils)
+      packages=(
+        git curl bzip2 tar coreutils gawk sed util-linux python tk
+        libgl glu libx11 libxext libxrender libxkbcommon libxkbcommon-x11
+        xcb-util-cursor xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm
+        libice libsm fontconfig xdg-utils xorg-server-xvfb
+      )
       if [[ "$INSTALL_PARAVIEW" -eq 1 ]]; then
         packages+=(paraview)
       fi
@@ -209,7 +183,13 @@ install_system_packages() {
         && ! apt-cache show libglib2.0-0 >/dev/null 2>&1; then
         glib_pkg="libglib2.0-0t64"
       fi
-      packages=(git curl bzip2 tar python3 python3-tk libgl1 libglu1-mesa libx11-6 libxext6 libxrender1 libxkbcommon0 "$glib_pkg" xdg-utils)
+      packages=(
+        git curl bzip2 tar coreutils gawk sed util-linux python3 python3-tk
+        libgl1 libglu1-mesa libx11-6 libxext6 libxrender1 libxkbcommon0 libxkbcommon-x11-0
+        libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0
+        libxcb-render-util0 libxcb-shape0 libxcb-xkb1 libice6 libsm6 libfontconfig1
+        xdg-utils xvfb "$glib_pkg"
+      )
       if [[ "$INSTALL_PARAVIEW" -eq 1 ]]; then
         packages+=(paraview)
       fi
@@ -217,10 +197,55 @@ install_system_packages() {
       ;;
     *)
       warn "Unsupported distribution (${os_id:-unknown}); skipping system packages."
-      warn "Required tools: git, curl, tar, bzip2, python3, python3-tk, X11/GL runtime libraries."
+      warn "Required tools: git, curl, tar, bzip2, coreutils, awk, sed, python3,"
+      warn "python3-tk, ParaView, Xvfb, and X11/GL/Qt runtime libraries."
       ;;
   esac
 }
+
+# Install system prerequisites before checking for them, so a minimal host can
+# repair itself instead of failing on a missing curl/nproc/awk.
+install_system_packages
+
+for cmd in git curl tar bzip2 sha256sum nproc awk cut tr head sed; do
+  command -v "$cmd" >/dev/null 2>&1 || die "$cmd is required but not found"
+done
+command -v findmnt >/dev/null 2>&1 || command -v stat >/dev/null 2>&1 \
+  || die "findmnt or stat is required to detect the work filesystem"
+
+# Conda packages contain symlinks and case-sensitive paths. Filesystems such as
+# NTFS/exFAT/FUSE cannot host them, so use a native work directory and symlink
+# the expected project paths back into the checkout.
+fstype="$(findmnt -no FSTYPE -T "$PROJECT_ROOT" 2>/dev/null || stat -f -c %T "$PROJECT_ROOT" 2>/dev/null || true)"
+case "$fstype" in
+  ntfs*|*7366746e*|fuseblk*|fuse*|exfat*|vfat*|cifs*|9p*) NEEDS_NATIVE_STORAGE=1 ;;
+  *) NEEDS_NATIVE_STORAGE=0 ;;
+esac
+
+if [[ -n "$WORK_ROOT_OVERRIDE" ]]; then
+  WORK_ROOT="$WORK_ROOT_OVERRIDE"
+elif [[ "$NEEDS_NATIVE_STORAGE" -eq 1 ]]; then
+  project_key="$(printf '%s' "$PROJECT_ROOT" | sha256sum | cut -c1-12)"
+  WORK_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/pychrono/$project_key"
+  log "Project root is on $fstype; storing build artifacts in $WORK_ROOT"
+else
+  WORK_ROOT="$PROJECT_ROOT"
+fi
+mkdir -p "$WORK_ROOT"
+WORK_ROOT="$(cd "$WORK_ROOT" && pwd -P)"
+work_fstype="$(findmnt -no FSTYPE -T "$WORK_ROOT" 2>/dev/null || stat -f -c %T "$WORK_ROOT" 2>/dev/null || true)"
+case "$work_fstype" in
+  ntfs*|*7366746e*|fuseblk*|fuse*|exfat*|vfat*|cifs*|9p*)
+    warn "Work root $WORK_ROOT is on $work_fstype; conda packages may fail to extract."
+    warn "Use --work-root on a native filesystem (for example under \$HOME)."
+    ;;
+esac
+ENV_DIR="$WORK_ROOT/chrono-env"
+SRC_DIR="$WORK_ROOT/chrono-src"
+BUILD_DIR="$WORK_ROOT/chrono-build"
+INSTALL_DIR="$WORK_ROOT/chrono-install"
+TOOLS_DIR="$WORK_ROOT/.tools"
+MAMBA_ROOT="$WORK_ROOT/.mamba"
 
 bootstrap_micromamba() {
   mkdir -p "$TOOLS_DIR/bin"
@@ -242,7 +267,7 @@ create_environment() {
   export MAMBA_ROOT_PREFIX="$MAMBA_ROOT"
 
   if [[ ! -x "$ENV_DIR/bin/python" ]]; then
-    log "Creating project environment at $ENV_DIR (this downloads ~2 GB)"
+    log "Creating project environment at $ENV_DIR (this downloads ~3 GB)"
     "$mamba" create -y -p "$ENV_DIR" -f "$ENV_FILE"
   else
     log "Updating project environment at $ENV_DIR"
@@ -377,6 +402,7 @@ import matplotlib
 import numpy
 import pyvista
 import tetgen
+import tkinter
 import trimesh
 import pymeshfix
 import vtk
@@ -395,6 +421,7 @@ import matplotlib
 import numpy
 import pyvista
 import tetgen
+import tkinter
 import trimesh
 import pymeshfix
 import vtk
@@ -403,6 +430,7 @@ from OCP.BRepMesh import BRepMesh_IncrementalMesh
 print("  pychrono: core, fea, fsi, vehicle")
 print(f"  numpy {numpy.__version__}, pyvista {pyvista.__version__}, vtk {vtk.__version__}")
 print(f"  trimesh {trimesh.__version__}, tetgen, pymeshfix, OCP, matplotlib")
+print("  Tk available")
 print(f"  core module: {core.__file__}")
 print("Installation verified.")
 PY
@@ -410,10 +438,25 @@ PY
 
   command -v nvcc >/dev/null 2>&1 || die "nvcc not found in activated environment"
   command -v swig >/dev/null 2>&1 || die "swig not found in activated environment"
+
+  if [[ "$SYSTEM_PACKAGES" -eq 1 && "$INSTALL_PARAVIEW" -eq 1 ]]; then
+    command -v paraview >/dev/null 2>&1 \
+      || warn "ParaView GUI command not found on PATH; check the system package install."
+    if command -v pvpython >/dev/null 2>&1; then
+      pvpython -c 'import paraview.simple' >/dev/null 2>&1 \
+        || warn "pvpython could not import paraview.simple."
+    else
+      warn "pvpython not found on PATH; ParaView scripts need the system package."
+    fi
+  else
+    warn "ParaView not verified (system packages skipped or --without-paraview)."
+  fi
+
+  command -v xvfb-run >/dev/null 2>&1 || command -v Xvfb >/dev/null 2>&1 \
+    || warn "No Xvfb found; GUI tools need a physical X11 display or an X server."
 }
 
 link_project_paths
-install_system_packages
 bootstrap_micromamba
 create_environment "$MAMBA_EXE"
 prepare_reference_geometry

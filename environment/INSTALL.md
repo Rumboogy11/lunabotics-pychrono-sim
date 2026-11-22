@@ -26,7 +26,8 @@ Common options:
 | Option | Purpose |
 | --- | --- |
 | `--no-system-packages` | Skip `pacman`/`apt`; use tools already on `PATH` |
-| `--with-paraview` | Also install ParaView with the system package manager |
+| `--without-paraview` | Skip the system ParaView GUI (installed by default) |
+| `--with-paraview` | Force the default system ParaView install |
 | `--cuda-arch NNN` | Override GPU arch (e.g. `86`, `89`, `120`); auto-detected otherwise |
 | `--jobs N` | Request parallel build jobs (default/ceiling: half of `nproc`) |
 | `--clean` | Remove `chrono-build/` and `chrono-install/` before rebuilding |
@@ -110,10 +111,22 @@ because Chrono imports are deferred until a simulation starts.
 ## System packages
 
 The installer uses `pacman` on Arch/CachyOS and `apt-get` on Debian/Ubuntu to
-install: `git`, `curl`, `bzip2`, `tar`, `python3`, Tk support, `xdg-utils`, and
-basic X11/GL runtime libraries needed by VTK, PyVista, OCP, and the Tk GUI.
-ParaView is
-optional and installed only with `--with-paraview`.
+install: `git`, `curl`, `bzip2`, `tar`, coreutils/awk/sed, `python3`, Tk support,
+`xdg-utils`, Xvfb, X11/GL/Qt xcb runtime libraries needed by VTK, PyVista, OCP,
+and the Tk GUI, plus the full ParaView GUI (`paraview`/`pvpython`).
+Use `--without-paraview` to skip the system ParaView package. With
+`--no-system-packages`, ParaView, Xvfb, and the display server are not installed
+and must already exist on the host.
+
+On a headless host, run GUI tools through a virtual X server:
+
+```bash
+xvfb-run ./run_study_gui.sh
+```
+
+Launchers add `chrono-env/bin` to `PATH` automatically. The study GUI also
+checks that its Python has Tkinter and falls back to `chrono-env/bin/python`
+when the system Python does not.
 
 ## Optional tools
 
@@ -121,8 +134,9 @@ optional and installed only with `--with-paraview`.
 - `view_geometry.py` compares STEP CAD vs converted mesh/surface.
 - `export_study_vtk.py` exports studies for ParaView. `view_study_paraview.py`
   imports `paraview.simple` and PySide6 from ParaView's own Python, so run it
-  with `paraview --script=view_study_paraview.py` (or `pvpython`) rather than
-  `chrono-env/bin/python`. Install ParaView with `--with-paraview` if needed.
+  with `pvpython view_study_paraview.py <export_dir>` or the full Qt GUI via
+  `paraview --script=view_study_paraview.py`. Both commands come from the
+  system ParaView package and are exposed by the project launchers.
 - `stl_to_obj.py` converts STL meshes to OBJ (pure format conversion, no extra deps).
 - `fast-simplification` is not required by the current tools.
 

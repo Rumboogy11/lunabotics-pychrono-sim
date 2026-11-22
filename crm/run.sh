@@ -6,6 +6,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/chrono_runtime_env.sh"
 
+# Expose project-local tools such as pvpython without requiring activation.
+if [[ -d "$PROJECT_ROOT/chrono-env/bin" ]]; then
+    PATH="$PROJECT_ROOT/chrono-env/bin:$PATH"
+    export PATH
+fi
+
 if [[ -z "${PYTHON:-}" && -x "$PROJECT_ROOT/chrono-env/bin/python" ]]; then
     PYTHON="$PROJECT_ROOT/chrono-env/bin/python"
 fi
