@@ -152,7 +152,7 @@ or headlessly with `pvpython view_study_paraview.py Output_MyDrum/paraview`. Fla
 ./chrono-env/bin/python view_results.py --output-dir Output_MyDrum --show
 ```
 
-Plots `summary.csv` from `crm/` and `fea/` and writes `results_overview.png` in the study folder.
+Plots `summary.csv` from `crm/` and `fea/` in four panels (CRM work, CRM fill ratio, peak von Mises, and peak deformation) and writes `results_overview.png` in the study folder. With `--show`, a shared crosshair follows the pointer: the vertical line marks the time and a horizontal line on every panel meets it at that panel's plotted value.
 
 ### `view_geometry.py`
 

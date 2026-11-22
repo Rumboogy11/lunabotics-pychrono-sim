@@ -152,7 +152,7 @@ Fields are grouped by wizard page. Study name and output directory are intention
 | --- | --- |
 | **Export ParaView VTK/PVD (separate particles & excavator)** | Runs `export_study_vtk.py` with the strides and workers set on this tab. Progress streams into the log. |
 | **Open ParaView 3D view (pvpython, spheres + FEA stress)** | Launches ParaView with `view_study_paraview.py`, using the checkboxes and orbit settings below. |
-| **Open interactive result plots** | Runs `view_results.py` and writes `results_overview.png`. |
+| **Open interactive result plots** | Runs `view_results.py` to draw four summary plots and write `results_overview.png`. In the interactive window, a shared crosshair follows the pointer: a vertical time line and a horizontal line on each plot meeting it at the plotted value. |
 | **Open lightweight CRM/FEA output preview** | Opens the Output Preview tab for this study. |
 | **Preview STEP mesh (full-run mesher + comparison)** | Runs the current Geometry-page settings through the real mesher into `geometry_checks/mesh_preview/` and opens the geometry comparison. Active study outputs are untouched. |
 | **View geometry comparison (STEP vs converted)** | Renders the CAD and converted surface side by side. |

@@ -113,7 +113,7 @@ Do not treat two-way results as design validation.
 
 The wizard can prompt for all settings, auto-scale derived geometry/motion/SPH defaults from CAD,
 write reproducible `study_config.json`/`commands.sh`, run both one-way stages, and generate
-`results_overview.png`. It can also open results interactively after completion.
+`results_overview.png` with four panels: CRM work, CRM fill ratio, peak von Mises, and peak deformation. It can also open results interactively after completion, with a shared crosshair: a vertical time line and a horizontal line on each panel meeting it at the plotted value.
 
 ## Useful options (`run.sh`)
 

@@ -128,7 +128,6 @@ Also run `git diff --check` and review `git status --short`.
 
 ### Known baseline noise
 
-- `test_font_size_applies_directly_and_scale_controls_density` in `tests/test_study_gui_fields.py` can fail on hosts whose font configuration reports a different actual point size (`AssertionError: 3 != 10`). This is pre-existing and documented in `docs/developer-guide.md`; do not treat it as a simulation regression.
 - Tk tests may print teardown warnings such as `can't invoke "event" command: application has been destroyed`. These are noise unless a new failure appears.
 - STEP parser warnings in tests come from deliberately minimal fixtures.
 - The suite uses standard-library `unittest`; no pytest installation is required.

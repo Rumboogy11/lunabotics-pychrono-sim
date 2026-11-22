@@ -32,7 +32,7 @@ For contributors and advanced users who want to change the tools, understand the
 ├── fea_summary.py                     compact FEA MPa/mm chart tables
 ├── export_study_vtk.py                study → ParaView VTK/PVD exporter
 ├── view_study_paraview.py             ParaView/PyVista viewer
-├── view_results.py                    CRM/FEA summary plots
+├── view_results.py                    four-panel CRM/FEA summary plots
 ├── view_geometry.py                   STEP vs converted mesh comparison
 ├── full_model.py / run_full_model.sh  combined diagnostic runner
 ├── install.sh
@@ -110,13 +110,11 @@ The suite uses the standard library `unittest` module (no pytest needed):
 chrono-env/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Coverage includes GUI fields and settings, STEP/mesh geometry consistency, fill metrics, force descent, gravity controls, FEA summaries and export timing (including the one-way replay's CRM-frame duration limit), detector sizing, output preview, ParaView script generation (including first-frame camera priming, the non-parallel view-up guard, and default display opacity/visibility), and installer dependency text. `tests/test_fill_metrics.py` covers the driver-side metric logic.
+Coverage includes GUI fields and settings, STEP/mesh geometry consistency, fill metrics, force descent, gravity controls, FEA summaries and export timing (including the one-way replay's CRM-frame duration limit), detector sizing, output preview, four-panel result plots and their blitted shared crosshair, ParaView script generation (including first-frame camera priming, the non-parallel view-up guard, and default display opacity/visibility), and installer dependency text. `tests/test_fill_metrics.py` covers the driver-side metric logic.
 
 All regression files live under `tests/`; `tests/__init__.py` keeps the repository root and the test directory importable. Run a single file as `chrono-env/bin/python tests/test_name.py` or `chrono-env/bin/python -m unittest tests.test_name`.
 
 GUI tests create a `tk.Tk()` root, withdraw it, and instantiate `StudyGUI` directly. They locate widgets through app attributes (`app.pages[2]`, `app.doc_text`, `app.settings_vars[...]`) or by walking `winfo_children()` and checking label text. Set `PYCHRONO_GUI_NO_REEXEC=1` in tests to avoid the GUI's self-relaunch.
-
-> A font-size assertion in `tests/test_study_gui_fields.py` can fail on hosts whose font configuration reports a different actual point size; this is an environment sensitivity, not a simulation regression.
 
 ## Running tools during development
 
