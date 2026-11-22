@@ -7,7 +7,7 @@ structural screening and a two-way coupled diagnostic. Commands for both are
 provided below. The earlier two-way-only state is preserved on the local branch
 `two-way-fea-wip` so the coupling diagnostics remain available.
 
-It uses the local Chrono 10 source build, a solid tetrahedral mesh of the STEP
+It uses the local Chrono 11 source build, a solid tetrahedral mesh of the STEP
 drum, and the same CRM SPH soil as the production driver. Supply the mesh with
 `--fea-node` (and optionally `--fea-ele`); no mesh files are bundled.
 
@@ -106,14 +106,17 @@ threaded: `system.SetNumThreads(...)` does not make its LU factorization use
 more CPU cores. Pattern locking still helps it by avoiding repeated analysis
 overhead, but it is not multithreading. PardisoMKL is genuinely multithreaded:
 the `ChSolverPardisoMKL(num_threads)` constructor controls its MKL thread pool;
-8 threads were faster than 1 or 16 on this 16-core machine.
+8 threads were faster than 1 or 16 on this 16-core machine. The pinned Chrono 11
+source also contains upstream commit `6101e132` ("Skip the analyze phase in all
+implicit integrators when the system structure is unchanged"), so pattern
+locking avoids repeated PARDISO analysis rather than only repeated setup calls.
 
 MUMPS is not viable in the current Python workflow. Chrono's source contains a
 `ChSolverMumps` module, but this version has no SWIG/Python binding for it, and
 the environment has no MUMPS library or CMake config. It would require building
 MUMPS (Fortran is available) and adding a custom Python binding. PardisoMKL is
-already provided by the installed conda-forge PyChrono 10.0.0 package, so no
-local Chrono rebuild was needed.
+now built into the project-local Chrono 11 install from oneMKL, and the one-way
+launcher always uses that local binding for every supported solver.
 
 ```bash
 ./crm/run.sh --duration 0.2 --spacing 0.012 --dt 0.00025 \
@@ -136,7 +139,7 @@ The structural driver writes per-frame deformation VTU files only when
 is passed to the driver). That export was a large fraction of the spiky FEA
 runtime, so it is off by default. The durable scalar history is always
 `fea/summary.csv` (filtered/raw peak von Mises stress, peak deformation, loads,
-work, pose, and timing). `export_study_vtk.py` derives
+work, pose, and timing). The installer patches Chrono 11's Python wrapper to expose the native `GetEquivalentVonMises()` formula as `VonMises()`, so the CSV and VTU arrays use Chrono's own stress calculation. `export_study_vtk.py` derives
 `paraview/fea_summary.csv` with MPa/mm units, and `view_study_paraview.py`
 loads it as two lightweight XY charts beside the CRM 3D animation:
 

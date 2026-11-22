@@ -81,23 +81,22 @@ class CrmSoilParams:
     def apply(self, fsi, terrain) -> None:
         """Copy these properties into a Chrono CRM terrain.
 
-        Chrono 10 exposes the granular continuum properties as
-        ``fsi.ElasticMaterialProperties`` via ``terrain.SetElasticSPH()``.
-        Older builds used ``fsi.SoilProperties`` and ``terrain.SetCrmSPH()``;
-        both are supported here so the driver works with either binding.
+        Chrono 11 exposes the granular continuum properties as
+        ``fsi.SoilProperties`` via ``terrain.SetCrmSPH()``.  Older PyChrono
+        builds used ``fsi.ElasticMaterialProperties`` and
+        ``terrain.SetElasticSPH()``; both are supported here so the driver
+        works with either binding.  The material field names are identical.
         """
-        mat_type = getattr(fsi, "ElasticMaterialProperties", None)
-        setter = getattr(terrain, "SetElasticSPH", None)
+        mat_type = getattr(fsi, "SoilProperties", None)
+        setter = getattr(terrain, "SetCrmSPH", None)
         if mat_type is None or setter is None:
-            mat = fsi.SoilProperties()
-            old_setter = getattr(terrain, "SetCrmSPH", None)
-            if old_setter is None:
+            mat_type = getattr(fsi, "ElasticMaterialProperties", None)
+            setter = getattr(terrain, "SetElasticSPH", None)
+            if mat_type is None or setter is None:
                 raise RuntimeError(
-                    "this PyChrono build exposes neither SetElasticSPH nor SetCrmSPH"
+                    "this PyChrono build exposes neither SetCrmSPH nor SetElasticSPH"
                 )
-        else:
-            mat = mat_type()
-            old_setter = setter
+        mat = mat_type()
 
         mat.density = self.density
         mat.Young_modulus = self.youngs_modulus
@@ -112,7 +111,7 @@ class CrmSoilParams:
         if rheology is not None and hasattr(mat, "rheology_model"):
             mat.rheology_model = rheology
 
-        old_setter(mat)
+        setter(mat)
 
 
 DEFAULT_SOIL = CrmSoilParams()

@@ -278,7 +278,7 @@ class FeaVtkExporter:
             element = fea.CastToChElementTetraCorot_4(mesh.GetElement(i))
             if element is None:
                 continue
-            vm[i] = float(element.GetStress().GetEquivalentVonMises())
+            vm[i] = fea_driver.von_mises_pa(element.GetStress())
         _vtk_append_array(grid.GetCellData(), "von_mises_pa", vm, components=1)
         _vtk_append_array(grid.GetCellData(), "von_mises_MPa", vm * 1.0e-6, components=1)
         grid.GetCellData().SetActiveScalars("von_mises_pa")

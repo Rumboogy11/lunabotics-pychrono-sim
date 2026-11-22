@@ -37,7 +37,7 @@ Prefer answering questions from these files and from `--help` / `--dry-run` outp
 - `study_wizard.py` is the shared orchestration layer. Key functions include `build_parser()`, `build_commands()`, `build_oneway_fea_only_commands()`, `write_reproducibility_files()`, and `main()`.
 - `study_gui.py` imports the wizard as `wiz`, so GUI and CLI studies stay equivalent. `PARAM_INFO` and `SETTINGS_INFO` are the source of truth for Info buttons and the generated GUI parameter reference.
 - The `crm/` drivers are standalone argparse programs that defer Chrono imports so `--help`, `--print-soil`, and geometry checks work without a built GPU environment.
-- `crm/run.sh` pins local Chrono libraries with `LD_PRELOAD` via `crm/chrono_runtime_env.sh`. `crm/run_oneway_fea.sh` adds local `PYTHONPATH` / `LD_LIBRARY_PATH` only when `--solver gmres`, `sparse-lu`, or `sparse-qr` is explicitly requested.
+- `crm/run.sh` pins local Chrono libraries with `LD_PRELOAD` via `crm/chrono_runtime_env.sh`. `crm/run_oneway_fea.sh` always adds local `PYTHONPATH` / `LD_LIBRARY_PATH` and uses the same helper, so PardisoMKL and all other supported solvers stay on the local Chrono 11 bindings.
 - `study_config.json` is the contract between configuration and execution. Its groups cover identity, geometry, cadence, domain/motion, materials, FEA/export, and execution commands.
 - Keep setting names synchronized across:
   - wizard defaults (`SOIL_DEFAULTS`, `PLA_DEFAULTS`, scalar defaults in `build_parser()`);

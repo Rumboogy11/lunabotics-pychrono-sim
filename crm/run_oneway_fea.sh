@@ -17,29 +17,14 @@ if [[ -z "${PYTHON:-}" && -x "$PROJECT_ROOT/chrono-env/bin/python" ]]; then
 fi
 PYTHON="${PYTHON:-python3}"
 
-# The local Chrono build only provides the solvers it was configured with.
-# Do not put it ahead of other installed pychrono modules unless the caller
-# explicitly requests one of those solvers.
-solver=""
-prev=""
-for arg in "$@"; do
-    if [[ "$prev" == "--solver" ]]; then
-        solver="$arg"
-        break
-    fi
-    case "$arg" in
-        --solver=*) solver="${arg#*=}"; break ;;
-    esac
-    prev="$arg"
-done
-
-# The driver defaults to PardisoMKL, so only add the local build when the user
-# explicitly requests one of the solvers it provides.
-if [[ "$solver" == "gmres" || "$solver" == "sparse-lu" || "$solver" == "sparse-qr" ]]; then
-    if [[ -d "$PROJECT_ROOT/chrono-install/share/chrono/python" ]]; then
-        export PYTHONPATH="$PROJECT_ROOT/chrono-install/share/chrono/python${PYTHONPATH:+:$PYTHONPATH}"
-    fi
-    export LD_LIBRARY_PATH="$PROJECT_ROOT/chrono-install/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# The local Chrono 11 build provides all supported solvers, including
+# PardisoMKL.  Keep the one-way replay on the same bindings as rigid CRM so a
+# stale conda PyChrono copy cannot mix versions.
+if [[ -d "$PROJECT_ROOT/chrono-install/share/chrono/python" ]]; then
+    export PYTHONPATH="$PROJECT_ROOT/chrono-install/share/chrono/python${PYTHONPATH:+:$PYTHONPATH}"
 fi
+export LD_LIBRARY_PATH="$PROJECT_ROOT/chrono-install/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+source "$SCRIPT_DIR/chrono_runtime_env.sh"
+chrono_use_local_runtime
 
 exec "$PYTHON" "$SCRIPT_DIR/lunar_excavator_oneway.py" "$@"

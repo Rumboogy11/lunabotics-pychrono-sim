@@ -2,9 +2,9 @@
 
 `./install.sh` turns a fresh Arch Linux, CachyOS, Debian, or Ubuntu host into a
 working checkout of this project. It installs system prerequisites, creates a
-project-local `chrono-env`, checks out the custom Chrono fork, and builds/installs
-PyChrono with FSI-SPH + vehicle modules. Nothing is installed into the system
-Python.
+project-local `chrono-env`, checks out the custom Chrono 11 fork, and builds/installs
+PyChrono with FSI-SPH, vehicle, robot-model, and PardisoMKL modules. Nothing is
+installed into the system Python.
 
 ## Quick install
 
@@ -29,10 +29,10 @@ Common options:
 | `--without-paraview` | Skip the system ParaView GUI (installed by default) |
 | `--with-paraview` | Force the default system ParaView install |
 | `--cuda-arch NNN` | Override GPU arch (e.g. `86`, `89`, `120`); auto-detected otherwise |
-| `--jobs N` | Request parallel build jobs (default/ceiling: half of `nproc`) |
+| `--jobs N` | Request parallel build jobs (default capped at four or half of `nproc`, whichever is smaller) |
 | `--clean` | Remove `chrono-build/` and `chrono-install/` before rebuilding |
 | `--skip-build` | Install env/source/deps only, do not compile Chrono |
-| `--skip-patch` | Do not apply the local SPH patch to the Chrono checkout |
+| `--skip-patch` | Do not apply the local SPH and Python stress patches to the Chrono checkout |
 | `--chrono-repo URL` / `--chrono-ref REF` | Override the custom fork URL/commit |
 | `--work-root PATH` | Store env/build/source outside the checkout (useful on NTFS/FUSE mounts) |
 
@@ -44,8 +44,8 @@ build and install trees.
 
 | Path | Purpose |
 | --- | --- |
-| `chrono-src/` | Custom Chrono checkout pinned to commit `757a75b3c3…` from `https://github.com/Rumboogy11/chrono.git`, plus `environment/patches/chrono-local-crm-sph.patch` (BVH-accelerated BCE generation from the original workstation) |
-| `chrono-env/` | Project-local conda-forge env: Python 3.12, CMake 3.31, Ninja, SWIG 4.5.1, GCC 13.4, CUDA 12.9, Eigen, yaml-cpp, Tk, X11/GL runtime libs, NumPy, Matplotlib, PyVista/VTK, trimesh, tetgen, pymeshfix, OCP |
+| `chrono-src/` | Custom Chrono 11 checkout pinned to commit `757a75b3c3…` from `https://github.com/Rumboogy11/chrono.git`, plus `environment/patches/chrono-local-crm-sph.patch` (BVH-accelerated BCE generation) and `environment/patches/chrono-python-von-mises.patch` (native von Mises stress in Python) |
+| `chrono-env/` | Project-local conda-forge env: Python 3.12, CMake 3.31, Ninja, SWIG 4.5.1, GCC 13.4, CUDA 12.9, Eigen, yaml-cpp, oneMKL 2025.2, Tk, X11/GL runtime libs, NumPy, Matplotlib, PyVista/VTK, trimesh, tetgen, pymeshfix, OCP |
 | `chrono-build/` | CMake/Ninja build tree |
 | `chrono-install/` | Installed Chrono libraries and `pychrono` Python modules |
 | `.tools/` | Downloaded micromamba binary |
@@ -66,20 +66,26 @@ compiler errors in this Chrono revision, including at `-O2`. The C++ release
 build uses `-O2`; set `CHRONO_CXX_RELEASE_FLAGS='-O3 -DNDEBUG'` only if you
 change the toolchain to one that has been tested with that setting.
 
-Chrono's Eigen-heavy sources need several GB of memory per compiler process.
-The installer uses half of the machine's available threads for the Chrono build
-(at least one), and the activated environment also defaults `OMP_NUM_THREADS`
-to half of the available threads. Use `--jobs 1` for the most conservative
-build. An explicit `OMP_NUM_THREADS` is never overridden. The build-job cap
-applies only to the Chrono build.
+Chrono's Eigen-heavy sources need several GB of memory per compiler process and
+can trigger GCC front-end crashes when compiled too aggressively. The installer
+caps the Chrono build at four jobs or half of the machine's threads, whichever
+is smaller (at least one), and the activated environment defaults
+`OMP_NUM_THREADS` to half of the available threads. Use `--jobs 1` for the most
+conservative build. An explicit `OMP_NUM_THREADS` is never overridden. The
+build-job cap applies only to the Chrono build.
 
 Thread detection ignores `OMP_NUM_THREADS`, so re-running the installer from an
-already activated shell still selects half of the machine's real CPUs.
+already activated shell still selects half of the machine's real CPUs. If a
+parallel compile is interrupted by a GCC internal compiler error, the build
+script retries the remaining objects serially; genuine source errors still fail.
+The build script also raises the compiler's soft stack limit because Eigen-heavy
+Chrono sources can otherwise crash `cc1plus` with a segmentation fault.
 
 The PyPI/conda-forge `pychrono` package is deliberately **not** used: it lacks
-`pychrono.fsi`/`pychrono.vehicle`, and its shared libraries conflict with the
-source build. The installer removes an old conda `pychrono` package if it finds
-one in `chrono-env`.
+`pychrono.fsi`/`pychrono.vehicle` and the local PardisoMKL binding, and its
+shared libraries conflict with the source build. All launchers now keep the
+one-way replay on the same local Chrono 11 bindings as rigid CRM. The installer
+removes an old conda `pychrono` package if it finds one in `chrono-env`.
 
 ### CUDA notes
 
@@ -98,8 +104,8 @@ one in `chrono-env`.
 source environment/activate-chrono-source.sh
 
 "$CHRONO_ENV/bin/python" - <<'PY'
-import pychrono.core, pychrono.fea, pychrono.fsi, pychrono.vehicle
-print("CRM Python modules available")
+import pychrono.core, pychrono.fea, pychrono.fsi, pychrono.pardisomkl, pychrono.vehicle
+print("CRM/full Python modules available")
 PY
 
 PYTHON="$CHRONO_ENV/bin/python" ./crm/run.sh --smoke-test --mesh-file /path/to/your_drum.obj
