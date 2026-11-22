@@ -76,7 +76,7 @@ Replays a recorded soil wrench; no SPH contact is simulated in this stage. The m
 | `--fea-node PATH`, `--fea-ele PATH` | Solid tetrahedral mesh. |
 | `--solver {pardiso-mkl,sparse-lu,sparse-qr,gmres}`, `--num-threads N` | Linear solver. |
 | `--load-radius-fraction F`, `--load-scale F`, `--min-stress-volume V`, `--raw-stress-every N`, `--no-lock-sparsity-pattern` | Load spread/scaling, peak-stress filtering, scan cadence, and solver sparsity-pattern control. |
-| `--export-vtk` / `--no-export-vtk`, `--vtk-dir DIR`, `--vtk-stride N` | Full 3D stress animation (expensive; off by default). |
+| `--export-vtk` / `--no-export-vtk`, `--vtk-dir DIR`, `--vtk-stride N` | Full 3D stress animation written by a background process (expensive; off by default). |
 | Motion/gravity | Match the CRM stage: `--descent-mode`, `--descent-force*`, `--gravity`, `--omega`, `--reverse-spin`, `--spin-axis`, bed and buffer options. |
 | Material | `--pla-youngs-modulus`, `--pla-poisson-ratio`, `--pla-density`, `--rayleigh-beta`, `--hub-radius`. |
 

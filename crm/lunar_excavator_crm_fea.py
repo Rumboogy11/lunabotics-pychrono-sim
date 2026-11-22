@@ -811,13 +811,15 @@ def max_von_mises(fea, mesh, stride: int) -> float:
     return worst_stress_info(fea, mesh, stride)[1]
 
 
-def worst_stress_info(fea, mesh, stride: int,
-                      min_volume: float = 0.0) -> tuple[int, float, float, tuple[float, float, float]]:
+def worst_stress_info(fea, mesh, stride: int, min_volume: float = 0.0,
+                      stress_values=None) -> tuple[int, float, float, tuple[float, float, float]]:
     """Return index, von Mises stress, volume, and centroid of the hot element.
 
     ``min_volume`` can exclude sliver tetrahedra whose stress is dominated by a
     near-singular element Jacobian; the promoted mesh has a handful of elements
-    below 1e-12 m^3.
+    below 1e-12 m^3.  If ``stress_values`` is a NumPy array, every visited
+    element's von Mises stress is also written into it so callers can reuse the
+    scan for VTU export instead of looping over the mesh a second time.
     """
     worst_index = -1
     largest = 0.0
@@ -826,11 +828,15 @@ def worst_stress_info(fea, mesh, stride: int,
     for i in range(0, mesh.GetNumElements(), stride):
         element = fea.CastToChElementTetraCorot_4(mesh.GetElement(i))
         if element is None:
+            if stress_values is not None:
+                stress_values[i] = 0.0
             continue
+        value = von_mises_pa(element.GetStress())
+        if stress_values is not None:
+            stress_values[i] = value
         element_volume = abs(element.ComputeVolume())
         if element_volume < min_volume:
             continue
-        value = von_mises_pa(element.GetStress())
         if value > largest:
             largest = value
             worst_index = i

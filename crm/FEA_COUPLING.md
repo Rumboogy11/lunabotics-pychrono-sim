@@ -137,9 +137,16 @@ loads file written by the matching CRM run.
 The structural driver writes per-frame deformation VTU files only when
 **Export full 3D FEA stress animation** is enabled in the GUI (or `--export-vtk`
 is passed to the driver). That export was a large fraction of the spiky FEA
-runtime, so it is off by default. The durable scalar history is always
-`fea/summary.csv` (filtered/raw peak von Mises stress, peak deformation, loads,
-work, pose, and timing). The installer patches Chrono 11's Python wrapper to expose the native `GetEquivalentVonMises()` formula as `VonMises()`, so the CSV and VTU arrays use Chrono's own stress calculation. `export_study_vtk.py` derives
+runtime, so it is off by default. When enabled, the simulation process only
+snapshots copied arrays (reusing the per-frame stress scan) and a separate
+writer process builds/writes the VTK files, so disk I/O overlaps later solver
+steps. A bounded queue keeps memory usage fixed, and the writer is joined before
+the final summary is printed so `fea.pvd` is complete. The durable scalar
+history is always `fea/summary.csv` (filtered/raw peak von Mises stress, peak
+deformation, loads, work, pose, and timing). The installer patches Chrono 11's
+Python wrapper to expose the native `GetEquivalentVonMises()` formula as
+`VonMises()`, so the CSV and VTU arrays use Chrono's own stress calculation.
+`export_study_vtk.py` derives
 `paraview/fea_summary.csv` with MPa/mm units, and `view_study_paraview.py`
 loads it as two lightweight XY charts beside the CRM 3D animation:
 
@@ -162,9 +169,11 @@ For a full 3D animation, enable the UI toggle before running FEA (wizard
 equivalents: `--fea-export-vtk` and optional `--vtk-stride N`, default `1`).
 The driver writes `fea/vtk/frames/frame_*.vtu` and `fea/vtk/fea.pvd` with
 per-element `von_mises_pa`/`von_mises_MPa`, point `Displacement`,
-`DisplacementMagnitude`, and `Deformation_mm`. Every exported frame adds a full
-stress scan and VTU write, so use a stride above 1 for long runs when a sampled
-animation is sufficient; the final frame is always included. Configure ParaView
+`DisplacementMagnitude`, and `Deformation_mm`. Every exported frame needs a
+tetrahedral stress scan, so use a stride above 1 for long runs when a sampled
+animation is sufficient; with the default stride the same scan fills the VTU
+stress array, and the file write runs in the background writer. The final frame
+is always included. Configure ParaView
 with the GUI **Tools** toggle "Load 3D FEA stress/deformation in ParaView" or
 pass `--with-fea`. ParaView colors the raw undeformed grid by von Mises stress;
 the `Warp By Vector` filter is created from `Displacement` but starts hidden, so

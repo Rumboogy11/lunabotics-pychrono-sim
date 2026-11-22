@@ -53,7 +53,7 @@ Generated directories (`chrono-src`, `chrono-build`, `chrono-install`, `chrono-e
 
 `study_gui.py` imports the wizard module as `wiz` and calls the same helpers, so GUI and CLI studies remain equivalent. The GUI owns presentation, settings files, and interactive tools. Its `PARAM_INFO` and `SETTINGS_INFO` dictionaries are the single source of truth for the Info buttons and the generated Docs page.
 
-The drivers under `crm/` are standalone argparse programs. They defer Chrono imports so `--help`, `--print-soil`, and geometry checks work without a GPU or a built environment. The CRM launchers set local `PYTHONPATH`/`LD_LIBRARY_PATH`, and `crm/run.sh` and `crm/run_oneway_fea.sh` source `crm/chrono_runtime_env.sh` to pin `LD_PRELOAD` to the locally installed Chrono libraries, including PardisoMKL.
+The drivers under `crm/` are standalone argparse programs. They defer Chrono imports so `--help`, `--print-soil`, and geometry checks work without a GPU or a built environment. The CRM launchers set local `PYTHONPATH`/`LD_LIBRARY_PATH`, and `crm/run.sh` and `crm/run_oneway_fea.sh` source `crm/chrono_runtime_env.sh` to pin `LD_PRELOAD` to the locally installed Chrono libraries, including PardisoMKL. The one-way driver's opt-in 3D VTU export snapshots each frame into plain NumPy arrays and hands them to a `spawn`ed writer process through a bounded queue; the Chrono SWIG wrapper holds the GIL during solver steps, so a Python thread would not overlap file I/O.
 
 `environment/build-chrono-source.sh` builds the supported Chrono 11 checkout with FSI/FSI-SPH, vehicle, robot models, parsers, Python, and PardisoMKL enabled. It uses GCC 13.4, oneMKL, `-O2`, a four-job default cap, a raised compiler stack limit, and a serial retry after compiler front-end crashes. Keep those settings synchronized with `environment/environment.yml`, `install.sh`, `environment/INSTALL.md`, and `tests/test_installer_dependencies.py`.
 
@@ -114,7 +114,7 @@ The suite uses the standard library `unittest` module (no pytest needed):
 chrono-env/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Coverage includes GUI fields and settings, STEP/mesh geometry consistency, fill metrics, force descent, gravity controls, FEA summaries and export timing (including the one-way replay's CRM-frame duration limit), detector sizing, output preview, four-panel result plots and their blitted shared crosshair, ParaView script generation (including first-frame camera priming, the non-parallel view-up guard, and default display opacity/visibility), and installer dependency text. `tests/test_fill_metrics.py` covers the driver-side metric logic.
+Coverage includes GUI fields and settings, STEP/mesh geometry consistency, fill metrics, force descent, gravity controls, FEA summaries and export timing (including the one-way replay's CRM-frame duration limit), the background one-way VTU writer (frame ordering, flush, error propagation, and per-frame stress-array reuse), detector sizing, output preview, four-panel result plots and their blitted shared crosshair, ParaView script generation (including first-frame camera priming, the non-parallel view-up guard, and default display opacity/visibility), and installer dependency text. `tests/test_fill_metrics.py` covers the driver-side metric logic.
 
 All regression files live under `tests/`; `tests/__init__.py` keeps the repository root and the test directory importable. Run a single file as `chrono-env/bin/python tests/test_name.py` or `chrono-env/bin/python -m unittest tests.test_name`.
 

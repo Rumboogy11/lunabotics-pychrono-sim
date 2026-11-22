@@ -141,6 +141,8 @@ The two are separate toggles:
 
 Check `paraview/export_manifest.json` for `has_fea_vtk`, `fea_valid`, and `fea_status` as export-time provenance. ParaView rechecks the actual PVD and frame files, so a manifest-marked partial multi-frame series may still display.
 
+If the FEA log reports `FEA 3D VTK writer failed` or `FEA 3D VTK writer shutdown failed`, the scalar history is still usable but the 3D PVD may be incomplete. Resolve the reported disk/VTK error and rerun with **Export full 3D FEA stress animation** enabled.
+
 The 3D series opens on the **undeformed** grid with von Mises coloring; `WarpByVector1` is present but hidden by default. Toggle that filter in the Pipeline Browser if you expected a deformed shape. The excavator/drum source is at 40% opacity so it does not hide the stress overlay; raise its opacity in the Properties panel if you prefer a solid drum.
 
 ### ParaView's first frame is white or logs a view-up warning

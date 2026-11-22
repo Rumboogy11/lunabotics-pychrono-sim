@@ -93,7 +93,7 @@ Two-way SPH/flexible-BCE coupling proved unstable in this project, so the suppor
 
 Keep motion and gravity settings matched manually. The replay checks the CSV schema and descent mode, needs at least two sorted samples, and in kinematic mode compares the Z trajectory with the expected settle/descent geometry. It does not validate gravity, spin, or actuator force settings. In force mode it follows the recorded Z trajectory with a position motor because there is no soil reaction to balance the actuator.
 
-The fast default writes scalar summaries only. Full 3D stress/deformation (`fea/vtk/frames/frame_*.vtu` plus `fea/vtk/fea.pvd`) is opt-in because each frame requires a tetrahedral stress scan and a VTU write. FEA output times are snapped to a 1 ms grid so coarse structural timesteps do not leak into printed times.
+The fast default writes scalar summaries only. Full 3D stress/deformation (`fea/vtk/frames/frame_*.vtu` plus `fea/vtk/fea.pvd`) is opt-in because each frame requires a tetrahedral stress scan. The one-way driver reuses that scan for the VTU stress array and writes the VTK files in a separate bounded-queue process, so file I/O overlaps later solver steps. FEA output times are snapped to a 1 ms grid so coarse structural timesteps do not leak into printed times.
 
 This path is a defensible *comparative* structural estimate under recorded rigid loads. It is **not** two-way FSI: the flexing drum cannot change the soil flow.
 
