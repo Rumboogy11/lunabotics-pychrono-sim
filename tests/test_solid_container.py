@@ -8,7 +8,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 CRM_DIR = ROOT / "crm"
 sys.path.insert(0, str(CRM_DIR))
 

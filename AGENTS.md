@@ -10,7 +10,7 @@ In this order, as needed:
 2. `docs/README.md` — the documentation hub and reading paths.
 3. `docs/quickstart.md`, `docs/glossary.md`, `docs/gui-guide.md`, `docs/wizard-guide.md`, `docs/cli-reference.md`, `docs/outputs-and-visualization.md`, `docs/troubleshooting.md`, `docs/how-it-works.md`, `docs/developer-guide.md`.
 4. `crm/README.md`, `crm/FEA_COUPLING.md`, `FULL_MODEL.md`, `environment/INSTALL.md` — detailed references that still matter.
-5. `test_docs_integration.py` — the contract for docs registration and Docs-tab rendering.
+5. `tests/test_docs_integration.py` — the contract for docs registration and Docs-tab rendering.
 
 Prefer answering questions from these files and from `--help` / `--dry-run` output instead of guessing or asking the user to choose between implementation details.
 
@@ -72,7 +72,7 @@ Treat docs as part of the change, not an afterthought. If a change affects what 
 | Install/build/tooling change | `environment/INSTALL.md`, `docs/cli-reference.md`, and `docs/developer-guide.md`. |
 | Internal re-exec guard or helper variable | `docs/cli-reference.md` if user-visible; otherwise explain it in `docs/developer-guide.md`. |
 | Test or repository-layout change | `docs/developer-guide.md`. |
-| New documentation page | Create under `docs/`; add to `DOC_ENTRIES` in `study_gui.py`; link from `docs/README.md`; add to `EXPECTED_DOCS` in `test_docs_integration.py`; add to the table in `README.md`; restart the GUI to see the tree entry. |
+| New documentation page | Create under `docs/`; add to `DOC_ENTRIES` in `study_gui.py`; link from `docs/README.md`; add to `EXPECTED_DOCS` in `tests/test_docs_integration.py`; add to the table in `README.md`; restart the GUI to see the tree entry. |
 | Change to these working rules | Edit this `AGENTS.md`. |
 
 After any conceptual change, search for stale wording rather than fixing only the file you had open. Useful searches include:
@@ -94,8 +94,8 @@ Run quick checks before declaring work done. Use the project interpreter.
 ./run_full_model.sh --help
 
 chrono-env/bin/python -m py_compile <changed-python-files>
-chrono-env/bin/python test_docs_integration.py
-chrono-env/bin/python -m unittest discover -s . -p 'test_*.py'
+chrono-env/bin/python tests/test_docs_integration.py
+chrono-env/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
 For flag/default changes, prefer a dry run over a simulation:
@@ -128,7 +128,7 @@ Also run `git diff --check` and review `git status --short`.
 
 ### Known baseline noise
 
-- `test_font_size_applies_directly_and_scale_controls_density` in `test_study_gui_fields.py` can fail on hosts whose font configuration reports a different actual point size (`AssertionError: 3 != 10`). This is pre-existing and documented in `docs/developer-guide.md`; do not treat it as a simulation regression.
+- `test_font_size_applies_directly_and_scale_controls_density` in `tests/test_study_gui_fields.py` can fail on hosts whose font configuration reports a different actual point size (`AssertionError: 3 != 10`). This is pre-existing and documented in `docs/developer-guide.md`; do not treat it as a simulation regression.
 - Tk tests may print teardown warnings such as `can't invoke "event" command: application has been destroyed`. These are noise unless a new failure appears.
 - STEP parser warnings in tests come from deliberately minimal fixtures.
 - The suite uses standard-library `unittest`; no pytest installation is required.

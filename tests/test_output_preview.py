@@ -6,10 +6,14 @@ from __future__ import annotations
 import csv
 import inspect
 import math
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 from study_output_preview import (
     DRUM_MARKER_COLOR,

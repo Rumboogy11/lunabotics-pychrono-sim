@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 CRM_DIR = ROOT / "crm"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(CRM_DIR))

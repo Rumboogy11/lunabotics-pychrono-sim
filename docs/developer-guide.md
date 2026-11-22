@@ -36,7 +36,7 @@ For contributors and advanced users who want to change the tools, understand the
 ├── view_geometry.py                   STEP vs converted mesh comparison
 ├── full_model.py / run_full_model.sh  combined diagnostic runner
 ├── install.sh
-└── test_*.py, crm/test_fill_metrics.py  regression suites
+└── tests/                             unittest regression suite
 ```
 
 Generated directories (`chrono-src`, `chrono-build`, `chrono-install`, `chrono-env`, `.mamba`, `.tools`, `Output_*`, `geometry/`, `fea/`) are ignored by git. Do not commit geometry or build artefacts; several tests enforce the no-bundled-geometry policy.
@@ -72,7 +72,7 @@ Several CLI tools re-exec themselves under `chrono-env/bin/python` once (guarded
 | FEA/export | `solver`, `num_threads`, `load_radius_fraction`, `raw_stress_every`, `save_particles`, `export_vtk`, `fea_export_vtk`, `paraview_*` |
 | Execution | `commands` (list of `{name, command}`), `dry_run`, `open_results`, `open_paraview` |
 
-Keep key names in sync between the wizard's default dictionaries (`SOIL_DEFAULTS`, `PLA_DEFAULTS`, and the scalar defaults in `build_parser()`), the GUI's `shipped_defaults()`/`_v()` variable creation, and `study_gui_defaults.json`. Tests in `test_study_gui_fields.py` cover many of these fields.
+Keep key names in sync between the wizard's default dictionaries (`SOIL_DEFAULTS`, `PLA_DEFAULTS`, and the scalar defaults in `build_parser()`), the GUI's `shipped_defaults()`/`_v()` variable creation, and `study_gui_defaults.json`. Tests in `tests/test_study_gui_fields.py` cover many of these fields.
 
 When adding a setting, update:
 
@@ -107,14 +107,16 @@ Use the supported Markdown subset: headings, fenced code, bullets, numbered list
 The suite uses the standard library `unittest` module (no pytest needed):
 
 ```bash
-chrono-env/bin/python -m unittest discover -s . -p 'test_*.py'
+chrono-env/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Coverage includes GUI fields and settings, STEP/mesh geometry consistency, fill metrics, force descent, gravity controls, FEA summaries and export timing (including the one-way replay's CRM-frame duration limit), detector sizing, output preview, ParaView script generation (including first-frame camera priming, the non-parallel view-up guard, and default display opacity/visibility), and installer dependency text. `crm/test_fill_metrics.py` covers the driver-side metric logic.
+Coverage includes GUI fields and settings, STEP/mesh geometry consistency, fill metrics, force descent, gravity controls, FEA summaries and export timing (including the one-way replay's CRM-frame duration limit), detector sizing, output preview, ParaView script generation (including first-frame camera priming, the non-parallel view-up guard, and default display opacity/visibility), and installer dependency text. `tests/test_fill_metrics.py` covers the driver-side metric logic.
+
+All regression files live under `tests/`; `tests/__init__.py` keeps the repository root and the test directory importable. Run a single file as `chrono-env/bin/python tests/test_name.py` or `chrono-env/bin/python -m unittest tests.test_name`.
 
 GUI tests create a `tk.Tk()` root, withdraw it, and instantiate `StudyGUI` directly. They locate widgets through app attributes (`app.pages[2]`, `app.doc_text`, `app.settings_vars[...]`) or by walking `winfo_children()` and checking label text. Set `PYCHRONO_GUI_NO_REEXEC=1` in tests to avoid the GUI's self-relaunch.
 
-> A font-size assertion in `test_study_gui_fields.py` can fail on hosts whose font configuration reports a different actual point size; this is an environment sensitivity, not a simulation regression.
+> A font-size assertion in `tests/test_study_gui_fields.py` can fail on hosts whose font configuration reports a different actual point size; this is an environment sensitivity, not a simulation regression.
 
 ## Running tools during development
 

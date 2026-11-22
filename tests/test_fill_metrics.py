@@ -5,9 +5,15 @@ from __future__ import annotations
 
 import io
 import math
+import sys
 import unittest
 from contextlib import redirect_stderr
 from dataclasses import replace
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+CRM_DIR = ROOT / "crm"
+sys.path.insert(0, str(CRM_DIR))
 
 import numpy as np
 

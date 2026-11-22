@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 CRM_DIR = ROOT / "crm"
 sys.path.insert(0, str(CRM_DIR))
 

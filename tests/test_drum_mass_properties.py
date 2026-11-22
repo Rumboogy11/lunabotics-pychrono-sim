@@ -9,7 +9,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 CRM_DIR = ROOT / "crm"
 sys.path.insert(0, str(CRM_DIR))
 
@@ -67,7 +67,7 @@ class DrumMassPropertiesTest(unittest.TestCase):
             drum_radius=0.179095,
             drum_half_length=0.153176,
         )
-        generated = Path(__file__).resolve().parent / "Output_study_20261121_172816/mesh/3-channel_fea_surface.obj"
+        generated = ROOT / "Output_study_20261121_172816/mesh/3-channel_fea_surface.obj"
         if not generated.exists():
             self.skipTest("generated study mesh not present")
         mass, _ = crm.drum_mass_properties(motion, generated)

@@ -22,7 +22,7 @@ Run all commands from the project root unless noted. Most shell launchers add `c
 | `./chrono-env/bin/python view_study_paraview.py` | ParaView viewer script for exported studies. |
 | `./chrono-env/bin/python view_results.py` | Plot CRM/FEA summaries to `results_overview.png`. |
 | `./chrono-env/bin/python view_geometry.py` | Compare STEP CAD with the converted mesh. |
-| `./chrono-env/bin/python -m unittest discover` | Run the regression tests. |
+| `./chrono-env/bin/python -m unittest discover -s tests` | Run the regression tests. |
 
 ## Environment and launchers
 
@@ -169,7 +169,7 @@ A library, not a CLI. It derives compact MPa/mm FEA chart tables (see `paraview/
 ## Tests
 
 ```bash
-chrono-env/bin/python -m unittest discover -s . -p 'test_*.py'
+chrono-env/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
 The suites cover GUI fields, geometry consistency, fill metrics, force descent, gravity, FEA summaries/export timing, detector sizing, output preview, and installer dependencies. No pytest installation is required.
