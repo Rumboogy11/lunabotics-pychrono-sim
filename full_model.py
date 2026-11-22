@@ -220,10 +220,13 @@ def write_reports(out_dir: Path, report: dict[str, Any]) -> None:
         writer.writeheader()
         for model in ("crm", "fea"):
             metrics = report[model]["final_metrics"]
+            final_time = metrics.get("time_s", "")
+            if model == "fea" and isinstance(final_time, float):
+                final_time = f"{final_time:.3f}"
             writer.writerow({
                 "model": model,
                 "status": report[model]["status"],
-                "final_time_s": metrics.get("time_s", ""),
+                "final_time_s": final_time,
                 "fill_ratio_mass": metrics.get("fill_ratio_mass", ""),
                 "peak_fill_ratio_mass": metrics.get("peak_fill_ratio_mass", ""),
                 "inside_drum": metrics.get("inside_drum", ""),

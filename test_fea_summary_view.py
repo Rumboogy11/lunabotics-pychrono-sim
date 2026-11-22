@@ -44,7 +44,22 @@ class FeaSummaryTest(unittest.TestCase):
             self.assertEqual(rows[2]["max_deformation_mm"], "")
             self.assertAlmostEqual(float(rows[2]["max_von_mises_MPa"]), 3.0)
             self.assertAlmostEqual(float(rows[2]["work_j"]), 1.5)
-            self.assertEqual([row["time_s"] for row in rows], ["0", "0.02", "0.04"])
+            self.assertEqual([row["time_s"] for row in rows], ["0.000", "0.020", "0.040"])
+
+    def test_derived_csv_rounds_fea_time_to_milliseconds(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="fea_time_", dir="/tmp/opencode") as tmp:
+            root = Path(tmp)
+            raw = root / "raw.csv"
+            out = root / "fea_summary.csv"
+            raw.write_text(
+                RAW_SUMMARY.replace("1,0.02,", "1,0.0206,")
+                .replace("2,0.04,", "2,0.0048,"),
+                encoding="utf-8",
+            )
+
+            self.assertTrue(fea_summary.write_fea_summary_csv(raw, out))
+            _header, rows = fea_summary.read_summary_rows(out)
+            self.assertEqual([row["time_s"] for row in rows], ["0.000", "0.021", "0.005"])
 
     def test_ensure_summary_uses_manifest_study_dir(self) -> None:
         with tempfile.TemporaryDirectory(prefix="fea_manifest_", dir="/tmp/opencode") as tmp:

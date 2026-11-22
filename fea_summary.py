@@ -82,6 +82,11 @@ def _fmt(value: float) -> str:
     return f"{value:.9g}"
 
 
+def _fmt_time(value: float) -> str:
+    """FEA timestamps are reported to the nearest millisecond."""
+    return f"{value:.3f}"
+
+
 def read_summary_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     """Read a small FEA summary CSV; return (header, rows)."""
     try:
@@ -128,9 +133,10 @@ def write_fea_summary_csv(source: Path, destination: Path) -> bool:
                 if time is None:
                     continue
                 values: list[str] = []
-                for src, _dst, scale in fields:
+                for src, dst, scale in fields:
                     number = _finite_float(row.get(src))
-                    values.append("" if number is None else _fmt(number * scale))
+                    formatter = _fmt_time if dst == "time_s" else _fmt
+                    values.append("" if number is None else formatter(number * scale))
                 writer.writerow(values)
     except (OSError, csv.Error, ValueError):
         return False

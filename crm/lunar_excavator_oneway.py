@@ -840,7 +840,7 @@ def main() -> int:
         axis_torque = float(np.dot(applied_torque, axis)) * args.load_scale
         row = {
             "frame": frame,
-            "time_s": f"{t:.6f}",
+            "time_s": f"{t:.3f}",
             "wall_s": f"{time.perf_counter() - wall_start:.3f}",
             "drum_z_m": f"{rigid.vec_parts(spindle.GetPos())[2]:.7f}",
             "spin_deg": f"{math.degrees(fea_driver.spin_ramp_angle(motion, t, args.spin_ramp_time)):.3f}",

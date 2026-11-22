@@ -2000,8 +2000,13 @@ def print_results(cfg: dict[str, Any], *, offer_open: bool = True) -> None:
         )
     if fea:
         stress = float(fea.get("max_von_mises_pa", 0.0)) / 1e6
+        fea_time = fea.get("time_s")
+        try:
+            fea_time = f"{float(fea_time):.3f}"
+        except (TypeError, ValueError):
+            pass
         print(
-            f"  FEA: t={fea.get('time_s')} s  deformation={fea.get('max_deformation_m')} m  "
+            f"  FEA: t={fea_time} s  deformation={fea.get('max_deformation_m')} m  "
             f"peak_von_mises={stress:.2f} MPa  work={fea.get('work_j')} J"
         )
 
