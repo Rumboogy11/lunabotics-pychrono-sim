@@ -27,7 +27,8 @@ Usage
     ./crm/run.sh --duration 0.2 --spacing 0.012 --dt 0.00025 \\
         --loads-file Output_OneWay/crm/soil_loads.csv --output-dir Output_OneWay/crm
 
-    # 2. replay the wrench on the FEA drum (default dt=2e-3 s, PardisoMKL)
+    # 2. replay the wrench on the FEA drum (default dt=2e-3 s, PardisoMKL;
+    #    recorded times are snapped to a 1 ms grid)
     ./crm/run_oneway_fea.sh --duration 0.2 \\
         --loads Output_OneWay/crm/soil_loads.csv \\
         --output-dir Output_OneWay/fea
@@ -62,6 +63,11 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# FEA timestamps are reported on a 1 ms grid.  Solver steps stop at output
+# targets so a coarse structural dt (for example 5 ms) cannot leak into the
+# printed and CSV times.
+FEA_TIME_QUANTUM_S = 0.001
 
 import lunar_excavator_crm as rigid  # noqa: E402
 import lunar_excavator_crm_fea as fea_driver  # noqa: E402
@@ -104,6 +110,32 @@ FORCE_ONEWAY_FIELDS = [
 
 def oneway_fields(run) -> list[str]:
     return ONEWAY_FIELDS + (FORCE_ONEWAY_FIELDS if run.descent_mode == "force" else [])
+
+
+def output_target_time(index: int, fps: float) -> float:
+    """Return output *index*'s simulated time rounded to whole milliseconds."""
+    if fps <= 0:
+        raise ValueError("FEA output fps must be positive")
+    return round(index / fps, 3)
+
+
+def next_output_time(index: int, fps: float, after: float) -> tuple[int, float]:
+    """Return the first output index/target strictly after *after*.
+
+    Rounding two consecutive indices to the same millisecond (possible at very
+    high fps) is skipped so the replay loop always advances.
+    """
+    while True:
+        target = output_target_time(index, fps)
+        if target > after + 1.0e-12:
+            return index, target
+        index += 1
+
+
+def step_to_target(t: float, target: float, dt: float) -> tuple[float, float]:
+    """Advance simulated time by at most *dt* without overshooting *target*."""
+    h = min(dt, max(target - t, 0.0))
+    return t + h, h
 
 
 def read_tetgen_ele(path: Path) -> np.ndarray:
@@ -634,7 +666,8 @@ def main() -> int:
     print(pla.summary(), flush=True)
     print(
         "\nOne-way CRM -> FEA run: "
-        f"dt={run.dt:g} s, duration={run.duration:g} s, fps={run.fps:g}\n"
+        f"dt={run.dt:g} s, duration={run.duration:g} s, fps={run.fps:g} "
+        f"(output times on a {FEA_TIME_QUANTUM_S:g} s grid)\n"
         f"loads: {loads.path} ({len(loads.times)} samples to {loads.t_end:g} s)\n"
         f"mesh: {node_path.name} / {ele_path.name}, load radius >= "
         f"{args.load_radius_fraction * motion.drum_radius:.4g} m, scale={args.load_scale:g}\n"
@@ -684,7 +717,10 @@ def main() -> int:
         hht.SetMaxIters(5)
         hht.SetAbsTolerances(1.0e-2)
         hht.SetStepControl(False)
-        hht.SetMinStepSize(run.dt)
+        # Output-aligned steps can be shorter than the nominal dt; keep the
+        # HHT floor well below the 1 ms grid so partial steps are not clamped
+        # back up and timestamps stay on the requested grid.
+        hht.SetMinStepSize(min(run.dt, FEA_TIME_QUANTUM_S / 100.0))
     else:
         system.SetTimestepperType(chrono.ChTimestepper.Type_EULER_IMPLICIT_LINEARIZED)
     if args.solver == "sparse-lu":
@@ -886,40 +922,44 @@ def main() -> int:
 
     force_world, torque_world = loads.at(0.0)
     record(0.0, force_world, torque_world, 0.0)
-    # Progress uses the same simulated-time cadence as recorded output.
     print(f"  t={0.0:7.3f}s / {run.duration:g}s", flush=True)
-    next_progress = 1.0 / run.fps
-    next_output = 1.0 / run.fps
+    output_index, next_output = next_output_time(1, run.fps, 0.0)
+    next_output = min(next_output, run.duration)
 
     t = 0.0
     try:
         while t < run.duration - 1.0e-12:
-            h = min(run.dt, run.duration - t)
-            force_world, torque_world = loads.at(t)
-            q_tuple = rigid.quat_parts(spindle.GetRot())
-            q_inv = rigid.quat_conj(q_tuple)
-            wrench = (
-                rigid.quat_rotate(q_inv, tuple(force_world)),
-                rigid.quat_rotate(q_inv, tuple(torque_world)),
-            )
-            apply_loads(chrono, load_nodes, matrix, wrench, q_tuple, args.load_scale)
-            system.DoStepDynamics(h)
-            t += h
+            target = min(next_output, run.duration)
+            step_start = t
+            t, h = step_to_target(t, target, run.dt)
+            if h > 1.0e-12:
+                force_world, torque_world = loads.at(step_start)
+                q_tuple = rigid.quat_parts(spindle.GetRot())
+                q_inv = rigid.quat_conj(q_tuple)
+                wrench = (
+                    rigid.quat_rotate(q_inv, tuple(force_world)),
+                    rigid.quat_rotate(q_inv, tuple(torque_world)),
+                )
+                apply_loads(chrono, load_nodes, matrix, wrench, q_tuple, args.load_scale)
+                system.DoStepDynamics(h)
+                motor_speed = drive["rotation_motor"].GetMotorAngleDt()
+                axis_torque = float(np.dot(torque_world, axis)) * args.load_scale
+                work_j += max(0.0, -axis_torque * motor_speed) * h
+            else:
+                t = target
+                motor_speed = drive["rotation_motor"].GetMotorAngleDt()
 
-            motor_speed = drive["rotation_motor"].GetMotorAngleDt()
-            axis_torque = float(np.dot(torque_world, axis)) * args.load_scale
-            work_j += max(0.0, -axis_torque * motor_speed) * h
-
-            if t >= next_output - 1.0e-12 or t >= run.duration - 1.0e-12:
+            if t >= target - 1.0e-12:
+                t = target
                 # Report the wrench at the output time, not the wrench used at
                 # the start of the step that got us here.
                 report_force, report_torque = loads.at(t)
                 record(t, report_force, report_torque, motor_speed,
                        is_final=(t >= run.duration - 1.0e-12))
-                next_output += 1.0 / run.fps
-            if t >= next_progress - 1.0e-12:
                 print(f"  t={t:7.3f}s / {run.duration:g}s", flush=True)
-                next_progress += 1.0 / run.fps
+                output_index, next_raw = next_output_time(
+                    output_index + 1, run.fps, t)
+                next_output = min(next_raw, run.duration)
     finally:
         if state_file is not None:
             state_file.close()
