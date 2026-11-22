@@ -100,9 +100,14 @@ class WizardCadenceFieldsTest(IsolatedGuiDefaultsTest):
             self.assertIn("Exterior fit tolerance (m)", labels)
 
             with tempfile.TemporaryDirectory(prefix="meshflags_", dir="/tmp/opencode") as tmp:
+                # _collect_cfg only checks that the STEP path exists; it does not
+                # read it here. Use a placeholder so this test works on a clean
+                # clone without the gitignored production CAD file.
+                step_file = Path(tmp) / "Assembly 1.step"
+                step_file.write_text("ISO-10303-21;\nEND-ISO-10303-21;\n")
                 app.vars["geometry"].set("step")
                 app.vars["output_dir"].set(tmp)
-                app.vars["step_file"].set(str(ROOT / "geometry" / "spikey" / "Assembly 1.step"))
+                app.vars["step_file"].set(str(step_file))
                 app.vars["surface_repair_order"].set("none")
                 app.vars["surface_target_faces"].set("8000")
                 app.vars["surface_fit_tolerance"].set("0.0015")
