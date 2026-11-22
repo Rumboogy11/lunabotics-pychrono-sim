@@ -277,7 +277,7 @@ PARAM_INFO: dict[str, str] = {
     ),
     "fea_fps": _info(
         "Independent FEA summary and export cadence. Lower values speed up the replay; the structural dynamics still advance at FEA dt.",
-        "Cost: fewer recorded frames mean fewer stress scans and VTU writes; the solve itself is unchanged.",
+        "Cost: fewer recorded frames mean fewer stress scans and background VTU writes; file I/O overlaps later solver steps, but the solve itself is unchanged.",
     ),
     "loads_fps": _info(
         "Sampling rate in Hz for the soil-wrench CSV used by one-way FEA. The FEA driver interpolates by time, so 20 Hz is usually enough.",
@@ -374,14 +374,14 @@ PARAM_INFO: dict[str, str] = {
     ),
     "fea_export_vtk": _info(
         "Write the full 3D FEA stress/deformation animation as per-frame VTU files under fea/vtk/frames/ with fea/vtk/fea.pvd. Off by default; scalar FEA summaries are always written.",
-        "Cost: this can dominate FEA runtime and disk because every recorded frame gets a tetrahedral stress scan plus a VTU write. Turning it off retires the previous 3D series but keeps fea/summary.csv.",
+        "Cost: this can dominate FEA runtime and disk because every exported frame needs a tetrahedral stress scan. The main scan fills the VTU stress array and a background writer overlaps file I/O with later solver steps. Turning it off retires the previous 3D series but keeps fea/summary.csv.",
     ),
     "fea_vtk_stride": _info(
         "Export every Nth recorded FEA frame to the 3D VTU animation; 1 means every frame, and the final frame is always included. Used only when full 3D FEA export is on.",
-        "Cost: a larger stride means fewer VTU files, fewer stress scans, and less disk use; 1 gives the complete animation.",
+        "Cost: a larger stride means fewer VTU files, less background-writer work, and less disk use; the scalar summary still scans stress on its own cadence, and 1 gives the complete animation.",
     ),
     "tools_show_fea_3d": _info(
-        "When the Tools tab opens ParaView, load a revalidated multi-frame 3D FEA stress/deformation PVD if one exists. A lone t=0 frame is ignored. The raw grid is shown colored by von Mises stress; the Warp By Vector filter starts hidden and can be toggled in the Pipeline Browser. On by default; this is the stress overlay only, not the FEA history charts.",
+        "When the Tools tab opens ParaView, load a structurally usable multi-frame 3D FEA stress/deformation PVD if one exists. A lone t=0 frame is ignored. The raw grid is shown colored by von Mises stress; the Warp By Vector filter starts hidden and can be toggled in the Pipeline Browser. On by default; this is the stress overlay only, not the FEA history charts.",
         "Cost: no simulation cost, but ParaView spends time rechecking the PVD and frames. Note that 'Open ParaView after run' always requests this overlay when a usable one exists.",
     ),
     "tools_show_fea_charts": _info(
@@ -2166,7 +2166,7 @@ class StudyGUI:
         for text, cmd in actions:
             ttk.Button(p, text=text, command=cmd, width=54).grid(row=r, column=0, columnspan=2, sticky=W, padx=8, pady=4); r += 1
 
-        # Viewing an already-validated FEA PVD should work straight from the
+        # Viewing a structurally usable FEA PVD should work straight from the
         # ParaView button.  Exporting those VTU frames remains opt-in elsewhere.
         self.tools_show_fea_3d = BooleanVar(value=True)
         ttk.Checkbutton(p, text="Load 3D FEA stress/deformation in ParaView (if valid)",
@@ -2199,7 +2199,7 @@ class StudyGUI:
             "• 'Preview STEP mesh' runs the current Geometry settings through the exact full-run mesher into geometry_checks/, then opens the STEP-vs-mesh comparison tool. Active study outputs are untouched.\n"
             "• Particles are rendered as 3D sphere point sprites (glyph fallback). Excavator is a separate source at 40% opacity.\n"
             "• The camera-orbit track is primed before the first render: the first frame is framed immediately, with no manual step back/forward and no VTK view-up warning.\n"
-            "• One-way FEA scalar/deformation XY charts are hidden by default; check 'Show one-way FEA scalar/deformation history charts' to opt in (or pass --show-fea-charts to the viewer). A validated per-frame stress/deformation PVD is loaded by default; uncheck 'Load 3D FEA stress' to skip it. Its raw grid is shown and the Warp By Vector filter starts hidden.\n"
+            "• One-way FEA scalar/deformation XY charts are hidden by default; check 'Show one-way FEA scalar/deformation history charts' to opt in (or pass --show-fea-charts to the viewer). A structurally usable multi-frame stress/deformation PVD is loaded by default; uncheck 'Load 3D FEA stress' to skip it. Its raw grid is shown and the Warp By Vector filter starts hidden.\n"
             "• The lightweight Output Preview tab reads CRM/FEA CSVs directly and draws a bounded 3D point cloud with editable particle/frame strides."
         )
         ttk.Label(p, text=notes, justify=LEFT).grid(row=r, column=0, columnspan=4, sticky=W, padx=8, pady=4); r += 1
@@ -3890,7 +3890,7 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         env["PYCHRONO_CAMERA_ORBIT"] = "1" if self.tools_camera_orbit.get() else "0"
         env["PYCHRONO_WITH_FEA"] = "1" if show_fea_3d else "0"
         if show_fea_3d:
-            self._tool_log("# 3D FEA stress overlay requested; a validated multi-frame PVD will load")
+            self._tool_log("# 3D FEA stress overlay requested; a structurally usable multi-frame PVD will load")
         env_number("PYCHRONO_ORBIT_SPEED", self.tools_orbit_speed.get(), 0.10)
         env_number("PYCHRONO_ORBIT_RADIUS", self.tools_orbit_radius.get(), 0.0, low=0.0)
         env_number("PYCHRONO_ORBIT_INCLINATION", self.tools_orbit_inclination.get(), 20.0,

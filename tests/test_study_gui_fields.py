@@ -721,22 +721,24 @@ class GuiScaleSettingsTest(IsolatedGuiDefaultsTest):
                     style = ttk.Style()
                     system_scale = app._system_scaling
 
-                    self.assertEqual(font.actual("size"), 10)
+                    self.assertEqual(font.cget("size"), 10)
                     self.assertEqual(style.lookup(".", "font"), "TkDefaultFont")
                     self.assertEqual(app.log_text.cget("font"), "TkFixedFont")
                     self.assertAlmostEqual(
                         float(root.tk.call("tk", "scaling")), system_scale, delta=0.01)
 
-                    # Text size must change the rendered font regardless of scale.
+                    # Text size must change the configured font regardless of scale.
+                    # Use cget(), not actual(): fontconfig on some hosts resolves
+                    # TkDefaultFont to a bitmap face whose actual() size is pinned.
                     app.settings_vars["font_size"].set("16")
                     app._apply_settings_now()
-                    self.assertEqual(font.actual("size"), 16)
+                    self.assertEqual(font.cget("size"), 16)
                     self.assertEqual(app.settings["font_size"], 16)
 
                     # Scale changes density/padding, not the text point size.
                     app.settings_vars["ui_scale"].set("1.5")
                     app._apply_settings_now()
-                    self.assertEqual(font.actual("size"), 16)
+                    self.assertEqual(font.cget("size"), 16)
                     self.assertEqual(app.settings["ui_scale"], 1.5)
                     self.assertAlmostEqual(
                         float(root.tk.call("tk", "scaling")),
@@ -744,7 +746,7 @@ class GuiScaleSettingsTest(IsolatedGuiDefaultsTest):
 
                     app.settings_vars["ui_scale"].set("0.75")
                     app._apply_settings_now()
-                    self.assertEqual(font.actual("size"), 16)
+                    self.assertEqual(font.cget("size"), 16)
                     self.assertAlmostEqual(
                         float(root.tk.call("tk", "scaling")),
                         system_scale * 0.75, delta=0.05)
@@ -752,7 +754,7 @@ class GuiScaleSettingsTest(IsolatedGuiDefaultsTest):
                     # Legacy "0" still means normal density.
                     app.settings_vars["ui_scale"].set("0")
                     app._apply_settings_now()
-                    self.assertEqual(font.actual("size"), 16)
+                    self.assertEqual(font.cget("size"), 16)
                     self.assertAlmostEqual(
                         float(root.tk.call("tk", "scaling")), system_scale, delta=0.01)
             finally:

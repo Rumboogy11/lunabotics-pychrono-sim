@@ -44,8 +44,10 @@ the raw peak is also written to the CSV.
 The fast default writes scalar summaries only.  Pass ``--export-vtk`` (or use
 the UI toggle) to additionally write a full 3D stress/deformation animation to
 ``<output-dir>/vtk`` as per-frame VTU files plus ``fea.pvd``.  This path is
-expensive: every recorded frame gets its own element stress scan and VTU file.
-``--vtk-stride N`` exports every Nth frame plus the final frame.
+expensive: every exported frame gets its own element stress scan and VTU file.
+The main stress scan fills the VTU stress array, and a separate writer process
+builds/writes the VTK files from copied arrays so disk I/O overlaps later solver
+steps.  ``--vtk-stride N`` exports every Nth frame plus the final frame.
 """
 
 from __future__ import annotations
@@ -55,9 +57,12 @@ import bisect
 import csv
 import json
 import math
+import multiprocessing as mp
+import queue
 import sys
 import time
-from dataclasses import asdict, replace
+import traceback
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -213,6 +218,124 @@ def _vtk_append_array(data, name: str, values: np.ndarray, components: int = 1) 
     data.AddArray(arr)
 
 
+@dataclass
+class FeaVtkFrameSnapshot:
+    """Plain-array copy of one FEA frame, safe to send to a writer process.
+
+    No Chrono object is retained: the simulation mutates the mesh on the very
+    next solver step, so the worker must only see copied NumPy data.
+    """
+
+    frame_index: int
+    time_s: float
+    points: np.ndarray
+    disp: np.ndarray
+    disp_mag: np.ndarray
+    vm: np.ndarray
+
+
+def _run_vtk_writer(exporter, task_queue, result_queue) -> None:
+    """Process entry point: consume snapshots in order and write VTU/PVD files."""
+    try:
+        while True:
+            snapshot = task_queue.get()
+            if snapshot is None:
+                break
+            path = exporter.write_snapshot(snapshot)
+            result_queue.put(("ok", snapshot.frame_index, str(path), len(exporter.entries)))
+    except BaseException:
+        result_queue.put(("error", -1, traceback.format_exc(), 0))
+
+
+class BackgroundVtkWriter:
+    """Bounded-queue writer process for opt-in 3D FEA exports.
+
+    The simulation process snapshots each frame and enqueues plain arrays; VTK
+    grid construction and disk writes happen in a separate process so they do
+    not block the next ``DoStepDynamics()`` call.  A separate process is needed
+    because the Chrono SWIG wrapper holds the GIL during solver steps.
+    """
+
+    def __init__(self, exporter: "FeaVtkExporter"):
+        self.exporter = exporter
+        # ``spawn`` avoids forking an initialized Chrono/MKL/CUDA process.
+        self._ctx = mp.get_context("spawn")
+        self._tasks = self._ctx.Queue(maxsize=2)
+        self._results = self._ctx.Queue()
+        self._process = self._ctx.Process(
+            target=_run_vtk_writer,
+            args=(exporter, self._tasks, self._results),
+            daemon=True,
+        )
+        self._process.start()
+        self.completed = 0
+        self.failure: str | None = None
+        self.closed = False
+
+    def _drain_results(self) -> None:
+        while True:
+            try:
+                message = self._results.get_nowait()
+            except queue.Empty:
+                break
+            if message[0] == "ok":
+                self.completed = message[3]
+            else:
+                self.failure = message[2]
+
+    def _raise_if_failed(self) -> None:
+        self._drain_results()
+        if self.failure is not None:
+            raise RuntimeError(f"FEA VTK writer failed:\n{self.failure}")
+        if not self._process.is_alive() and self._process.exitcode is not None and not self.closed:
+            raise RuntimeError(f"FEA VTK writer exited unexpectedly (code {self._process.exitcode})")
+
+    def submit(self, snapshot: FeaVtkFrameSnapshot) -> None:
+        """Enqueue a copied frame, waiting briefly if the writer is behind."""
+        if self.closed:
+            return
+        if not self._process.is_alive():
+            self._raise_if_failed()
+        while True:
+            try:
+                self._tasks.put(snapshot, timeout=0.1)
+                break
+            except queue.Full:
+                if not self._process.is_alive():
+                    self._raise_if_failed()
+                    raise RuntimeError("FEA VTK writer exited unexpectedly")
+                self._raise_if_failed()
+        self._raise_if_failed()
+
+    def close(self) -> None:
+        """Flush queued frames and join the writer before final output."""
+        if self.closed:
+            return
+        self.closed = True
+        deadline = time.monotonic() + 30.0
+        while True:
+            try:
+                self._tasks.put(None, timeout=0.1)
+                break
+            except queue.Full:
+                if not self._process.is_alive():
+                    break
+                if time.monotonic() >= deadline:
+                    self._process.terminate()
+                    self._process.join(timeout=10)
+                    raise RuntimeError("FEA VTK writer did not accept shutdown in time")
+        self._process.join(timeout=120)
+        if self._process.is_alive():
+            self._process.terminate()
+            self._process.join(timeout=10)
+            raise RuntimeError("FEA VTK writer did not finish in time")
+        self._drain_results()
+        if self.failure is not None:
+            raise RuntimeError(f"FEA VTK writer failed:\n{self.failure}")
+        if self._process.exitcode not in (0, None):
+            raise RuntimeError(f"FEA VTK writer exited unexpectedly (code {self._process.exitcode})")
+
+
 class FeaVtkExporter:
     """Write per-frame FEA unstructured-grid VTU files and a PVD collection.
 
@@ -237,15 +360,15 @@ class FeaVtkExporter:
         # the directory; ParaView would otherwise see stale animation frames.
         clear_fea_vtk_export(self.out_dir)
 
-    def write_frame(self, fea, mesh, nodes, local_positions: np.ndarray,
-                    spindle, frame_index: int, time_s: float) -> Path | None:
-        try:
-            import vtk  # type: ignore
-            from vtk.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
-        except Exception as exc:  # pragma: no cover - environment dependent
-            print(f"  VTK export unavailable: {exc}", flush=True)
-            return None
+    def snapshot_frame(self, fea, mesh, nodes, local_positions: np.ndarray,
+                       spindle, frame_index: int, time_s: float,
+                       vm: np.ndarray | None = None) -> FeaVtkFrameSnapshot:
+        """Copy the live Chrono state into plain arrays before the next step.
 
+        ``vm`` can be supplied by the caller when the main stress scan already
+        computed the full per-element array.  It is copied so the writer never
+        sees a buffer reused by a later frame.
+        """
         n_nodes = len(nodes)
         points = np.empty((n_nodes, 3), dtype=float)
         for i, node in enumerate(nodes):
@@ -258,32 +381,51 @@ class FeaVtkExporter:
         disp = points - expected
         disp_mag = np.linalg.norm(disp, axis=1)
 
+        if vm is None:
+            n_elem = mesh.GetNumElements()
+            vm = np.zeros(n_elem, dtype=float)
+            for i in range(n_elem):
+                element = fea.CastToChElementTetraCorot_4(mesh.GetElement(i))
+                if element is None:
+                    continue
+                vm[i] = fea_driver.von_mises_pa(element.GetStress())
+
+        return FeaVtkFrameSnapshot(
+            frame_index=int(frame_index),
+            time_s=float(time_s),
+            points=np.array(points, dtype=float, copy=True),
+            disp=np.array(disp, dtype=float, copy=True),
+            disp_mag=np.array(disp_mag, dtype=float, copy=True),
+            vm=np.ascontiguousarray(vm, dtype=float).copy(),
+        )
+
+    def write_snapshot(self, frame: FeaVtkFrameSnapshot) -> Path:
+        """Build and write VTK objects from a snapshot (runs in the writer)."""
+        try:
+            import vtk  # type: ignore
+            from vtk.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
+        except Exception as exc:  # pragma: no cover - environment dependent
+            raise RuntimeError(f"VTK export unavailable: {exc}") from exc
+
         grid = vtk.vtkUnstructuredGrid()
         vtk_points = vtk.vtkPoints()
-        vtk_points.SetData(numpy_to_vtk(np.ascontiguousarray(points), deep=True))
+        vtk_points.SetData(numpy_to_vtk(np.ascontiguousarray(frame.points), deep=True))
         grid.SetPoints(vtk_points)
 
         cell_array = vtk.vtkCellArray()
         cell_array.ImportLegacyFormat(numpy_to_vtkIdTypeArray(self.cells, deep=True))
         grid.SetCells(vtk.VTK_TETRA, cell_array)
 
-        _vtk_append_array(grid.GetPointData(), "Displacement", disp, components=3)
-        _vtk_append_array(grid.GetPointData(), "DisplacementMagnitude", disp_mag, components=1)
-        _vtk_append_array(grid.GetPointData(), "Deformation_mm", disp_mag * 1.0e3, components=1)
+        _vtk_append_array(grid.GetPointData(), "Displacement", frame.disp, components=3)
+        _vtk_append_array(grid.GetPointData(), "DisplacementMagnitude", frame.disp_mag, components=1)
+        _vtk_append_array(grid.GetPointData(), "Deformation_mm", frame.disp_mag * 1.0e3, components=1)
 
         # Per-element von Mises stress (Pa) for a true 3D stress animation.
-        n_elem = mesh.GetNumElements()
-        vm = np.zeros(n_elem, dtype=float)
-        for i in range(n_elem):
-            element = fea.CastToChElementTetraCorot_4(mesh.GetElement(i))
-            if element is None:
-                continue
-            vm[i] = float(element.GetStress().GetEquivalentVonMises())
-        _vtk_append_array(grid.GetCellData(), "von_mises_pa", vm, components=1)
-        _vtk_append_array(grid.GetCellData(), "von_mises_MPa", vm * 1.0e-6, components=1)
+        _vtk_append_array(grid.GetCellData(), "von_mises_pa", frame.vm, components=1)
+        _vtk_append_array(grid.GetCellData(), "von_mises_MPa", frame.vm * 1.0e-6, components=1)
         grid.GetCellData().SetActiveScalars("von_mises_pa")
 
-        out_path = self.frames_dir / f"frame_{frame_index:06d}.vtu"
+        out_path = self.frames_dir / f"frame_{frame.frame_index:06d}.vtu"
         writer = vtk.vtkXMLUnstructuredGridWriter()
         writer.SetFileName(str(out_path))
         writer.SetInputData(grid)
@@ -293,9 +435,15 @@ class FeaVtkExporter:
             writer.SetDataModeToAppended()
         writer.Write()
 
-        self.entries.append((float(time_s), str(out_path)))
+        self.entries.append((float(frame.time_s), str(out_path)))
         self._write_pvd()
         return out_path
+
+    def write_frame(self, fea, mesh, nodes, local_positions: np.ndarray,
+                    spindle, frame_index: int, time_s: float) -> Path:
+        """Synchronous convenience path: snapshot then write in this process."""
+        snapshot = self.snapshot_frame(fea, mesh, nodes, local_positions, spindle, frame_index, time_s)
+        return self.write_snapshot(snapshot)
 
     def _write_pvd(self) -> None:
         pvd = self.out_dir / "fea.pvd"
@@ -834,6 +982,7 @@ def main() -> int:
     writer = None
     state_file = None
     vtk_exporter = None
+    vtk_writer = None
     if not args.no_output:
         write_config(out_dir / "config.json", args, run, pla, motion, node_path, ele_path,
                      mesh, hub_nodes, loads, load_indices, args.load_scale, vtk_dir)
@@ -847,9 +996,10 @@ def main() -> int:
                     raise ValueError(f"no tetrahedra found in {ele_path}")
                 ref0 = np.array([_vec3(node.GetX0()) for node in nodes], dtype=float)
                 vtk_exporter = FeaVtkExporter(vtk_dir, connectivity, ref0)
+                vtk_writer = BackgroundVtkWriter(vtk_exporter)
                 print(
-                    f"FEA 3D VTK: {vtk_dir} (every {args.vtk_stride} recorded frame(s), "
-                    f"{len(connectivity)} tets, final frame always included)",
+                    f"FEA 3D VTK: {vtk_dir} (background writer; every {args.vtk_stride} "
+                    f"recorded frame(s), {len(connectivity)} tets, final frame always included)",
                     flush=True,
                 )
             except Exception as exc:
@@ -863,12 +1013,16 @@ def main() -> int:
     wall_start = time.perf_counter()
     axis = np.array(fea_driver.spin_axis_tuple(motion), dtype=float)
     raw_stress = 0.0
+    # A full-element scan is only reusable for VTU export when the summary scan
+    # itself visits every element; otherwise snapshot_frame() scans the mesh.
+    vtu_stresses = (np.zeros(mesh.GetNumElements(), dtype=float)
+                    if vtk_writer is not None and args.stress_stride == 1 else None)
 
     def record(t: float, applied_force, applied_torque, motor_speed: float,
                is_final: bool = False) -> None:
-        nonlocal frame, last_row, raw_stress, last_vtk_frame
+        nonlocal frame, last_row, raw_stress, last_vtk_frame, vtk_writer, vtk_exporter
         index, max_stress, element_volume, _center = fea_driver.worst_stress_info(
-            fea, mesh, args.stress_stride, args.min_stress_volume
+            fea, mesh, args.stress_stride, args.min_stress_volume, vtu_stresses
         )
         # Raw peak (stride 1, no volume filter) is expensive on large meshes.
         # Reuse the filtered result when equivalent, or recompute only on the
@@ -933,13 +1087,24 @@ def main() -> int:
             state_file.flush()
         last_row = row
         # Optional full 3D FEA export (stress + deformation) for ParaView.
-        if (vtk_exporter is not None and frame != last_vtk_frame
+        # Snapshot before the next solver step, then let the writer process do
+        # the VTK grid construction and disk write in parallel with simulation.
+        if (vtk_writer is not None and vtk_exporter is not None and frame != last_vtk_frame
                 and (frame % args.vtk_stride == 0 or is_final)):
             try:
-                vtk_exporter.write_frame(fea, mesh, nodes, local_positions, spindle, frame, t)
+                snapshot = vtk_exporter.snapshot_frame(
+                    fea, mesh, nodes, local_positions, spindle, frame, t, vtu_stresses
+                )
+                vtk_writer.submit(snapshot)
                 last_vtk_frame = frame
             except Exception as exc:
                 print(f"  FEA 3D VTK export frame {frame} failed: {exc}", flush=True)
+                try:
+                    vtk_writer.close()
+                except Exception as close_exc:
+                    print(f"  FEA 3D VTK writer shutdown failed: {close_exc}", flush=True)
+                vtk_writer = None
+                vtk_exporter = None
         frame += 1
         print(
             f"frame {frame - 1:05d}  t={t:7.3f}s  F={np.linalg.norm(applied_force) * args.load_scale:.4g}N  "
@@ -990,6 +1155,11 @@ def main() -> int:
                     output_index + 1, run.fps, t)
                 next_output = min(next_raw, run.duration)
     finally:
+        if vtk_writer is not None:
+            try:
+                vtk_writer.close()
+            except Exception as exc:
+                print(f"FEA 3D VTK writer shutdown failed: {exc}", flush=True)
         if state_file is not None:
             state_file.close()
 
@@ -1002,7 +1172,8 @@ def main() -> int:
         flush=True,
     )
     if vtk_exporter is not None:
-        print(f"FEA 3D VTK animation: {len(vtk_exporter.entries)} frame(s) -> "
+        completed = vtk_writer.completed if vtk_writer is not None else len(vtk_exporter.entries)
+        print(f"FEA 3D VTK animation: {completed} frame(s) -> "
               f"{vtk_exporter.out_dir / 'fea.pvd'}", flush=True)
     if not args.no_output:
         print(f"Output: {out_dir}")

@@ -133,13 +133,13 @@ Output_<study_name>/
 │   ├── config.json
 │   └── summary.csv            stress/displacement history
 ├── paraview/                  VTK/PVD time series (when export is on)
-└── results_overview.png       CRM/FEA summary charts (written after a successful run)
+└── results_overview.png       four-panel CRM/FEA summary plots (written after a successful run)
 ```
 
 Fast ways to look at them:
 
 - In the GUI, open **Tools / View Results** → **Open lightweight CRM/FEA output preview**. It reads the CSVs directly, draws a 3D particle cloud, and shows CRM/FEA timelines. Drag to orbit, scroll to zoom.
-- In the GUI, **Tools / View Results** → **Open interactive result plots** draws summary charts and writes `results_overview.png`.
+- In the GUI, **Tools / View Results** → **Open interactive result plots** draws four summary plots and writes `results_overview.png`; a shared crosshair follows the pointer, with a horizontal line on each plot meeting the vertical time line at the plotted value.
 - From the shell:
 
 ```bash

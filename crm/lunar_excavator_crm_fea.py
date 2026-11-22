@@ -22,7 +22,7 @@ reaction moments about the prescribed global spin axis.
 
 Requirements
 ------------
-The local Chrono 10 source build with FSI/SPH, vehicle, CRM, and Python modules
+The local Chrono 11 source build with FSI/SPH, vehicle, CRM, and Python modules
 is required.  Supply a generated tetrahedral mesh with ``--fea-node`` (and
 optionally ``--fea-ele``); no mesh files are bundled.
 
@@ -591,7 +591,18 @@ def create_contact_skin(chrono, fea, system, nodes, contact_path: Path, motion, 
     shell_mesh.SetName("crm_contact_skin")
     elasticity = fea.ChElasticityKirchhoffIsothropic(pla.youngs_modulus, pla.poisson_ratio)
     shell_material = fea.ChMaterialShellKirchhoff(elasticity)
-    shell_material.SetDensity(pla.density)
+    if hasattr(shell_material, "SetDensity"):
+        shell_material.SetDensity(pla.density)
+    else:
+        # Chrono 11 does not wrap ChMaterialFEA::SetDensity on shell
+        # materials.  This contact skin is diagnostic-only, and its carrier
+        # node masses are assigned explicitly below, so material density is
+        # not needed to keep the node-to-node constraints well conditioned.
+        print(
+            "Chrono 11 binding note: ChMaterialShellKirchhoff.SetDensity is "
+            "unavailable; using explicit contact-skin node masses",
+            flush=True,
+        )
 
     q0 = rigid.initial_chrono_quat(chrono, motion)
     center = chrono.ChVector3d(0.0, 0.0, motion.drum_center_z0)
@@ -775,17 +786,40 @@ def max_nodal_displacement(nodes) -> float:
     return math.sqrt(largest)
 
 
+def von_mises_pa(stress) -> float:
+    """Return von Mises stress (Pa) from a Chrono stress tensor.
+
+    Chrono 11's stock SWIG wrapper omits ``GetEquivalentVonMises()``.  The
+    installer applies ``environment/patches/chrono-python-von-mises.patch``,
+    which exposes the native C++ formula as ``VonMises()``.  Use the original
+    name if a future binding provides it.  Principal-stress reconstruction is
+    deliberately avoided: Chrono 11's ``ComputePrincipalStresses()`` returns
+    NaNs for hydrostatic/zero tensors, which would corrupt exported stress
+    arrays.
+    """
+    for name in ("VonMises", "GetEquivalentVonMises"):
+        native = getattr(stress, name, None)
+        if callable(native):
+            return float(native())
+    raise RuntimeError(
+        "this Chrono build does not expose von Mises stress; "
+        "apply environment/patches/chrono-python-von-mises.patch"
+    )
+
+
 def max_von_mises(fea, mesh, stride: int) -> float:
     return worst_stress_info(fea, mesh, stride)[1]
 
 
-def worst_stress_info(fea, mesh, stride: int,
-                      min_volume: float = 0.0) -> tuple[int, float, float, tuple[float, float, float]]:
+def worst_stress_info(fea, mesh, stride: int, min_volume: float = 0.0,
+                      stress_values=None) -> tuple[int, float, float, tuple[float, float, float]]:
     """Return index, von Mises stress, volume, and centroid of the hot element.
 
     ``min_volume`` can exclude sliver tetrahedra whose stress is dominated by a
     near-singular element Jacobian; the promoted mesh has a handful of elements
-    below 1e-12 m^3.
+    below 1e-12 m^3.  If ``stress_values`` is a NumPy array, every visited
+    element's von Mises stress is also written into it so callers can reuse the
+    scan for VTU export instead of looping over the mesh a second time.
     """
     worst_index = -1
     largest = 0.0
@@ -794,11 +828,15 @@ def worst_stress_info(fea, mesh, stride: int,
     for i in range(0, mesh.GetNumElements(), stride):
         element = fea.CastToChElementTetraCorot_4(mesh.GetElement(i))
         if element is None:
+            if stress_values is not None:
+                stress_values[i] = 0.0
             continue
+        value = von_mises_pa(element.GetStress())
+        if stress_values is not None:
+            stress_values[i] = value
         element_volume = abs(element.ComputeVolume())
         if element_volume < min_volume:
             continue
-        value = element.GetStress().GetEquivalentVonMises()
         if value > largest:
             largest = value
             worst_index = i
@@ -1054,7 +1092,14 @@ def main() -> int:
 
     fluid = rigid.get_fluid_system(terrain, fsi)
     particle_mass, mass_source = rigid.get_particle_mass(fluid, soil, run.spacing)
-    flex_markers = fluid.GetNumFlexBodyMarkers() if hasattr(fluid, "GetNumFlexBodyMarkers") else 0
+    # Chrono 11 renamed this diagnostic getter from GetNumFlexBodyMarkers to
+    # GetNumFleaMeshMarkers; support both so the count is not silently zero.
+    if hasattr(fluid, "GetNumFleaMeshMarkers"):
+        flex_markers = fluid.GetNumFleaMeshMarkers()
+    elif hasattr(fluid, "GetNumFlexBodyMarkers"):
+        flex_markers = fluid.GetNumFlexBodyMarkers()
+    else:
+        flex_markers = 0
     print(
         f"SPH particles: {terrain.GetNumSPHParticles()}, "
         f"boundary BCE: {terrain.GetNumBoundaryBCEMarkers()}, "

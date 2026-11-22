@@ -122,7 +122,7 @@ Every study, including a dry run, produces a reproducible recipe in the output d
 Output_<study_name>/
 ├── study_config.json      every setting actually used, plus generated stage commands
 ├── commands.sh            executable shell script with one command per stage and its log
-├── results_overview.png   CRM/FEA summary charts written after a successful run
+├── results_overview.png   four-panel CRM/FEA summary plots written after a successful run
 └── (stage outputs after a real run)
 ```
 

@@ -34,7 +34,7 @@ Output_<study_name>/
 │   ├── fea_summary.csv         compact MPa/mm chart table
 │   ├── export_manifest.json    export provenance and FEA status at export time
 │   └── fea.pvd / with_fea.pvd optional multi-frame 3D FEA series
-└── results_overview.png        written by view_results.py
+└── results_overview.png        four-panel summary plots written by view_results.py
 ```
 
 `study_config.json` and `commands.sh` are the reproducibility pair. If you want to rerun or audit a study, start there. `commands.sh` shows each stage command together with its `tee` log destination; the config's `commands` array stores the stage names and command argument lists.
@@ -71,7 +71,7 @@ Records the measured CAD drum dimensions, mesh volumes and errors, target/achiev
 
 ## ParaView exports
 
-`export_study_vtk.py` converts existing CSVs into time series. It **regenerates all CRM particle and excavator frames on every run**, so a cancelled or shorter study cannot leave stale frames in those animations. FEA VTU frames are written by the FEA driver; the exporter validates and references them rather than regenerating them.
+`export_study_vtk.py` converts existing CSVs into time series. It **regenerates all CRM particle and excavator frames on every run**, so a cancelled or shorter study cannot leave stale frames in those animations. FEA VTU frames are written by the FEA driver; the exporter validates and references them rather than regenerating them. The one-way driver snapshots each FEA frame into plain arrays and writes it from a separate bounded-queue writer process, so VTK construction and disk I/O overlap later solver steps. It joins that writer before printing the final summary, so `fea.pvd` is complete whenever the run reports success.
 
 | File | Contents |
 | --- | --- |
@@ -107,7 +107,7 @@ In the GUI: **Tools / View Results** → **Open lightweight CRM/FEA output previ
 ./chrono-env/bin/python view_results.py --output-dir Output_<study_name> --show
 ```
 
-Draws CRM/FEA summary charts and writes `results_overview.png`. In the GUI, use **Open interactive result plots**.
+Draws four CRM/FEA summary plots (CRM work, CRM fill ratio, peak von Mises, and peak deformation) and writes `results_overview.png`. With `--show`, a shared crosshair follows the pointer: a vertical time line plus a horizontal line on each plot that meets it at that plot's value. In the GUI, use **Open interactive result plots**.
 
 ### 3. Geometry comparison
 

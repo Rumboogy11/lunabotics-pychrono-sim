@@ -10,7 +10,7 @@ You are using a PyPI/conda `pychrono` wheel. Those wheels do not contain the mod
 
 ```bash
 source environment/activate-chrono-source.sh
-"$CHRONO_ENV/bin/python" -c "import pychrono.core, pychrono.fea, pychrono.fsi, pychrono.vehicle"
+"$CHRONO_ENV/bin/python" -c "import pychrono.core, pychrono.fea, pychrono.fsi, pychrono.pardisomkl, pychrono.vehicle"
 ```
 
 If that import fails, rerun `./install.sh` (use `--clean` to force a rebuild). See [environment/INSTALL.md](../environment/INSTALL.md).
@@ -130,6 +130,8 @@ A `NOTICE: one-way FEA duration limited by the available CRM load frames` messag
 
 One-way FEA is a screening tool: no soil feedback, PLA material assumptions, and a load radius fraction that limits where forces are applied. Adjust `--load-radius-fraction` (0.95 is cheaper, 0.8 applies loads more widely) and material/damping values only with a rationale. Two-way coupled FEA and `full_model.py` are diagnostics and are not validated.
 
+Chrono 11's stock Python wrapper does not expose `GetEquivalentVonMises()` on stress tensors. The installer applies `environment/patches/chrono-python-von-mises.patch` so the drivers call Chrono's native formula directly, leaving the reported von Mises stress and VTU stress arrays unchanged. If you run the diagnostic two-way driver, a `Chrono 11 binding note: ChMaterialShellKirchhoff.SetDensity is unavailable` message is expected; that path uses explicit contact-skin node masses instead.
+
 ### No FEA charts or no 3D stress in ParaView
 
 The two are separate toggles:
@@ -138,6 +140,8 @@ The two are separate toggles:
 - **Load 3D FEA stress/deformation in ParaView** requires an explicitly exported, structurally usable multi-frame `fea/vtk/fea.pvd` (its VTU files live in `fea/vtk/frames/`). Enable **Export full 3D FEA stress animation** or `--fea-export-vtk`. A lone `t=0` frame is ignored, but a usable partial multi-frame series can be displayed.
 
 Check `paraview/export_manifest.json` for `has_fea_vtk`, `fea_valid`, and `fea_status` as export-time provenance. ParaView rechecks the actual PVD and frame files, so a manifest-marked partial multi-frame series may still display.
+
+If the FEA log reports `FEA 3D VTK writer failed` or `FEA 3D VTK writer shutdown failed`, the scalar history is still usable but the 3D PVD may be incomplete. Resolve the reported disk/VTK error and rerun with **Export full 3D FEA stress animation** enabled.
 
 The 3D series opens on the **undeformed** grid with von Mises coloring; `WarpByVector1` is present but hidden by default. Toggle that filter in the Pipeline Browser if you expected a deformed shape. The excavator/drum source is at 40% opacity so it does not hide the stress overlay; raise its opacity in the Properties panel if you prefer a solid drum.
 

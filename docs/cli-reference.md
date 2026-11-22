@@ -28,9 +28,9 @@ Run all commands from the project root unless noted. Most shell launchers add `c
 
 ### `./install.sh`
 
-Installs system packages (unless `--no-system-packages`), creates `chrono-env/`, checks out the custom Chrono fork, applies the local SPH patch, and builds PyChrono with FSI/FSI-SPH/vehicle modules and CUDA 12.9.
+Installs system packages (unless `--no-system-packages`), creates `chrono-env/`, checks out the custom Chrono 11 fork, applies the local SPH and Python stress patches, and builds PyChrono with FSI/FSI-SPH/vehicle/PardisoMKL modules, oneMKL 2025.2, and CUDA 12.9.
 
-Common flags: `-h` / `--help`, `--no-system-packages`, `--with-paraview` / `--without-paraview`, `--cuda-arch NNN`, `--jobs N` (build jobs; default/ceiling: `nproc - 2`, minimum 1), `--clean`, `--skip-build`, `--skip-patch`, `--chrono-repo URL`, `--chrono-ref REF`, `--work-root PATH`. Set `PYCHRONO_WORK_ROOT` instead of passing `--work-root` if you prefer. `CHRONO_REPO` defaults to the project's custom Chrono fork and `CHRONO_REF` to the tested commit unless overridden. See [environment/INSTALL.md](../environment/INSTALL.md).
+Common flags: `-h` / `--help`, `--no-system-packages`, `--with-paraview` / `--without-paraview`, `--cuda-arch NNN`, `--jobs N` (build jobs; default/ceiling: `nproc - 2`, minimum 1), `--clean`, `--skip-build`, `--skip-patch`, `--chrono-repo URL`, `--chrono-ref REF`, `--work-root PATH`. Set `PYCHRONO_WORK_ROOT` instead of passing `--work-root` if you prefer. `CHRONO_REPO` defaults to the project's custom Chrono 11 fork and `CHRONO_REF` to the tested commit unless overridden. The environment includes `mkl-devel` because the local build enables PardisoMKL. The Chrono build defaults to `nproc - 2` parallel jobs and retries remaining objects serially after a compiler front-end crash. See [environment/INSTALL.md](../environment/INSTALL.md).
 
 ### `source environment/activate-chrono-source.sh`
 
@@ -63,7 +63,7 @@ The main design model. Common flags:
 | Output | `--output-dir DIR`, `--loads-file PATH`, `--save-particles`, `--particle-fps F`, `--loads-fps F`, `--particle-writers N`, `--keep-old-particles`, `--no-output` |
 | Checks | `--print-soil`, `--smoke-test --mesh-file PATH` |
 
-`--mesh {coarse,medium}` selects legacy local OBJ names from `lunar_excavator_config.py`; those files are not shipped, so supply `--mesh-file` with your own surface. `crm/run.sh` also pins local Chrono libraries with `LD_PRELOAD` through `crm/chrono_runtime_env.sh`, while `crm/run_fea.sh` injects local `PYTHONPATH`/`LD_LIBRARY_PATH`. Full option meanings are in [crm/README.md](../crm/README.md).
+`--mesh {coarse,medium}` selects legacy local OBJ names from `lunar_excavator_config.py`; those files are not shipped, so supply `--mesh-file` with your own surface. The CRM launchers pin local Chrono libraries with `LD_PRELOAD` through `crm/chrono_runtime_env.sh`, including `libChrono_pardisomkl.so`, and inject local `PYTHONPATH`/`LD_LIBRARY_PATH`. Full option meanings are in [crm/README.md](../crm/README.md).
 
 ### `./crm/run_oneway_fea.sh` — one-way structural replay
 
@@ -76,11 +76,11 @@ Replays a recorded soil wrench; no SPH contact is simulated in this stage. The m
 | `--fea-node PATH`, `--fea-ele PATH` | Solid tetrahedral mesh. |
 | `--solver {pardiso-mkl,sparse-lu,sparse-qr,gmres}`, `--num-threads N` | Linear solver. |
 | `--load-radius-fraction F`, `--load-scale F`, `--min-stress-volume V`, `--raw-stress-every N`, `--no-lock-sparsity-pattern` | Load spread/scaling, peak-stress filtering, scan cadence, and solver sparsity-pattern control. |
-| `--export-vtk` / `--no-export-vtk`, `--vtk-dir DIR`, `--vtk-stride N` | Full 3D stress animation (expensive; off by default). |
+| `--export-vtk` / `--no-export-vtk`, `--vtk-dir DIR`, `--vtk-stride N` | Full 3D stress animation written by a background process (expensive; off by default). |
 | Motion/gravity | Match the CRM stage: `--descent-mode`, `--descent-force*`, `--gravity`, `--omega`, `--reverse-spin`, `--spin-axis`, bed and buffer options. |
 | Material | `--pla-youngs-modulus`, `--pla-poisson-ratio`, `--pla-density`, `--rayleigh-beta`, `--hub-radius`. |
 
-The replay checks required telemetry, sample count/order, descent mode, and (in kinematic mode) the Z trajectory, then interpolates the wrench by time. It runs for the minimum of `--duration` and the time of the last CRM load sample: if the loads file is shorter, it prints a `NOTICE` naming the shortened duration and finishes normally rather than holding the final wrench. Gravity, spin, and actuator-force settings are not validated from the CSV, so keep them matched manually. It rejects detector and SPH-only flags used by rigid CRM. The launcher adds local `PYTHONPATH`/`LD_LIBRARY_PATH` entries only when `--solver gmres`, `sparse-lu`, or `sparse-qr` is explicitly requested; the default PardisoMKL path uses the existing Python bindings.
+The replay checks required telemetry, sample count/order, descent mode, and (in kinematic mode) the Z trajectory, then interpolates the wrench by time. It runs for the minimum of `--duration` and the time of the last CRM load sample: if the loads file is shorter, it prints a `NOTICE` naming the shortened duration and finishes normally rather than holding the final wrench. Gravity, spin, and actuator-force settings are not validated from the CSV, so keep them matched manually. It rejects detector and SPH-only flags used by rigid CRM. The launcher always adds local `PYTHONPATH`/`LD_LIBRARY_PATH` entries and pins the matching local libraries with `LD_PRELOAD`, including PardisoMKL; a stale conda PyChrono installation cannot be mixed into this stage.
 
 ### `./crm/run_fea.sh` — two-way FEA (diagnostic)
 
@@ -152,7 +152,7 @@ or headlessly with `pvpython view_study_paraview.py Output_MyDrum/paraview`. Fla
 ./chrono-env/bin/python view_results.py --output-dir Output_MyDrum --show
 ```
 
-Plots `summary.csv` from `crm/` and `fea/` and writes `results_overview.png` in the study folder.
+Plots `summary.csv` from `crm/` and `fea/` in four panels (CRM work, CRM fill ratio, peak von Mises, and peak deformation) and writes `results_overview.png` in the study folder. With `--show`, a shared crosshair follows the pointer: the vertical line marks the time and a horizontal line on every panel meets it at that panel's plotted value.
 
 ### `view_geometry.py`
 

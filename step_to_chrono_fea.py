@@ -15,7 +15,7 @@ Outputs
 
 Why this format
 ---------------
-Chrono 10's ``fea.ChMeshFileLoader.FromAbaqusFile`` reads C3D4 tetrahedra and
+Chrono 11's ``fea.ChMeshFileLoader.FromAbaqusFile`` reads C3D4 tetrahedra and
 returns named node sets in C++, but its ``std::map<string, vector<...>>``
 node-set typemap is not wrapped in Python.  The Python FEA driver therefore
 loads ``*.node``/``*.ele`` with ``FromTetGenFile`` and selects hub nodes itself;

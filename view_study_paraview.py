@@ -695,7 +695,7 @@ def main():
         active_series = "CRM animation (FEA scalar charts off by default)"
     print(f"[view_study_paraview] active series: {active_series}")
     print("  PVD files: crm_particles.pvd + excavator.pvd = crm_animation.pvd (aka combined.pvd); "
-          "3D FEA loads a validated multi-frame FEA PVD, including usable partial runs")
+          "3D FEA loads a structurally usable multi-frame FEA PVD, including usable partial runs")
 
     # disable auto camera reset on first show so multiple sources compose
     try:

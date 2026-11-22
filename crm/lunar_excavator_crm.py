@@ -42,11 +42,12 @@ This driver needs a PyChrono build with the CRM/FSI modules::
 
     import pychrono.core
     import pychrono.vehicle   # CRMTerrain
-    import pychrono.fsi       # ElasticMaterialProperties, SPHParameters
+    import pychrono.fsi       # SoilProperties, SPHParameters
 
 The PyPI ``pychrono`` wheel does not currently include ``pychrono.fsi`` or
-``pychrono.vehicle``.  Use a source build or a conda-forge build with FSI/SPH
-and CRM enabled.  ``--help`` works without those modules.
+``pychrono.vehicle``.  Use the project-local Chrono 11 source build with
+FSI/SPH enabled; the one-way FEA replay optionally uses PardisoMKL.
+``--help`` works without those modules.
 
 Usage
 -----

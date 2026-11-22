@@ -20,8 +20,10 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ENV_FILE="$PROJECT_ROOT/environment/environment.yml"
 PATCH_FILE="$PROJECT_ROOT/environment/patches/chrono-local-crm-sph.patch"
+PY_PATCH_FILE="$PROJECT_ROOT/environment/patches/chrono-python-von-mises.patch"
 
-# Custom Chrono fork with the CRM/SPH fixes used by this project.
+# Custom Chrono 11 fork with the CRM/SPH fixes used by this project.
+# The repository patch supplies the newer BVH-accelerated BCE generation.
 TESTED_CHRONO_REF="757a75b3c33af1cd4c42e6e21c30a24a0cecbfe0"
 CHRONO_REPO="${CHRONO_REPO:-https://github.com/Rumboogy11/chrono.git}"
 CHRONO_REF="${CHRONO_REF:-$TESTED_CHRONO_REF}"
@@ -38,9 +40,11 @@ CLEAN=0
 SKIP_BUILD=0
 SKIP_PATCH=0
 
-# Chrono's Eigen-heavy translation units need a lot of memory, but the default
-# build parallelism leaves two threads free for the rest of the machine. Users on
-# smaller hosts can pick a lower value explicitly with --jobs (for example --jobs 1).
+# Chrono's Eigen-heavy translation units need a lot of memory and can trigger
+# GCC front-end crashes when compiled too aggressively. The default leaves two
+# threads free for the rest of the machine; the build script raises the compiler
+# stack limit and retries remaining objects serially after a front-end crash.
+# Users on smaller hosts can pick a lower value with --jobs (for example --jobs 1).
 cap_build_jobs() {
   # nproc honours OMP_NUM_THREADS; ignore it so re-running from an already
   # activated environment still sees the machine's real CPU count.
@@ -339,6 +343,9 @@ verify_chrono_source() {
   if [[ ! -d "$SRC_DIR/.git" ]]; then
     die "Chrono source at $SRC_DIR is not a git checkout; move it aside or pass --work-root"
   fi
+  if ! grep -q 'set(CH_VERSION 0x00110000)' "$SRC_DIR/CMakeLists.txt"; then
+    die "Chrono source at $SRC_DIR is not the supported Chrono 11 revision"
+  fi
 
   local head expected
   head="$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || true)"
@@ -367,21 +374,26 @@ verify_chrono_source() {
 }
 
 apply_chrono_patch() {
-  if [[ "$SKIP_PATCH" -eq 1 || ! -f "$PATCH_FILE" ]]; then
+  local patch label
+  if [[ "$SKIP_PATCH" -eq 1 ]]; then
     return
   fi
   if [[ ! -d "$SRC_DIR/.git" ]]; then
-    warn "Chrono source is not a git checkout; skipping local patch."
+    warn "Chrono source is not a git checkout; skipping local patches."
     return
   fi
-  if git -C "$SRC_DIR" apply --check --reverse "$PATCH_FILE" >/dev/null 2>&1; then
-    log "Local Chrono SPH patch already applied"
-  elif git -C "$SRC_DIR" apply --check "$PATCH_FILE" >/dev/null 2>&1; then
-    log "Applying local Chrono SPH patch"
-    git -C "$SRC_DIR" apply "$PATCH_FILE"
-  else
-    die "Local Chrono SPH patch does not apply to this checkout."
-  fi
+  for patch in "$PATCH_FILE" "$PY_PATCH_FILE"; do
+    [[ -f "$patch" ]] || continue
+    label="$(basename "$patch")"
+    if git -C "$SRC_DIR" apply --check --reverse "$patch" >/dev/null 2>&1; then
+      log "Local Chrono patch $label already applied"
+    elif git -C "$SRC_DIR" apply --check "$patch" >/dev/null 2>&1; then
+      log "Applying local Chrono patch $label"
+      git -C "$SRC_DIR" apply "$patch"
+    else
+      die "Local Chrono patch $label does not apply to this checkout."
+    fi
+  done
 }
 
 verify_environment() {
@@ -409,6 +421,7 @@ import pychrono.core as core
 import pychrono.fea as fea
 import pychrono.fsi as fsi
 import pychrono.vehicle as veh
+import pychrono.pardisomkl as pardiso
 
 import matplotlib
 import numpy
@@ -420,7 +433,8 @@ import pymeshfix
 import vtk
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 
-print("  pychrono: core, fea, fsi, vehicle")
+print("  pychrono: core, fea, fsi, pardisomkl, vehicle")
+print(f"  pardiso module: {pardiso.__file__}")
 print(f"  numpy {numpy.__version__}, pyvista {pyvista.__version__}, vtk {vtk.__version__}")
 print(f"  trimesh {trimesh.__version__}, tetgen, pymeshfix, OCP, matplotlib")
 print("  Tk available")
