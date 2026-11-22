@@ -1200,11 +1200,12 @@ def compute_metrics(positions: np.ndarray, drum, run: CrmRunParams, motion,
     lifted = pos[:, 2] > surface_z + lift_tol
     # Analytic detector cylinder in the live drum-local frame.  This is
     # instantaneous: leaving the eroded cylinder clears the flag on the next
-    # metrics call.
+    # metrics call.  Fill is based on cylinder containment only; the lifted
+    # diagnostic is reported separately so soil carried below the original bed
+    # surface remains counted as inside the drum.
     excavated = (
         (radial2 <= r_outer2)
         & (lz <= half_len_eff)
-        & lifted
     )
 
     # Fill is exactly the excavated set.

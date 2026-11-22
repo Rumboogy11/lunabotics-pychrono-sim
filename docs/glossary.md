@@ -64,7 +64,7 @@ Plain-language definitions for the terms you will see in the GUI, command output
 
 ## Metrics and classification
 
-**Excavated** — A particle that is above the initial bed by at least one SPH radius *and* fully inside the detector cylinder eroded by one SPH radius. The same set feeds fill ratio and specific energy.
+**Excavated** — A particle fully inside the detector cylinder eroded by one SPH radius in the drum's live pose. The same set feeds fill ratio and specific energy. `Lifted` is a separate diagnostic (above the initial bed by at least one SPH radius) and does not gate fill.
 
 **Fill detector / detector cylinder** — An analytical cylinder, following the drum's live pose, used to decide whether a particle is inside the drum. It can be auto-sized from the measured drum or set manually.
 
@@ -86,7 +86,7 @@ Plain-language definitions for the terms you will see in the GUI, command output
 
 **`crm_particles.pvd`, `excavator.pvd`, `crm_animation.pvd`** — The particle series, rigid drum series, and combined non-FEA animation. `combined.pvd` is an older alias.
 
-**`fea.pvd` / `with_fea.pvd`** — Optional 3D stress/deformation time series and its combined view with CRM data. Only a complete multi-frame PVD is loaded by the viewer.
+**`fea.pvd` / `with_fea.pvd`** — Optional 3D stress/deformation time series and its combined view with CRM data. The viewer rechecks the PVD and frame files: a lone `t=0` frame is ignored, but a structurally usable partial multi-frame series can still load.
 
 **FEA history charts** — Optional XY plots of scalar stress/deformation over time. Off by default; enable with the Tools checkbox or `--show-fea-charts`.
 

@@ -23,7 +23,7 @@ Prefer answering questions from these files and from `--help` / `--dry-run` outp
 - Soil parameters are best estimates, **not calibrated measurements**. Keep them frozen when comparing designs.
 - **No CAD or mesh geometry is bundled.** `geometry/` is gitignored; users supply their own STEP or mesh files.
 - Excavation metrics count **SPH fluid markers only**. BCE markers are excluded. Older comparisons that included BCE markers are invalid.
-- Fill uses the instantaneous `excavated` set: SPH particles above the initial bed and inside the detector cylinder eroded by one particle radius in the drum's live pose. A particle loses the flag when it leaves the cylinder or falls back.
+- Fill uses the instantaneous `excavated` set: SPH particles inside the detector cylinder eroded by one particle radius in the drum's live pose. A particle loses the flag when it leaves the cylinder. `lifted` is reported separately as a diagnostic (above the initial bed by one SPH radius) but does not gate fill.
 - `crm_animation.pvd` and `combined.pvd` contain CRM particles and rigid poses only — **never FEA**.
 - FEA scalar summaries are the fast default. A full 3D FEA stress animation is opt-in.
 - The viewer **rechecks the actual PVD and frame files**. Do not say it trusts a "validated full PVD". A lone `t=0` frame is ignored; a structurally usable partial multi-frame series can display even if the manifest marks it partial.

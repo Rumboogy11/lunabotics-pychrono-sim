@@ -68,12 +68,9 @@ CRM uses an explicit timestep whose stable value scales with SPH spacing (about 
 
 ### Fill classification and metrics
 
-At each output time, particles are transformed into the drum's local frame using the **full live pose**. With SPH radius `rp = 0.5 × spacing`, a particle is *excavated* when:
+At each output time, particles are transformed into the drum's local frame using the **full live pose**. With SPH radius `rp = 0.5 × spacing`, a particle is *excavated* when it lies inside the detector cylinder eroded by `rp` on the radial side and at both ends (clamped at zero).
 
-- it is above the initial bed surface by at least `rp`, and
-- it lies inside the detector cylinder eroded by `rp` on the radial side and at both ends (clamped at zero).
-
-The cylinder dimensions normally follow the measured drum radius and full length; they can be set manually. By default the classifier follows the drum exactly and classification is **instantaneous**: leave the cylinder or fall back to the bed and the flag is removed. The same `excavated` set feeds `inside_drum`, `fill_ratio_count`, `fill_ratio_mass`, and the particle CSV flags.
+The cylinder dimensions normally follow the measured drum radius and full length; they can be set manually. The classifier follows the drum exactly and classification is **instantaneous**: leave the cylinder and the flag is removed on the next metrics call. `lifted` is reported separately as a diagnostic (above the initial bed surface by at least `rp`) but does not gate fill. The same `excavated` set feeds `inside_drum`, `fill_ratio_count`, `fill_ratio_mass`, and the particle CSV flags.
 
 ```text
 retained mass = excavated particle count × particle mass

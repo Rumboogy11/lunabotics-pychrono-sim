@@ -737,7 +737,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--load-radius-fraction", type=float, default=None,
                    help="apply soil loads to nodes with r >= fraction * drum radius (default: 0.95; lower spreads loads wider)")
     p.add_argument("--raw-stress-every", type=int, default=None,
-                   help="compute peak stress on every Nth recorded frame (default: 5)")
+                   help="extra unfiltered raw peak-stress scan every Nth recorded frame (default: 5; 0 = first and last only)")
     p.add_argument("--export-workers", type=int, default=None,
                    help="parallel worker processes for ParaView frame export (default: 1)")
     p.add_argument("--save-particles", action="store_true", help="write CRM particle CSV frames")
@@ -1474,11 +1474,11 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
     )
     load_radius_fraction = args.load_radius_fraction if args.load_radius_fraction is not None else prompt_float(
         "Load node radius fraction", 0.95, minimum=0.01, maximum=1.0,
-        detail="Soil loads are spread over exterior nodes within this radius; 0.95 greatly reduces per-step load work while preserving the wrench.",
+        detail="Soil loads go to exterior nodes at or beyond this fraction of drum radius; 0.95 limits them to a narrow outer band and cuts per-step load work while preserving the wrench.",
     )
     raw_stress_every = args.raw_stress_every if args.raw_stress_every is not None else prompt_int(
         "Raw stress interval", 5, minimum=1,
-        detail="Scan tetrahedra for peak stress every Nth recorded frame; set to 1 for every frame.",
+        detail="Extra unfiltered raw peak-stress scan every Nth recorded frame; the filtered peak is still scanned every frame. Set to 1 for every frame.",
     )
     export_workers = args.export_workers if args.export_workers is not None else prompt_int(
         "ParaView export workers", 4, minimum=1,

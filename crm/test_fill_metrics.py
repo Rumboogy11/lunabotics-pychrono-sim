@@ -137,7 +137,10 @@ class FillMetricTest(unittest.TestCase):
                 self.assertEqual(metrics["inside_drum"], inside)
                 self.assertEqual(metrics["excavated"], inside)
 
-    def test_lifted_tolerance_stays_at_particle_radius(self):
+    def test_fill_is_not_cleared_below_bed_surface(self):
+        # Soil carried inside the detector should remain counted even when the
+        # drum passes below the original bed surface. Lifted is still reported
+        # as a diagnostic, but it no longer gates fill/excavated.
         locals_ = np.array([[0.0, 0.0, 0.0]])
         below = FakeDrum((0.0, 0.0, self.surface_z + self.rp - 1.0e-9), self.quat)
         above = FakeDrum((0.0, 0.0, self.surface_z + self.rp + 1.0e-9), self.quat)
@@ -148,9 +151,9 @@ class FillMetricTest(unittest.TestCase):
         self.assertEqual(metrics_below["lifted"], 0)
         self.assertEqual(metrics_above["lifted"], 1)
         for flag in (0, 1):
-            self.assertEqual(int(flags_below[0, flag]), 0)
+            self.assertEqual(int(flags_below[0, flag]), 1)
             self.assertEqual(int(flags_above[0, flag]), 1)
-        self.assertEqual(metrics_below["fill_ratio_mass"], 0.0)
+        self.assertGreater(metrics_below["fill_ratio_mass"], 0.0)
         self.assertGreater(metrics_above["fill_ratio_mass"], 0.0)
 
     def test_auto_detector_follows_drum_dimensions(self):

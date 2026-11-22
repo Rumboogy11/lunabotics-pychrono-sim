@@ -12,7 +12,7 @@ soil response, torque, and specific energy across drum/spike geometries.
 
 Soil/FEA metrics count **SPH fluid markers only**. Older comparisons that included BCE markers are invalid.
 
-Fill uses the same instantaneous **excavated** set as the specific-energy metric: a particle must be above the initial bed by one SPH radius (`rp = 0.5 × --spacing`, with Chrono `d0 = --spacing`) and fully inside a detector cylinder eroded by `rp` radially and at both axial endcaps (bounds clamped at zero). By default that cylinder is sized from the drum radius and full length; `--no-detector-auto-size` with `--detector-radius`/`--detector-length` sizes it independently. The analytical cylinder follows the excavator's full live pose. `inside_drum`, `fill_ratio_count`, `fill_ratio_mass`, and both particle CSV flag columns all use that set.
+Fill uses the same instantaneous **excavated** set as the specific-energy metric: a particle must be fully inside a detector cylinder eroded by `rp` radially and at both axial endcaps (bounds clamped at zero), where `rp = 0.5 × --spacing` and Chrono uses `d0 = --spacing`. By default that cylinder is sized from the drum radius and full length; `--no-detector-auto-size` with `--detector-radius`/`--detector-length` sizes it independently. The analytical cylinder follows the excavator's full live pose. `inside_drum`, `fill_ratio_count`, `fill_ratio_mass`, and both particle CSV flag columns all use that set. `lifted` is reported separately as a diagnostic (above the initial bed by one SPH radius) but does not gate fill.
 
 Classification is current-state only: a particle loses its flag as soon as it leaves the eroded cylinder or drops back to the bed. Capacity (including the nominal `inner_radius` denominator), the lifted predicate, SPH/BCE bookkeeping, and particle-position writers are unaffected. The manual detector dimensions affect only classification; they are not used for the soil mesh, container, or capacity denominator.
 
@@ -171,13 +171,13 @@ Notes:
 
 Typical rigid CRM run directory (`--output-dir ...`):
 
-- `config.json` — soil, numerics, mesh, capacity, and `fill_detector` settings (size mode, nominal/effective dimensions, and lift gate)
+- `config.json` — soil, numerics, mesh, capacity, and `fill_detector` settings (size mode, nominal/effective dimensions, and lift tolerance)
 - `summary.csv` — per-frame metrics (pose, counts, fill ratios, torque/work/specific energy; force-mode runs also record descent state/actuator telemetry)
 - `soil_loads.csv` — time-interpolated soil wrench at `--loads-fps` cadence when `--loads-file` is used (force-mode runs add the same descent telemetry columns)
 - `particles_*.csv` — per-frame particle positions/flags when `--save-particles` is used
 - `paraview/` — PVD/VTP/VTU exports when `--export-vtk` is used
 
-The fill-ratio denominator uses the nominal cylindrical cavity by default (`--inner-radius` × drum length). Its numerator is the excavated set: particles above the initial bed by one SPH particle radius (`0.5 × --spacing`, with Chrono `d0 = --spacing`) and fully inside the outer drum envelope eroded by that radius. The denominator always remains the nominal (un-eroded) volume; pass `--capacity-volume` when a CAD-derived free volume is available for fairer geometry comparisons.
+The fill-ratio denominator uses the nominal cylindrical cavity by default (`--inner-radius` × drum length). Its numerator is the excavated set: particles fully inside the detector cylinder eroded by one SPH particle radius (`rp = 0.5 × --spacing`, with Chrono `d0 = --spacing`) radially and at both axial endcaps. The denominator always remains the nominal (un-eroded) volume; pass `--capacity-volume` when a CAD-derived free volume is available for fairer geometry comparisons. `lifted` remains a separate diagnostic in `summary.csv`/particle flags context.
 
 ## Limitations
 

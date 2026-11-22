@@ -10,7 +10,7 @@ A two-way coupled FEA driver (`crm/lunar_excavator_crm_fea.py`) and a combined r
 
 > **Metric note:** soil/excavation metrics count SPH fluid markers only. Older comparisons that included BCE markers are invalid.
 
-> **Fill measure:** `inside_drum`, `fill_ratio_count`, and `fill_ratio_mass` use the same instantaneous `excavated` set: SPH particles lifted above the initial bed and fully inside the analytical detector cylinder eroded by one particle radius. By default the cylinder is sized from the measured drum radius and full length; it may instead be sized manually. The cylinder follows the excavator's full live pose, and a particle loses its flag as soon as it leaves the current cylinder or drops back to the bed. Capacity, the nominal `inner_radius` denominator, SPH/BCE counts, and particle CSV columns are unchanged.
+> **Fill measure:** `inside_drum`, `fill_ratio_count`, and `fill_ratio_mass` use the same instantaneous `excavated` set: SPH particles fully inside the analytical detector cylinder eroded by one particle radius. By default the cylinder is sized from the measured drum radius and full length; it may instead be sized manually. The cylinder follows the excavator's full live pose, and a particle loses its flag as soon as it leaves the current cylinder. `lifted` is reported separately as a diagnostic (above the initial bed by one SPH radius) but does not gate fill. Capacity, the nominal `inner_radius` denominator, SPH/BCE counts, and particle CSV columns are unchanged.
 
 ## Installation
 

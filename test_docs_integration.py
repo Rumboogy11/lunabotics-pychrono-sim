@@ -45,6 +45,36 @@ class DocEntriesTest(unittest.TestCase):
         self.assertTrue(EXPECTED_DOCS.issubset(registered),
                         f"unregistered docs: {sorted(EXPECTED_DOCS - registered)}")
 
+    def test_gui_info_entries_explain_control_analogy_and_impact(self) -> None:
+        import study_gui as gui
+
+        for group_name, group in (("PARAM_INFO", gui.PARAM_INFO),
+                                  ("SETTINGS_INFO", gui.SETTINGS_INFO)):
+            for key, text in group.items():
+                with self.subTest(group=group_name, key=key):
+                    self.assertIn("Think of it as:", text)
+                    self.assertGreater(len(text), 90)
+
+    def test_gui_info_reflects_verified_behaviour(self) -> None:
+        import study_gui as gui
+
+        expectations = {
+            "crm_obj": ["full-detail OBJ", "legacy simplified"],
+            "load_radius_fraction": ["at least this fraction", "exterior nodes"],
+            "raw_stress_every": ["unfiltered raw peak"],
+            "particle_fps": ["capped by CRM summary FPS"],
+            "tools_orbit_radius": ["five times its radial extent"],
+            "surface_repair_order": ["behaves like 'none'"],
+            "soil_friction": ["mu_2"],
+        }
+        for key, phrases in expectations.items():
+            with self.subTest(key=key):
+                text = gui.PARAM_INFO[key]
+                for phrase in phrases:
+                    self.assertIn(phrase, text)
+
+        self.assertNotIn("coarse OBJ", gui.PARAM_INFO["crm_obj"])
+
     def test_docs_hub_links_every_guide(self) -> None:
         index = (ROOT / "docs" / "README.md").read_text(encoding="utf-8")
         missing = [

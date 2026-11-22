@@ -118,114 +118,480 @@ from study_output_preview import (  # noqa: E402
 )
 
 
+def _info(control: str, analogy: str, impact: str = "") -> str:
+    """Format a consistent Info-button explanation with analogy and cost."""
+    text = f"{control.strip()}\n\nThink of it as: {analogy.strip()}"
+    if impact.strip():
+        text += f"\n\n{impact.strip()}"
+    return text
+
+
 PARAM_INFO: dict[str, str] = {
     # Study
-    "study_name": "Short label for this run; used in the default output folder name.",
-    "output_dir": "Folder for meshes, logs, configs, and results. Created if needed; use a new folder to preserve prior runs.",
-    "geometry": "supplied/files = use the mesh paths entered below; step = convert a STEP CAD file. No geometry is bundled.",
-    "auto_geometry": "Measure the selected CAD/mesh and refresh suggested drum, bed, domain, spacing, and mesh values. All values remain editable.",
+    "study_name": _info(
+        "Short label for this run; it becomes the default output folder name.",
+        "the name you write on the label of a binder so you can find the run later.",
+        "Cost: none for the simulation; it only names files and folders.",
+    ),
+    "output_dir": _info(
+        "Folder for meshes, logs, configs, and results. It is created if needed; use a new folder to preserve earlier runs.",
+        "the filing cabinet drawer where this experiment's notebook and samples go.",
+        "Cost: a slow or network drive makes every log/CSV write slower; a local empty folder is fastest.",
+    ),
+    "geometry": _info(
+        "Choose where the excavator geometry comes from. supplied/files use the mesh paths below; step converts a STEP CAD assembly first. No geometry is bundled.",
+        "choosing between a pre-built test rig and assembling one from a CAD blueprint.",
+        "Cost: step adds CAD conversion and meshing time before the simulation; supplied/files skip that stage.",
+    ),
+    "auto_geometry": _info(
+        "Measure the selected CAD/mesh and refresh suggested drum, bed, domain, spacing, and mesh values. Note that when this is on, command generation also restores drum radius, half-length, inner radius, and duration to measured/default-consistent values, so manual edits to those fields may be overridden.",
+        "running a tape measure over the bucket and letting the recipe scale the rest of the experiment to fit.",
+        "Cost: the measurement is quick, but accepting a tighter spacing or larger bed can make the later run much slower; turn this off if you need hand-set dimensions to survive command generation.",
+    ),
     # Geometry
-    "step_file": "CAD input (.step/.stp) used only when Geometry source is 'step'. New models use rotation axis Y in STEP space.",
-    "crm_obj": "Triangulated drum surface for rigid Chrono::CRM contact. For production use the promoted coarse OBJ, not a full-detail mesh.",
-    "fea_node": "TetGen node file for the solid drum mesh used in one-way FEA.",
-    "fea_ele": "TetGen element file paired with the FEA .node mesh.",
-    "cad_axis": "Drum axis in original STEP coordinates. New models default to Y; the converter rotates this axis to local +Z for Chrono.",
-    "unit_scale": "Multiply STEP coordinates by this factor (0.001 when CAD coordinates are millimetres). Final mesh units must be metres.",
-    "mesh_size": "Approximate tetrahedral edge length. Smaller gives a finer, slower FEA mesh.",
-    "surface_target_faces": "Starting contact-surface triangle count from STEP. The converter raises it automatically until the measured exterior fit and TetGen both accept the surface. Keep it modest (8000 default); very large targets can create sliver tetrahedra that destabilize the FEA solve.",
-    "surface_max_faces": "Upper bound for the watertight/fit-driven decimation retry used by STEP mesh generation.",
-    "surface_fit_tolerance": "Maximum measured deviation (m) of bucket drum excavator exterior faces from the raw OCC surface. Starting at 'Surface target faces', the converter doubles the target until this fit and TetGen pass, then records the achieved error in the mesh JSON. 0 disables the fit check.",
-    "surface_repair_order": "'none' unifies fused CAD faces and retries decimation until watertight. 'before'/'after' are legacy MeshFix routes that can inflate volume.",
-    "min_solid_volume": "Drop STEP assembly solids smaller than this volume (m^3) before meshing (fasteners/debris).",
-    "hub_radius": "Nodes within this radius of the drum axis are tied rigidly to the spindle in FEA.",
-    "part_aware_simplify": "Recommended: coarsen only hub/interior surface faces before TetGen. Exterior bucket drum excavator faces are copied unchanged; the hub is rigid in FEA, so its dense CAD-driven triangulation is mostly wasted solver cost.",
-    "part_aware_radius": "Faces wholly inside this radial distance from the drum axis may be coarsened. Use slightly more than the rigid hub radius. Incompatible with MeshFix order 'after'.",
-    "part_aware_reduction": "Fraction of eligible interior faces removed by topology-preserving, boundary-fixed decimation. 0.75 removed ~74% of eligible faces and ~23% of total nodes on the current bucket drum excavator CAD.",
-    "part_aware_min_faces": "Skip interior coarsening unless at least this many faces qualify; avoids changing already-coarse meshes.",
-    "drum_radius": "Outer crest radius; sets initial drum height (bed + radius) and bed sizing.",
-    "drum_half_length": "Half the drum length along its axis; used for bed box and CRM placement.",
-    "inner_radius": "Nominal cavity radius used to estimate fill ratio and capacity volume.",
-    "capacity_volume": "Known internal cavity volume; leave blank to derive capacity from drum radii/length.",
-    "detector_auto_size": "Automatically size the fill-detector cylinder from the measured drum radius and full length. Uncheck to enter the cylinder radius and length manually; the 3D adjuster is also available below.",
-    "detector_radius": "Manual nominal fill-detector cylinder radius in metres. The SPH particle radius is eroded from it at runtime.",
-    "detector_length": "Manual nominal fill-detector cylinder full axial length in metres. The SPH particle radius is eroded from each end at runtime.",
+    "step_file": _info(
+        "CAD input (.step/.stp), used only when Geometry source is step. New models use rotation axis Y in STEP space.",
+        "the engineering blueprint the mesh builder traces to make the bucket.",
+        "Cost: larger or more detailed CAD files take longer to tessellate, fuse, and mesh.",
+    ),
+    "crm_obj": _info(
+        "Triangulated drum surface used for rigid Chrono::CRM soil contact. Use the full-detail OBJ for production; legacy simplified meshes can close holes in the shell.",
+        "the exact shovel face that scrapes the sand: every opening in the real bucket should still be an opening here.",
+        "Cost: more contact triangles slow the SPH contact search, but a simplified mesh that seals a hole changes the physics and is worse than the extra cost.",
+    ),
+    "fea_node": _info(
+        "TetGen .node file containing the nodes of the solid drum mesh for one-way FEA.",
+        "the skeleton points of a plastic model before the flesh is added.",
+        "Cost: more nodes mean a larger structural system and a slower FEA solve.",
+    ),
+    "fea_ele": _info(
+        "TetGen .ele file pairing nodes into tetrahedra for the FEA drum mesh.",
+        "the flesh and bones that turn the skeleton points into a solid shape.",
+        "Cost: more tetrahedra mean more memory and a slower FEA solve.",
+    ),
+    "cad_axis": _info(
+        "Drum axis in the original STEP coordinates. New models default to Y; the converter rotates this axis to local +Z for Chrono.",
+        "telling the assembler which way to hold the model before uprighting it on the workbench.",
+        "Cost: none directly, but a wrong axis produces a wrongly oriented drum and a wasted run.",
+    ),
+    "unit_scale": _info(
+        "Multiply STEP coordinates by this factor (0.001 when CAD dimensions are millimetres). Final mesh units must be metres.",
+        "the map scale that converts blueprint millimetres into real-world metres.",
+        "Cost: none directly, but a wrong scale can create an enormous domain, far more particles, and a very slow or unstable run.",
+    ),
+    "mesh_size": _info(
+        "Approximate tetrahedral edge length for the FEA solid mesh. Smaller means a finer mesh.",
+        "the grid spacing of a 3D scanner: smaller cells see more detail but create far more data.",
+        "Cost: halving the edge length can increase element count roughly eightfold and greatly slow meshing and FEA.",
+    ),
+    "surface_target_faces": _info(
+        "Starting contact-surface triangle count converted from STEP. The default route doubles it until the exterior fit and TetGen both accept the surface; 8,000 is a modest default. Automatic retries are disabled on the legacy 'after' repair route.",
+        "how many flat tiles you use to approximate a curved bucket skin before checking it against the blueprint.",
+        "Cost: too few tiles fit badly; very many slow CRM contact and can create sliver tetrahedra that destabilize FEA. On the 'after' route the count is fixed, so set it high enough up front.",
+    ),
+    "surface_max_faces": _info(
+        "Upper bound for the watertight/fit-driven decimation retry used by STEP mesh generation.",
+        "a ceiling on how many times you are willing to add more tiles while trying to close a leaky shell.",
+        "Cost: a higher ceiling can improve fit but lengthens meshing and increases the chance of unhealthy slivers.",
+    ),
+    "surface_fit_tolerance": _info(
+        "Maximum allowed deviation in metres between the converted exterior and the raw CAD surface. The default route doubles the face target until this fit and TetGen pass; the achieved error is recorded in the mesh JSON. 0 disables the fit check, and retries do not run on the legacy 'after' repair route.",
+        "how far the traced outline is allowed to drift from the original blueprint.",
+        "Cost: a tighter tolerance usually means more triangles and more meshing time; 0 is fastest but skips the check entirely.",
+    ),
+    "surface_repair_order": _info(
+        "'none' unifies fused CAD faces and retries decimation until watertight. 'after' is a legacy MeshFix pass after decimation that can inflate volume; 'before' is accepted but generated studies do not pass it on, so it behaves like 'none'.",
+        "whether you seal a crumpled shell by joining its panels yourself or by sending it through an older shrink-wrap machine.",
+        "Cost: 'after' adds preprocessing time, can inflate the solid, disables fit retries, and cannot be combined with part-aware simplification; 'before' adds no cost over 'none'.",
+    ),
+    "min_solid_volume": _info(
+        "Drop STEP assembly solids smaller than this volume (m^3) before meshing, such as fasteners or debris.",
+        "ignoring loose screws and dust before casting the one part that matters.",
+        "Cost: removing tiny solids usually makes meshing faster and more reliable; setting it too high can delete useful geometry.",
+    ),
+    "hub_radius": _info(
+        "Nodes within this radius of the drum axis are tied rigidly to the spindle in FEA.",
+        "the metal core bolted to the motor: it moves as one piece instead of bending.",
+        "Cost: a larger rigid core slightly reduces the flexible system size, but it also changes where stresses can develop.",
+    ),
+    "part_aware_simplify": _info(
+        "Recommended: coarsen only hub/interior surface faces before TetGen. Exterior bucket faces are copied unchanged. The hub is rigid in FEA, so its dense CAD triangulation is mostly wasted solver cost.",
+        "hollowing out the foam inside a prop while leaving its outer skin untouched.",
+        "Cost: this usually makes FEA much faster without changing the soil-contact surface.",
+    ),
+    "part_aware_radius": _info(
+        "Faces wholly inside this radial distance from the drum axis may be coarsened. Use slightly more than the rigid hub radius. Incompatible with MeshFix order 'after'.",
+        "how far inward from the skin you are allowed to scoop out the hidden foam.",
+        "Cost: a larger radius coarsens more of the mesh and speeds FEA, but too large a value can reach geometry you care about.",
+    ),
+    "part_aware_reduction": _info(
+        "Fraction of eligible interior faces removed by topology-preserving, boundary-fixed decimation. 0.75 removed about 74% of eligible faces and 23% of total nodes on the current CAD.",
+        "the percentage of interior tiles you throw away while keeping the boundary stitched in place.",
+        "Cost: a higher fraction makes the mesh smaller and faster; excessive reduction can distort the rigid hub region.",
+    ),
+    "part_aware_min_faces": _info(
+        "Skip interior coarsening unless at least this many faces qualify, avoiding changes to already-coarse meshes.",
+        "not bothering to sweep out a closet that is already empty.",
+        "Cost: none when the mesh is simple; it protects small meshes from unnecessary work or distortion.",
+    ),
+    "drum_radius": _info(
+        "Outer crest radius. It sets the initial drum height (bed height + radius) and helps size the bed.",
+        "the radius of a wheel: it determines how high the axle sits above the ground.",
+        "Cost: a larger radius raises the drum and enlarges the bed/domain, which adds SPH particles and slows the CRM run.",
+    ),
+    "drum_half_length": _info(
+        "Half the drum length along its axis, used for the bed box and CRM placement.",
+        "half the width of the bucket scooping across the trench.",
+        "Cost: a wider bucket needs more soil and more particles, so the CRM run slows roughly with the added volume.",
+    ),
+    "inner_radius": _info(
+        "Nominal cavity radius used to estimate fill ratio and capacity volume.",
+        "the inside diameter of the scoop that determines how much soil it could hold.",
+        "Cost: little by itself, but it feeds capacity and detector estimates that affect what is counted as fill.",
+    ),
+    "capacity_volume": _info(
+        "Known internal cavity volume. Leave blank to derive capacity from the drum radii and length.",
+        "the manufacturer's rated bucket capacity instead of an estimate from its dimensions.",
+        "Cost: none; it changes the denominator of the fill-ratio calculation, not the solver workload.",
+    ),
+    "detector_auto_size": _info(
+        "Automatically size the fill-detector cylinder from the measured drum radius and full length. Uncheck to enter radius and length manually; the 3D adjuster is also available.",
+        "sizing a measuring cup to fit the inside of the bucket before counting what is inside.",
+        "Cost: no meaningful solver cost, but a badly sized detector can make the reported fill ratio misleading.",
+    ),
+    "detector_radius": _info(
+        "Manual nominal fill-detector cylinder radius in metres. One SPH particle radius is eroded from it at runtime.",
+        "the radius of the imaginary cylinder used to decide which grains are inside the bucket.",
+        "Cost: little directly; a larger cylinder simply includes more particles in the fill count.",
+    ),
+    "detector_length": _info(
+        "Manual nominal fill-detector cylinder full axial length in metres. One SPH particle radius is eroded from each end at runtime.",
+        "how long the imaginary measuring cylinder is along the drum axle.",
+        "Cost: little directly; a longer cylinder includes more particles in the fill count.",
+    ),
     # Run & domain
-    "duration": "Total rigid-CRM simulation time. In kinematic mode a full excavation takes about bed_height / descent_speed; force mode has a load-dependent duration.",
-    "fea_duration": "One-way FEA replay length; cannot exceed the CRM load-history duration. FEA replays rigid CRM soil-wrench CSVs, not SPH contact.",
-    "spacing": "Initial SPH particle spacing. Smaller = more particles, higher resolution, slower simulation; ~0.002 m is the default (2x finer than the old 4 mm setting).",
-    "d0_multiplier": "Smoothing-length factor h = multiplier * spacing. 1.0 is the standard choice.",
-    "artificial_viscosity": "Artificial bilateral SPH viscosity. Raise above 0.5 to damp pressure-wave soil ejection at the first drum bite; lower values preserve more dynamic response.",
-    "shifting_ppst_push": "PPST particle-shifting push strength. Lower than 3.0 reduces outward particle drift; 0 disables the push term.",
-    "crm_dt": "Explicit CRM timestep, or 'auto' for a spacing-dependent stable value. Unsafe explicit dt is rejected unless explicitly allowed.",
-    "crm_fps": "How often CRM summary rows are written to summary.csv. Particle CSV and soil-wrench files use their own independent cadences.",
-    "fea_fps": "Independent FEA summary/export cadence. Lower values speed up replay; FEA dynamics still follow FEA dt.",
-    "loads_fps": "Soil-wrench CSV sampling rate for one-way FEA. The FEA driver interpolates by time, so 20 Hz is usually enough; lower values make the CRM solver faster and soil_loads.csv much smaller.",
-    "particle_fps": "Independent particle CSV cadence for ParaView. It does NOT follow CRM summary FPS automatically; set this equal to 'CRM summary FPS' (20) to write one particle file per CRM frame. Lower values sharply reduce CRM disk I/O; 5 Hz is usually enough for visualization.",
-    "particle_writers": "Background processes that write per-frame particle CSV files while the CRM solver continues. Increase only if disk writes remain a bottleneck.",
-    "fea_dt": "Structural integrator timestep for one-way FEA, independent of CRM dt. Default is 0.002 s.",
-    "bed_height": "Depth of the soil bed. The drum starts at bed_height + radius above the ground.",
-    "bed_padding": "Extra soil around the drum footprint per side, as a fraction of drum radius. Increasing it moves the reflective BCE walls outward and raises the estimated/actual SPH particle count.",
-    "active_box": "Drum-centred active SPH domain X,Y,Z in metres (full sizes; X along drum axis, Y lateral, Z vertical). "
-                  "Defaults to the padded bed plus 2 excavator diameters laterally, and bed height + initial "
-                  "excavator height + 2 diameters + padding vertically, so flung particles are not deactivated.",
-    "settle_time": "Time to let the bed settle before excavation motion begins. Longer settling can reduce the first-bite pressure transient that flings soil upward.",
-    "gravity": "Signed global vertical gravitational acceleration in m/s^2 (negative is downward). Always applied to CRM soil and FEA drums; -9.81 is Earth gravity.",
-    "drum_gravity": "Rigid CRM only: also apply global gravity to the drum body. Off preserves older force-descent behavior; FEA drums always follow global gravity. Kinematic descent overrides the drum pose either way.",
-    "descent_mode": "Kinematic prescribes a constant lowering speed. Force applies a downward actuator after settling, holds at the final target, and makes the FEA replay follow the recorded trajectory. Spin stays prescribed in both modes.",
-    "descent_speed": "Vertical lowering speed of the drum into the bed in kinematic mode. 0 keeps it at constant height; ignored by force descent except for duration guidance.",
-    "descent_force_n": "Downward actuator force in newtons after settling in force mode. Soil reaction always acts on the drum; global gravity adds to it only when 'Apply gravity to CRM drum' is enabled. Use 0 with drum gravity enabled for gravity-only descent.",
-    "descent_force_ramp_s": "Linear ramp from zero to the descent actuator force in force mode. 0 applies full force immediately after settling.",
-    "omega": "Drum angular speed magnitude about the spin axis (~3.14 rad/s = 30 rpm). Sign is controlled by Reverse spin.",
-    "reverse_spin": "Flip rotation direction if the CAD excavator spins the wrong way. Signed omega is written as negative.",
-    "spin_axis": "Global axis the drum spins about during excavation (X for the reference drum orientation).",
-    "solver": "One-way FEA linear solver: pardiso-mkl is default; sparse-lu/qr are fallbacks; gmres is diagnostic only.",
-    "num_threads": "Thread count for the FEA solver (pardiso-mkl) and the geometry comparison tool's OCC tessellation/fuse.",
-    "load_radius_fraction": "Apply soil loads only to exterior nodes within this fraction of drum radius; 0.95 cuts per-step load work sharply.",
-    "raw_stress_every": "Scan tetrahedra for peak stress every Nth recorded frame; higher is cheaper.",
-    "export_workers": "Number of processes used to write ParaView frame files in parallel.",
+    "duration": _info(
+        "Total simulated time for the rigid CRM excavation. In kinematic mode a full pass down the bed takes roughly bed_height / descent_speed; in force mode the time depends on how fast the drum actually sinks.",
+        "how long you leave the shovel running in the sandbox.",
+        "Cost: a longer run is slower and writes more CSV rows; the particle and wrench cadences set how much extra disk space those rows use.",
+    ),
+    "fea_duration": _info(
+        "Length of the one-way FEA replay; it cannot exceed the recorded CRM load history. FEA replays the rigid soil-wrench CSV, not SPH particle contact.",
+        "rewinding a dashcam recording of the dig to study only the first part of the trip.",
+        "Cost: each replayed second costs FEA solver time; the stress export stride can dominate that cost if full 3D VTK is on.",
+    ),
+    "spacing": _info(
+        "Initial SPH particle spacing in metres. Smaller means more grains, sharper soil detail, and a slower run; 0.002 m is the default, twice as fine as the old 0.004 m setting.",
+        "the size of the grains in your sandbox: switching from marbles to sand gives finer detail but far more grains to track.",
+        "Cost: particle count grows roughly with the inverse cube of spacing, so halving it can mean about eight times more particles, slower steps, and much larger CSV files.",
+    ),
+    "d0_multiplier": _info(
+        "Smoothing-length factor h = multiplier x spacing. 1.0 is the standard choice for this CRM setup.",
+        "how wide a blurred brush each grain uses to feel its neighbours: a wider brush sees farther but smears detail.",
+        "Cost: larger values make each particle interact with more neighbours, slowing each step; very small values can make the soil numerically noisy.",
+    ),
+    "artificial_viscosity": _info(
+        "Artificial bilateral SPH viscosity. Raise above 0.5 to damp pressure waves that eject soil at the first drum bite; lower values keep more dynamic response.",
+        "adding a little honey to the sand so the first shove does not splash grains across the table.",
+        "Cost: little direct cost; it changes stability and dynamic response more than runtime.",
+    ),
+    "shifting_ppst_push": _info(
+        "PPST particle-shifting push strength. Below 3.0 it reduces outward particle drift; 0 disables the push term.",
+        "how firmly a gentle brush sweeps grains back into a tidy pack instead of letting them spread outward.",
+        "Cost: little direct cost; it mainly affects particle order, stability, and how cleanly the bed holds together.",
+    ),
+    "crm_dt": _info(
+        "Explicit CRM integration timestep in seconds, or 'auto' for a stable value derived from particle spacing. Unsafe explicit values are rejected unless explicitly allowed.",
+        "the frame interval of a high-speed camera: shorter frames catch fast motion but need many more frames.",
+        "Cost: this is the main runtime dial. Halving dt roughly doubles the number of solver steps; 'auto' keeps a stable, spacing-aware value.",
+    ),
+    "crm_fps": _info(
+        "How often CRM summary rows are written to summary.csv. Particle CSV extraction happens inside this same record step, so particle output cannot be more frequent than this even if particle FPS is set higher. Soil-wrench CSV has its own cadence.",
+        "how often you jot down the score in a notebook while the machine runs; the grain photos are taken during those same visits.",
+        "Cost: higher values add metric rows and particle extraction, so lower values save CPU and I/O; the physics advances at CRM dt, not this cadence.",
+    ),
+    "fea_fps": _info(
+        "Independent FEA summary and export cadence. Lower values speed up the replay; the structural dynamics still advance at FEA dt.",
+        "how often you photograph the bending drum during the replay, separate from how fast the replay itself runs.",
+        "Cost: fewer recorded frames mean fewer stress scans and VTU writes; the solve itself is unchanged.",
+    ),
+    "loads_fps": _info(
+        "Sampling rate in Hz for the soil-wrench CSV used by one-way FEA. The FEA driver interpolates by time, so 20 Hz is usually enough.",
+        "how frequently you sample a force gauge and write the readings in a logbook.",
+        "Cost: lower values make the CRM solver write less and shrink soil_loads.csv; too low can miss sharp force peaks.",
+    ),
+    "particle_fps": _info(
+        "Particle CSV cadence for ParaView in Hz. It has its own field but is capped by CRM summary FPS, because particle snapshots are written during the summary record step. Setting it to 20 matches one particle file per CRM frame; 5 Hz is usually plenty for a movie.",
+        "how often you photograph the whole sand bed, but only when you also visit the notebook to write a score.",
+        "Cost: this is a major disk-I/O dial. Lower values sharply reduce particle CSV writes; raising it above CRM summary FPS has no effect.",
+    ),
+    "particle_writers": _info(
+        "Number of background processes that write per-frame particle CSV files while the CRM solver keeps running.",
+        "extra clerks photocopying the sand-bed logs while the main experiment continues.",
+        "Cost: raise only if disk writes are still a bottleneck; each extra writer uses memory and CPU and helps only up to your disk's speed limit.",
+    ),
+    "fea_dt": _info(
+        "Structural integrator timestep for one-way FEA in seconds, independent of CRM dt. Default is 0.002 s.",
+        "the shutter interval of the slow-motion camera filming the drum's bending.",
+        "Cost: smaller values mean more FEA steps and a slower replay; too large can miss the structural vibration.",
+    ),
+    "bed_height": _info(
+        "Depth of the soil bed. The drum starts at bed_height + radius above the ground.",
+        "how deep you fill the sandbox before pushing the shovel in.",
+        "Cost: a deeper bed adds particles and lengthens the descent, so both the solve and the file sizes grow.",
+    ),
+    "bed_padding": _info(
+        "Extra soil around the drum footprint on each side, as a fraction of drum radius. Raising it pushes the reflective BCE walls outward and increases the particle count.",
+        "leaving a wider border of sand around the dig so stray grains do not hit the box wall right away.",
+        "Cost: more padding means more particles, slower steps, and larger particle CSV files.",
+    ),
+    "active_box": _info(
+        "Drum-centred active SPH domain size X,Y,Z in metres (full sizes; X lies along the drum axis only for the default X spin axis, Y is lateral, Z vertical). Defaults to the padded bed plus two excavator diameters laterally and the bed plus drum height plus two diameters vertically, so flung particles are not deactivated.",
+        "the invisible follow-box around the sandbox inside which grains stay active; grains leaving it are frozen in place.",
+        "Cost: a bigger box lets you follow ejected soil but can add particles and slow the run; too small a box silently freezes grains in mid-air.",
+    ),
+    "settle_time": _info(
+        "Time allowed for the bed to settle before excavation motion starts. Longer settling can reduce the first-bite pressure spike that flings soil upward.",
+        "letting the sand settle flat after pouring it in, before you drag the shovel through.",
+        "Cost: settling is simulated time, so a longer settle makes the run slower, but it can make the first bite more realistic.",
+    ),
+    "gravity": _info(
+        "Signed global vertical acceleration in m/s^2; negative is downward and -9.81 is Earth gravity. Applied to CRM soil and FEA drums.",
+        "the pull of the Earth on the loose soil and the drum.",
+        "Cost: none directly; changing it changes soil settling and loads rather than the workload.",
+    ),
+    "drum_gravity": _info(
+        "Rigid CRM only: also apply global gravity to the drum body. Off preserves the older force-descent behaviour; FEA drums always follow global gravity. Kinematic descent overrides the drum pose either way.",
+        "deciding whether the shovel's own weight helps push it into the soil or only the actuator does.",
+        "Cost: none directly; it changes descent physics and the recorded loads, not the solver workload.",
+    ),
+    "descent_mode": _info(
+        "Kinematic prescribes a constant lowering speed; force applies a downward actuator after settling and holds at the final target, and its FEA replay follows the recorded trajectory. Spin is prescribed in both modes.",
+        "lowering the shovel by a fixed hand motion versus letting its weight press down until the soil stops it.",
+        "Cost: force mode records a real load history and can need a longer duration; kinematic mode is simpler and usually faster to interpret.",
+    ),
+    "descent_speed": _info(
+        "Vertical lowering speed of the drum into the bed in kinematic mode, in m/s. 0 holds constant height. Force descent ignores it except for duration guidance.",
+        "how fast you lower the shovel by hand into the sand.",
+        "Cost: a slower descent needs a longer simulated duration, so it costs more steps; faster descents can excite sharper impact transients.",
+    ),
+    "descent_force_n": _info(
+        "Downward actuator force in newtons after settling, in force mode. Soil reaction always acts on the drum; global gravity adds to it only when 'Apply gravity to CRM drum' is on. Use 0 with drum gravity enabled for gravity-only descent.",
+        "how hard you press down on the shovel handle after setting it on the soil.",
+        "Cost: none directly; larger forces change penetration depth, loads, and possibly the duration needed.",
+    ),
+    "descent_force_ramp_s": _info(
+        "Linear ramp in seconds from zero to the descent actuator force in force mode. 0 applies full force immediately after settling.",
+        "easing onto the shovel handle instead of dropping your full weight on it at once.",
+        "Cost: none directly; a ramp can smooth the first bite and reduce the pressure spike that flings soil.",
+    ),
+    "omega": _info(
+        "Drum angular speed magnitude about the spin axis in rad/s; about 3.14 rad/s is 30 rpm. The sign comes from Reverse spin.",
+        "how fast the bucket wheel turns: a higher number means more revolutions each second.",
+        "Cost: none directly; very fast spin can need a smaller timestep for stability, which would slow the run.",
+    ),
+    "reverse_spin": _info(
+        "Flip the drum's rotation direction if the imported CAD spins the wrong way. Signed omega is then written as negative.",
+        "swapping which way you turn the crank so the bucket scoops rather than dumps.",
+        "Cost: none; it only changes the sign of the spin, not the solver workload.",
+    ),
+    "spin_axis": _info(
+        "Global axis the drum spins about during excavation; X for the reference drum orientation.",
+        "which axle the wheel is mounted on: the wheel turns around this line.",
+        "Cost: none directly, but choosing the wrong axis makes the drum tumble instead of scoop and wastes a run.",
+    ),
+    "solver": _info(
+        "Linear solver for the one-way FEA replay: pardiso-mkl is the fast default; sparse-lu and sparse-qr are slower fallbacks; gmres is diagnostic only and does not enforce spindle constraints accurately.",
+        "choosing the tool that tightens the bolts: a powered torque wrench, a hand ratchet, or a rough quick driver.",
+        "Cost: large. The documented 0.2 s case took 28 s with Pardiso versus 309 s with SparseLU. Sparse modes also add library paths in the launcher; gmres is not for engineering results.",
+    ),
+    "num_threads": _info(
+        "Thread count for the Pardiso-MKL FEA solver and for the geometry preview tool's CAD tessellation and fuse. Default 8.",
+        "how many pairs of hands work on the calculation at once.",
+        "Cost: helps Pardiso up to about 8 threads on a 16-core machine and speeds CAD meshing; Eigen SparseLU/QR factorization stays single-threaded, so extra threads do not help those solvers.",
+    ),
+    "load_radius_fraction": _info(
+        "Inner cutoff for applying the recorded soil wrench in FEA: exterior nodes at a radius of at least this fraction of the drum radius receive the load. 0.95 limits it to a narrow outer band.",
+        "where you stick force stickers on the bucket rim: only the outer band, not the whole face.",
+        "Cost: 0.95 maps loads to fewer nodes and is cheaper per step; 0.8 spreads load over more of the rim and costs more. It does not change the recorded wrench or the reported metrics.",
+    ),
+    "raw_stress_every": _info(
+        "Cadence for an extra unfiltered raw peak-von-Mises scan, every Nth recorded frame; 0 checks only the first and last frames. The ordinary filtered stress readout is still computed every frame.",
+        "how often you stop for a high-resolution hot-spot photograph, on top of the routine gauge reading.",
+        "Cost: a higher value means fewer full-mesh scans and a faster replay; it does not change the physics or the filtered max_von_mises_pa column.",
+    ),
+    "export_workers": _info(
+        "Number of worker processes that write ParaView frame files in parallel after a study. Default 4.",
+        "how many photocopiers stamp frames at the same time.",
+        "Cost: more workers help until the CPU, memory, or disk is saturated; each worker also has a one-time startup cost. The standalone exporter defaults to 1.",
+    ),
     # Output & export
-    "save_particles": "Write CRM particle positions as CSV at the particle output FPS. Needed for ParaView particle spheres; uses disk space.",
-    "fea_export_vtk": "Write the full 3D FEA stress/deformation animation as per-frame VTU files under fea/vtk/frames/ with fea/vtk/fea.pvd. This adds a stress scan and file write per recorded frame and can dominate runtime/disk, so it is off by default. Scalar FEA summaries are always written.",
-    "fea_vtk_stride": "Export every Nth recorded FEA frame to the 3D VTU animation. 1 means every frame (full animation); the final frame is always included. Higher values reduce cost.",
-    "tools_show_fea_3d": "Load a structurally usable multi-frame 3D FEA stress/deformation PVD in ParaView when the study produced one. The viewer rechecks the PVD and frame files, so a lone t=0 frame is ignored. On by default; uncheck to view only CRM particles. This is the 3D overlay only; it does not enable the one-way FEA history charts. Requires the 'Export full 3D FEA stress animation' option (or an existing usable multi-frame fea.pvd).",
-    "tools_show_fea_charts": "Display the one-way FEA scalar stress and deformation history XY charts in ParaView. Off by default; check to opt in. Unchecking clears an inherited PYCHRONO_FEA_CHARTS setting. This is independent of the 3D FEA overlay, and --no-fea still suppresses all FEA views.",
-    "export_vtk": "Create separate ParaView series (crm_particles.pvd, excavator.pvd, optional fea.pvd) plus combined.pvd and a manifest after the run.",
-    "paraview_stride": "Export every Nth CRM frame for both particles and excavator. Use 1 for all frames; all series stay time-aligned.",
-    "paraview_particle_stride": "Export every Nth CRM particle frame independently of the excavator series. Use 0 to follow the general ParaView export stride, or >1 to reduce the much larger particle series.",
-    "paraview_particle_render_stride": "Render only every Nth particle in each exported frame. Use 1 for all particles; >1 reduces particle file size and ParaView load without skipping frames.",
-    "open_results": "Open the output folder when the study finishes.",
-    "open_paraview": "Open the preconfigured 3D view in the full ParaView GUI after a successful run (pvpython render window is the fallback).",
+    "save_particles": _info(
+        "Write CRM particle positions to CSV at the particle output FPS. Needed for ParaView particle spheres and the Output Preview cloud.",
+        "keeping the individual sand-grain logbook, not just the run's scorecard.",
+        "Cost: this is the largest disk-I/O item in the CRM stage. Old particle frames are cleared when a run starts, and lower particle FPS cuts writes sharply.",
+    ),
+    "fea_export_vtk": _info(
+        "Write the full 3D FEA stress/deformation animation as per-frame VTU files under fea/vtk/frames/ with fea/vtk/fea.pvd. Off by default; scalar FEA summaries are always written.",
+        "filming the drum bending in 3D instead of only noting its peak number on a sheet.",
+        "Cost: this can dominate FEA runtime and disk because every recorded frame gets a tetrahedral stress scan plus a VTU write. Turning it off retires the previous 3D series but keeps fea/summary.csv.",
+    ),
+    "fea_vtk_stride": _info(
+        "Export every Nth recorded FEA frame to the 3D VTU animation; 1 means every frame, and the final frame is always included. Used only when full 3D FEA export is on.",
+        "how many movie frames you skip while still keeping the final snapshot.",
+        "Cost: a larger stride means fewer VTU files, fewer stress scans, and less disk use; 1 gives the complete animation.",
+    ),
+    "tools_show_fea_3d": _info(
+        "When the Tools tab opens ParaView, load a revalidated multi-frame 3D FEA stress/deformation PVD if one exists. A lone t=0 frame is ignored. On by default; this is the stress overlay only, not the FEA history charts.",
+        "whether to hang the stress-coloured drum overlay on the 3D wall when you inspect results.",
+        "Cost: no simulation cost, but ParaView spends time rechecking the PVD and frames. Note that 'Open ParaView after run' always requests this overlay when a usable one exists.",
+    ),
+    "tools_show_fea_charts": _info(
+        "Display one-way FEA scalar stress and deformation history as XY charts in ParaView. Off by default; unchecking also clears an inherited PYCHRONO_FEA_CHARTS setting. Independent of the 3D overlay, and --no-fea suppresses all FEA views.",
+        "whether to plot the stress and twist graph beside the 3D movie.",
+        "Cost: no simulation cost; the viewer builds the chart table from fea_summary.csv on demand.",
+    ),
+    "export_vtk": _info(
+        "Run a final export stage that writes crm_particles.pvd, excavator.pvd, crm_animation.pvd/combined.pvd, fea_summary.csv, and a manifest. The combined series contains CRM particles and rigid poses only, never FEA.",
+        "packing the run into a flipbook that ParaView can page through frame by frame.",
+        "Cost: adds an export stage and disk space. CRM particle and excavator frames are regenerated on every export, while existing FEA VTU frames are validated rather than rewritten.",
+    ),
+    "paraview_stride": _info(
+        "Export every Nth CRM frame for both particles and excavator in the post-run export; 1 exports all frames and all series stay time-aligned.",
+        "how often you take a page from the simulation flipbook.",
+        "Cost: a higher stride means a faster export and a much smaller PVD/VTP set; the final frame is still included.",
+    ),
+    "paraview_particle_stride": _info(
+        "Export every Nth CRM particle frame independently of the excavator series. 0 follows the general ParaView export stride; values above 1 thin out the much larger particle series.",
+        "letting the sand pages flip at a different rate from the drum pages.",
+        "Cost: particle frames are far larger than rigid poses, so a stride above 1 sharply cuts export time and disk use.",
+    ),
+    "paraview_particle_render_stride": _info(
+        "Render only every Nth particle within each exported frame; 1 keeps all particles. Frame count is unchanged.",
+        "drawing every Nth grain on a page so the flipbook stays light.",
+        "Cost: smaller VTP files and faster ParaView loading, with no change to the number of frames.",
+    ),
+    "open_results": _info(
+        "Record the choice to open the output folder when the run finishes. The command-line wizard honours it; the GUI currently saves the setting but does not launch a file manager at the end of its own run.",
+        "auto-opening the results drawer when the job ends.",
+        "Cost: no simulation effect, just a file-manager launch where it is honoured.",
+    ),
+    "open_paraview": _info(
+        "Open the preconfigured 3D view in the full ParaView GUI after a successful run; a pvpython render window is the fallback.",
+        "switching on the 3D projector automatically when the job finishes.",
+        "Cost: no simulation effect, but it starts a heavy external app and only runs if the study produced a paraview folder.",
+    ),
     # Tools tab
-    "tools_study_dir": "Study/output directory to inspect. Use the folder containing study_config.json or a previous Output_* run.",
-    "tools_stride": "Export every Nth CRM frame when using the Export ParaView VTK/PVD tool. Use 1 for all frames. All series stay time-aligned.",
-    "tools_particle_stride": "Export every Nth CRM particle frame in the Export ParaView VTK/PVD tool. Use 0 to follow the quick export stride, or >1 to reduce the particle series independently.",
-    "tools_particle_render_stride": "Render only every Nth particle in each exported frame in the Export ParaView VTK/PVD tool. Use 1 for all particles; >1 reduces particle file size and ParaView load without skipping frames.",
-    "tools_camera_orbit": "Automatically add a ParaView camera track that orbits the excavator drum while the time animation plays. The track follows the drum center from the excavator frames.",
-    "tools_orbit_speed": "Camera revolutions per simulation second. Positive orbits one way, negative reverses. 0.1 means one revolution every 10 seconds of study time.",
-    "tools_orbit_radius": "Orbit radius in meters around the vertical Z axis. Use 0 to auto-fit the excavator bounds with doubled clearance; the orbit center is also lowered by one third of the excavator's bounding radius. Inclination is the camera elevation above the orbit plane.",
-    "tools_orbit_inclination": "Camera elevation above the horizontal orbit plane in degrees. Clamped to +/-80 degrees to avoid an unstable up direction.",
-    "tools_orbit_start_angle": "Starting camera azimuth in degrees. Leave blank to begin at the current camera angle.",
-    "tools_orbit_keyframes": "Number of camera keyframes. Use 0 to choose automatically from orbit speed and animation duration; more keyframes make fast orbits smoother.",
-    "tools_workers": "Number of worker processes used by the Export ParaView VTK/PVD tool. Match it to available CPU cores; 4 is a good starting point.",
+    "tools_study_dir": _info(
+        "Study/output directory the Tools tab inspects. Point it at the folder containing study_config.json or a previous Output_* run.",
+        "which filing-cabinet drawer the Tools tab reads from.",
+        "Cost: none until a tool runs; a wrong folder makes export or viewing fail with a clear status message.",
+    ),
+    "tools_stride": _info(
+        "Export every Nth CRM frame with the Tools 'Export ParaView VTK/PVD' button; 1 exports all frames and keeps the series time-aligned.",
+        "the same flipbook stride, but for the manual export button.",
+        "Cost: a higher stride means a faster, smaller manual export; the final frame is still included.",
+    ),
+    "tools_particle_stride": _info(
+        "Export every Nth CRM particle frame with the Tools export button. 0 follows the quick export stride; values above 1 thin out the particle series independently.",
+        "the sand-page flip rate for the manual export button.",
+        "Cost: a value above 1 reduces particle export time and disk use without touching the drum poses.",
+    ),
+    "tools_particle_render_stride": _info(
+        "Render only every Nth particle in each frame of the Tools export; 1 keeps all particles. Frame count is unchanged.",
+        "drawing every Nth grain on a manually exported page.",
+        "Cost: smaller VTP files and lighter ParaView scenes, with no change to frame count.",
+    ),
+    "tools_camera_orbit": _info(
+        "Add a ParaView camera track that automatically orbits the drum while the time animation plays, following the drum centre from the excavator frames. On by default.",
+        "a motorized turntable for the ParaView camera.",
+        "Cost: a tiny keyframe calculation, with no simulation or disk effect unless you record a movie.",
+    ),
+    "tools_orbit_speed": _info(
+        "Camera revolutions per simulation second; positive values orbit one way, negative reverse. 0.1 means one lap every 10 seconds of study time.",
+        "how many laps the turntable makes for each simulated second.",
+        "Cost: none for the simulation; faster orbits generate more keyframes to stay smooth.",
+    ),
+    "tools_orbit_radius": _info(
+        "Orbit radius in metres around the vertical Z axis. 0 auto-fits the excavator using at least five times its radial extent, 2.4 times its axial extent, or 0.25 m, and lowers the orbit centre by one third of the bounding radius.",
+        "how far back the tripod stands; 0 lets the app frame the drum for you.",
+        "Cost: visual only; auto-fit samples the excavator bounds once at the first frame.",
+    ),
+    "tools_orbit_inclination": _info(
+        "Camera elevation above the horizontal orbit plane in degrees, clamped to +/-80 so the camera's up direction stays stable.",
+        "how high the tripod is aimed above the tabletop.",
+        "Cost: visual only; no simulation or file-size effect.",
+    ),
+    "tools_orbit_start_angle": _info(
+        "Starting camera azimuth in degrees. Leave blank to begin the orbit at the current camera angle.",
+        "where on the compass the camera begins its lap.",
+        "Cost: visual only; it just shifts the starting point of the orbit.",
+    ),
+    "tools_orbit_keyframes": _info(
+        "Number of camera keyframes holding the orbit path; 0 chooses automatically from orbit speed and animation duration, clamped to 24-360. More keyframes smooth fast orbits.",
+        "how many pins hold the turntable's path in place.",
+        "Cost: a slightly longer ParaView setup for more keyframes; visual only.",
+    ),
+    "tools_workers": _info(
+        "Worker processes used by the Tools export button. Match it to available CPU cores; 4 is a good starting point.",
+        "how many photocopiers stamp frames at once for the manual export.",
+        "Cost: more workers use more CPU and memory and help only until the disk or cores saturate.",
+    ),
 }
 
 PARAM_INFO.update({
-    f"soil_{key}": text for key, text in {
-        "density": "Regolith bulk density (kg/m^3).",
-        "youngs_modulus": "Soil elastic stiffness (Pa) for CRM contact response.",
-        "poisson_ratio": "Soil lateral/axial strain ratio.",
-        "friction": "Static friction coefficient (mu_s) at particle contacts.",
-        "cohesion": "Cohesive shear strength (Pa).",
-        "grain_diameter": "Physical grain diameter (m) used by the rheology model.",
-    }.items()
+    "soil_density": _info(
+        "Regolith bulk density in kg/m^3: the mass of soil per unit volume, including the air gaps between grains.",
+        "how heavy a full bucket of this soil feels compared with a bucket of water or sand.",
+        "Cost: none directly, but denser soil raises contact forces and can demand a smaller timestep for stability.",
+    ),
+    "soil_youngs_modulus": _info(
+        "Soil elastic stiffness in Pa for the CRM contact response: how much the grains resist being squeezed together.",
+        "the difference between pressing a foam ball and a rubber ball of the same size.",
+        "Cost: stiffer soil gives sharper contact forces that may need a smaller timestep, slowing the run.",
+    ),
+    "soil_poisson_ratio": _info(
+        "Soil lateral-to-axial strain ratio: how much the material bulges sideways when compressed.",
+        "how much a squeezed sponge puffs out at the sides instead of only getting shorter.",
+        "Cost: barely any direct cost; it shapes the contact response, not the particle count.",
+    ),
+    "soil_friction": _info(
+        "Static friction coefficient (mu_s) at particle contacts: how strongly grains resist sliding past one another. The driver also uses this value for high-inertia friction (mu_2) because the GUI has no separate field for it.",
+        "the difference between dragging a box over ice and over rough concrete, at both slow and fast sliding speeds.",
+        "Cost: none directly; it strongly affects the bed's angle of repose, flow, and the torque the drum needs.",
+    ),
+    "soil_cohesion": _info(
+        "Cohesive shear strength in Pa: how strongly grains stick together even without being pressed.",
+        "the stickiness that lets damp sand hold a sandcastle wall, unlike dry sand.",
+        "Cost: none directly; it changes excavation loads and the shape of the trench walls.",
+    ),
+    "soil_grain_diameter": _info(
+        "Physical grain diameter in metres used by the rheology model, distinct from the SPH particle spacing.",
+        "the size of the individual sand grains that make up the bulk soil.",
+        "Cost: none directly; it feeds the rheology rather than changing how many SPH particles are created.",
+    ),
 })
 PARAM_INFO.update({
-    f"pla_{key}": text for key, text in {
-        "youngs_modulus": "Drum material stiffness (Pa), e.g. PLA ~3 GPa.",
-        "poisson_ratio": "Drum material lateral/axial strain ratio.",
-        "density": "Drum material density (kg/m^3).",
-        "rayleigh_beta": "Rayleigh stiffness-proportional damping (s) to stabilize vibration.",
-    }.items()
+    "pla_youngs_modulus": _info(
+        "Drum material stiffness in Pa for one-way FEA; PLA is about 3 GPa by default.",
+        "how rigid rather than rubbery the plastic bucket feels when you flex it.",
+        "Cost: a stiffer drum changes deflection and stress and can be harder to solve numerically; no file-size effect.",
+    ),
+    "pla_poisson_ratio": _info(
+        "Drum material lateral-to-axial strain ratio for the FEA solid model; PLA is about 0.38.",
+        "how much the plastic narrows when you stretch it lengthwise.",
+        "Cost: material response only, with a tiny effect on how well the FEA equations condition.",
+    ),
+    "pla_density": _info(
+        "Drum material density in kg/m^3 for FEA; PLA is about 1240 by default.",
+        "how heavy a same-sized plastic part is in your hand.",
+        "Cost: sets nodal masses, inertia, and gravity loading in FEA; no disk impact.",
+    ),
+    "pla_rayleigh_beta": _info(
+        "Rayleigh stiffness-proportional damping in seconds to settle structural vibration in FEA.",
+        "the shock absorbers that quiet a ringing drum after a shove.",
+        "Cost: little direct cost; too much damping can over-smooth the response you are trying to measure.",
+    ),
 })
 
 DEFAULT_FILE = ROOT / "study_gui_defaults.json"
@@ -268,18 +634,61 @@ SHIPPED_SETTINGS: dict[str, object] = {
 }
 
 SETTINGS_INFO: dict[str, str] = {
-    "ui_scale": "Whole-GUI density factor for widget padding and Tk scaling. 1.0 uses the system "
-                "density; 0.75-2.0 changes spacing and widget metrics. Text size is controlled separately.",
-    "font_size": "Text size in points (7-24). Applies directly to labels, entries, buttons, and log panels immediately.",
-    "window_width": "Window width in pixels used the next time the GUI starts (640-3840).",
-    "window_height": "Window height in pixels used the next time the GUI starts (480-2160).",
-    "text_color": "Foreground text color as #RRGGBB. Pick... opens the system color dialog.",
-    "dark_mode": "Use a dark interface palette. If the text color is still the default, it switches to a light shade automatically.",
-    "show_output_preview": "Show the lightweight CRM/FEA Output Preview tab. It reads study CSVs directly and draws a bounded 3D subsample of particles on a Tk canvas.",
-    "preview_particle_limit": "In the Output Preview, reservoir-sample at most this many SPH particles from each displayed frame. Every row is read, so the canvas also shows the true simulated particle count. Default 5,000; raise for more detail (slower drawing), lower for a sparser cloud.",
-    "preview_frame_stride": "In the Output Preview, show only every Nth discovered particle CSV frame in the slider and Play loop. 1 shows all frames.",
-    "preview_particle_size": "Output Preview marker diameter in pixels for CRM particle points. Increase for a denser-looking cloud; decrease to resolve individual points.",
-    "preview_line_width": "Output Preview line width in pixels for the particle-view drum/grid and for CRM/FEA timeline traces. Applies immediately without reloading the study.",
+    "ui_scale": _info(
+        "Whole-GUI density factor for widget padding and Tk scaling, from 0.75 to 2.0. 1.0 uses the system density; text size is controlled separately.",
+        "how widely the knobs are spaced on the dashboard.",
+        "Cost: a rendering choice with negligible startup cost; it never changes the simulation or its files.",
+    ),
+    "font_size": _info(
+        "Text size in points from 7 to 24 for labels, entries, buttons, log panels, and the Docs reader. Applied immediately.",
+        "the size of the printed labels on the dashboard.",
+        "Cost: drawing only; larger text can make panes scroll more but has no simulation effect.",
+    ),
+    "window_width": _info(
+        "Window width in pixels from 640 to 3840. Apply now resizes the open window; the saved value is used at the next launch.",
+        "how wide the dashboard frame is on your desk.",
+        "Cost: drawing only; a very wide window needs more screen space but does not affect the run.",
+    ),
+    "window_height": _info(
+        "Window height in pixels from 480 to 2160. Apply now resizes the open window; the saved value is used at the next launch.",
+        "how tall the dashboard frame is on your desk.",
+        "Cost: drawing only; a very tall window needs more screen space but does not affect the run.",
+    ),
+    "text_color": _info(
+        "Foreground text colour as #RRGGBB; the Pick... button opens the system colour dialog.",
+        "the colour of the ink used for the dashboard labels.",
+        "Cost: drawing only; an invalid value falls back to the default colour.",
+    ),
+    "dark_mode": _info(
+        "Use a dark interface palette. If the text colour is still the default, it switches to a light shade automatically.",
+        "repainting the whole dashboard in dark colours for a dim room.",
+        "Cost: drawing only; it never changes the simulation or its outputs.",
+    ),
+    "show_output_preview": _info(
+        "Show the lightweight Output Preview tab. It reads study CSVs directly and draws a bounded 3D subsample of particles on a Tk canvas, with no VTK involved.",
+        "whether the quick-look glass panel stays pinned to the dashboard.",
+        "Cost: when enabled, the tab is built at startup and refreshed after steps; hiding it skips that refresh work.",
+    ),
+    "preview_particle_limit": _info(
+        "Reservoir-sample at most this many SPH particles from each displayed preview frame, from 1 to 250,000. Every row is still read, so the actual particle count is shown. Default 5,000.",
+        "how many sand dots you actually paint on the quick-look pane.",
+        "Cost: a higher limit makes redraws slower and uses more memory; the CSV rows are read either way.",
+    ),
+    "preview_frame_stride": _info(
+        "Show only every Nth discovered particle CSV frame in the preview slider and Play loop, from 1 to 50. 1 shows all frames.",
+        "how many flipbook pages you leave in the quick-look viewer.",
+        "Cost: a higher stride means fewer frames to step through; no files or simulation results are changed.",
+    ),
+    "preview_particle_size": _info(
+        "Marker diameter in pixels for CRM particle points in the Output Preview, from 1 to 12.",
+        "the dot size of each painted sand grain.",
+        "Cost: drawing only; larger dots make a denser-looking cloud, smaller dots resolve individual grains.",
+    ),
+    "preview_line_width": _info(
+        "Line width in pixels for the preview drum/grid and CRM/FEA timeline traces, from 1 to 6. Applied immediately without reloading the study.",
+        "the thickness of the drawn grid lines and trace curves.",
+        "Cost: drawing only; there is no simulation or file-size effect.",
+    ),
 }
 
 GENERATED_DOC_ID = "<generated>"
@@ -1728,7 +2137,9 @@ class StudyGUI:
         lines = [
             "# GUI parameter reference",
             "",
-            "These are the help strings shown throughout the study wizard and the Settings tab.",
+            "These are the help strings shown throughout the study wizard and the Settings tab. "
+            "Each entry explains what the value controls, gives a physical or visual analogy, "
+            "and notes runtime, disk, or display cost where it matters.",
             "",
             "## Study parameters",
             "",

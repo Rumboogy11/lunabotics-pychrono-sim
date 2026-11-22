@@ -51,7 +51,7 @@ One row per CRM output frame (`--fps`). The columns fall into groups:
 - **Energy:** `fluid_torque_x_nm`, `input_power_w`, `work_j`, `specific_energy_j_kg`.
 - **Force-descent telemetry** (only in force mode): `descent_mode`, `descent_state`, `actuator_force_n`, `vertical_speed_m_s`.
 
-`fill_ratio_mass` is the primary design metric. Both fill ratios and the particle flags use the *same* instantaneous `excavated` set: SPH markers above the initial bed and fully inside the detector cylinder eroded by one particle radius. Capacity remains the nominal cavity volume, so compare runs with the same capacity convention.
+`fill_ratio_mass` is the primary design metric. Both fill ratios and the particle flags use the *same* instantaneous `excavated` set: SPH markers fully inside the detector cylinder eroded by one particle radius. Capacity remains the nominal cavity volume, so compare runs with the same capacity convention. `lifted` is reported separately as a diagnostic and does not gate fill.
 
 ### `crm/soil_loads.csv`
 
