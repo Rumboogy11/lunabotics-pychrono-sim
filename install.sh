@@ -139,10 +139,14 @@ if [[ -f /etc/os-release ]]; then
   os_like="${ID_LIKE:-}"
 fi
 
-sudo_cmd=()
+# System packages are the only commands that need elevated privileges. Keep
+# the privilege decision here so pip/conda packages, downloads, git, and the
+# Chrono build always run as the invoking user. Let sudo prompt for a password
+# when the user is not a passwordless sudoer.
+USE_SUDO=0
 if [[ "$EUID" -ne 0 ]]; then
-  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-    sudo_cmd=(sudo -n)
+  if command -v sudo >/dev/null 2>&1; then
+    USE_SUDO=1
   fi
 fi
 
@@ -153,17 +157,24 @@ install_system_packages() {
     warn "server must already exist on the host when system packages are skipped."
     return
   fi
-  if [[ "$EUID" -ne 0 && "${#sudo_cmd[@]}" -eq 0 ]]; then
-    warn "No root/sudo access: skipping system packages."
+  if [[ "$EUID" -ne 0 && "$USE_SUDO" -eq 0 ]]; then
+    warn "sudo is required to install system packages when not running as root: skipping."
     warn "Install git, curl, bzip2, python3, python3-tk, ParaView, Xvfb, and the"
-    warn "Qt/X11/GL runtime libraries manually, or re-run this script as root."
+    warn "Qt/X11/GL runtime libraries manually, or re-run this script with sudo available."
     warn "The project-local env will still be created."
     return
+  fi
+  if [[ "$USE_SUDO" -eq 1 ]]; then
+    log "System package installation may prompt for your sudo password"
   fi
 
   case " $os_like $os_id " in
     *arch*|*cachyos*)
       log "Installing Arch system prerequisites"
+      local -a pacman_cmd=(pacman)
+      if [[ "$USE_SUDO" -eq 1 ]]; then
+        pacman_cmd=(sudo pacman)
+      fi
       packages=(
         git curl bzip2 tar coreutils gawk sed util-linux python tk
         libgl glu libx11 libxext libxrender libxkbcommon libxkbcommon-x11
@@ -173,11 +184,15 @@ install_system_packages() {
       if [[ "$INSTALL_PARAVIEW" -eq 1 ]]; then
         packages+=(paraview)
       fi
-      "${sudo_cmd[@]}" pacman -S --needed --noconfirm "${packages[@]}"
+      "${pacman_cmd[@]}" -S --needed --noconfirm "${packages[@]}"
       ;;
     *debian*|*ubuntu*)
       log "Installing Debian/Ubuntu system prerequisites"
-      "${sudo_cmd[@]}" apt-get update
+      local -a apt_cmd=(apt-get)
+      if [[ "$USE_SUDO" -eq 1 ]]; then
+        apt_cmd=(sudo apt-get)
+      fi
+      "${apt_cmd[@]}" update
       local glib_pkg="libglib2.0-0"
       if apt-cache show libglib2.0-0t64 >/dev/null 2>&1 \
         && ! apt-cache show libglib2.0-0 >/dev/null 2>&1; then
@@ -193,7 +208,7 @@ install_system_packages() {
       if [[ "$INSTALL_PARAVIEW" -eq 1 ]]; then
         packages+=(paraview)
       fi
-      "${sudo_cmd[@]}" apt-get install -y --no-install-recommends "${packages[@]}"
+      "${apt_cmd[@]}" install -y --no-install-recommends "${packages[@]}"
       ;;
     *)
       warn "Unsupported distribution (${os_id:-unknown}); skipping system packages."
