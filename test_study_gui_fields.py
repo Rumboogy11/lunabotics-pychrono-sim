@@ -538,10 +538,11 @@ class PreviewStyleSettingsTest(unittest.TestCase):
 
 
 class GuiScaleSettingsTest(IsolatedGuiDefaultsTest):
-    def test_system_scaling_is_the_shipped_default(self) -> None:
+    def test_normal_scaling_is_the_shipped_default(self) -> None:
         import study_gui as gui
 
-        self.assertEqual(gui.SHIPPED_SETTINGS["ui_scale"], gui.UI_SCALE_AUTO)
+        self.assertEqual(gui.SHIPPED_SETTINGS["ui_scale"], gui.UI_SCALE_DEFAULT)
+        self.assertEqual(gui._setting_scale(0), gui.UI_SCALE_DEFAULT)
 
     def test_scale_setting_round_trip(self) -> None:
         import study_gui as gui
@@ -557,8 +558,9 @@ class GuiScaleSettingsTest(IsolatedGuiDefaultsTest):
         finally:
             gui.SETTINGS_FILE = original
 
-    def test_apply_updates_tk_scaling_and_auto_restores_system_value(self) -> None:
+    def test_apply_scales_actual_font_sizes(self) -> None:
         import tkinter as tk
+        from tkinter import font as tkfont
 
         import study_gui as gui
 
@@ -569,20 +571,21 @@ class GuiScaleSettingsTest(IsolatedGuiDefaultsTest):
             try:
                 with patch.object(gui, "SETTINGS_FILE", settings_file):
                     app = gui.StudyGUI(root)
-                    system_scaling = app._system_scaling
-                    self.assertAlmostEqual(
-                        float(root.tk.call("tk", "scaling")), system_scaling, delta=0.01)
+                    font = tkfont.nametofont("TkDefaultFont")
+                    self.assertEqual(font.actual("size"), 10)
 
                     app.settings_vars["ui_scale"].set("1.5")
                     app._apply_settings_now()
-                    self.assertAlmostEqual(
-                        float(root.tk.call("tk", "scaling")), 1.5, delta=0.01)
+                    self.assertEqual(font.actual("size"), 15)
                     self.assertEqual(app.settings["ui_scale"], 1.5)
 
-                    app.settings_vars["ui_scale"].set("0")
+                    app.settings_vars["ui_scale"].set("0.75")
                     app._apply_settings_now()
-                    self.assertAlmostEqual(
-                        float(root.tk.call("tk", "scaling")), system_scaling, delta=0.01)
+                    self.assertEqual(font.actual("size"), 8)
+
+                    app.settings_vars["ui_scale"].set("1")
+                    app._apply_settings_now()
+                    self.assertEqual(font.actual("size"), 10)
             finally:
                 root.destroy()
 

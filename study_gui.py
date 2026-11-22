@@ -225,10 +225,11 @@ LIGHT_TEXT = "#000000"
 DARK_TEXT = "#F2F2F2"
 UI_SCALE_MIN = 0.75
 UI_SCALE_MAX = 2.0
-UI_SCALE_AUTO = 0.0
+UI_SCALE_DEFAULT = 1.0
+UI_SCALE_LEGACY_AUTO = 0.0
 
 SHIPPED_SETTINGS: dict[str, object] = {
-    "ui_scale": UI_SCALE_AUTO,
+    "ui_scale": UI_SCALE_DEFAULT,
     "font_size": 10,
     "window_width": 1100,
     "window_height": 1080,
@@ -242,8 +243,8 @@ SHIPPED_SETTINGS: dict[str, object] = {
 }
 
 SETTINGS_INFO: dict[str, str] = {
-    "ui_scale": "Whole-GUI scale factor. 0 follows the system Tk scaling; 1.0 is unscaled, and 0.75-2.0 "
-                "enlarges or shrinks fonts and font-sized widgets. Window width/height remain in pixels.",
+    "ui_scale": "Whole-GUI scale factor applied to text and font-sized widgets. 1.0 is normal; "
+                "0.75-2.0 enlarges or shrinks the interface. Window width/height remain in pixels.",
     "font_size": "Base text size (7-24). Applies to labels, entries, buttons, and log panels immediately.",
     "window_width": "Window width in pixels used the next time the GUI starts (640-3840).",
     "window_height": "Window height in pixels used the next time the GUI starts (480-2160).",
@@ -287,21 +288,23 @@ def _setting_int(value: object, label: str, low: int, high: int, default: int, s
 
 
 def _setting_scale(value: object, strict: bool = False) -> float:
-    """Validate the GUI scale: 0 follows the system, otherwise 0.75-2.0."""
+    """Validate the GUI scale, treating the old 0 (auto) value as 1.0."""
     try:
         number = float(str(value).strip())
     except (TypeError, ValueError):
         if strict:
-            raise ValueError("GUI scale must be 0 (system) or a number from 0.75 to 2.0.")
-        return float(UI_SCALE_AUTO)
+            raise ValueError("GUI scale must be a number from 0.75 to 2.0.")
+        return float(UI_SCALE_DEFAULT)
     if not math.isfinite(number):
         if strict:
-            raise ValueError("GUI scale must be 0 (system) or a number from 0.75 to 2.0.")
-        return float(UI_SCALE_AUTO)
-    if number != UI_SCALE_AUTO and not (UI_SCALE_MIN <= number <= UI_SCALE_MAX):
+            raise ValueError("GUI scale must be a number from 0.75 to 2.0.")
+        return float(UI_SCALE_DEFAULT)
+    if number == UI_SCALE_LEGACY_AUTO:
+        return float(UI_SCALE_DEFAULT)
+    if not (UI_SCALE_MIN <= number <= UI_SCALE_MAX):
         if strict:
-            raise ValueError("GUI scale must be 0 (system) or a number from 0.75 to 2.0.")
-        return float(UI_SCALE_AUTO)
+            raise ValueError("GUI scale must be a number from 0.75 to 2.0.")
+        return float(UI_SCALE_DEFAULT)
     return number
 
 
@@ -751,7 +754,6 @@ class StudyGUI:
         self.settings_vars: dict[str, StringVar | BooleanVar] = {}
         self.text_widgets: list[tk.Text] = []
         self.ui_palette: dict[str, str] = {}
-        self._system_scaling = self._tk_scaling()
         self._apply_ui_settings(self.settings)
         self.proc: subprocess.Popen | None = None
         self.log_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
@@ -766,13 +768,6 @@ class StudyGUI:
         self._update_particle_estimate()
         self.root.after(100, self._drain_log)
         self.root.after(100, self._drain_tools_log)
-
-    def _tk_scaling(self) -> float:
-        """Read Tk's current pixel-per-point scaling, falling back to 1.0."""
-        try:
-            return float(self.root.tk.call("tk", "scaling"))
-        except (tk.TclError, TypeError, ValueError):
-            return 1.0
 
     def _v(self, key: str, value, is_bool: bool = False, target=None):
         store = target if target is not None else self.vars
@@ -1595,7 +1590,7 @@ class StudyGUI:
             "preview_particle_size": StringVar(value=str(values["preview_particle_size"])),
             "preview_line_width": StringVar(value=str(values["preview_line_width"])),
         }
-        r = self._settings_row(p, r, "GUI scale (0 = system)", "ui_scale", kind="scale")
+        r = self._settings_row(p, r, "GUI scale", "ui_scale", kind="scale")
         r = self._settings_row(p, r, "Text size", "font_size", kind="size")
         r = self._settings_row(p, r, "Window width (px)", "window_width")
         r = self._settings_row(p, r, "Window height (px)", "window_height")
@@ -1635,7 +1630,7 @@ class StudyGUI:
             ttk.Spinbox(parent, from_=7, to=24, width=8,
                         textvariable=var).grid(row=r, column=1, sticky=W, padx=4)
         elif kind == "scale" and hasattr(ttk, "Spinbox"):
-            ttk.Spinbox(parent, from_=UI_SCALE_AUTO, to=UI_SCALE_MAX,
+            ttk.Spinbox(parent, from_=UI_SCALE_MIN, to=UI_SCALE_MAX,
                         increment=0.05, width=8,
                         textvariable=var).grid(row=r, column=1, sticky=W, padx=4)
         else:
@@ -1736,12 +1731,13 @@ class StudyGUI:
         """Apply appearance preferences to the live Tk widgets."""
         values = values or self.settings
         scale = _setting_scale(values.get("ui_scale"))
-        effective_scale = scale if scale > 0 else getattr(self, "_system_scaling", 1.0)
-        try:
-            self.root.tk.call("tk", "scaling", effective_scale)
-        except tk.TclError:
-            pass
-        size = _setting_int(values.get("font_size"), "Text size", 7, 24, 10)
+        base_size = _setting_int(values.get("font_size"), "Text size", 7, 24, 10)
+        # Some Tk/fontconfig builds ignore `tk scaling` for font metrics, so
+        # scale the point sizes directly.  ttk widgets derive their dimensions
+        # from these fonts, which scales the whole interface consistently.
+        size = max(6, min(64, int(round(base_size * scale))))
+        pad_x = max(2, int(round(8 * scale)))
+        pad_y = max(2, int(round(4 * scale)))
         width = _setting_int(values.get("window_width"), "Window width", 640, 3840, 1100)
         height = _setting_int(values.get("window_height"), "Window height", 480, 2160, 1080)
         color = str(values.get("text_color") or LIGHT_TEXT)
@@ -1788,9 +1784,11 @@ class StudyGUI:
             for cls in ("TFrame", "TLabelframe", "TLabelframe.Label", "TLabel",
                         "TButton", "TCheckbutton", "TRadiobutton", "TScale"):
                 style.configure(cls, background=bg, foreground=color)
-            style.configure("TButton", background=button, foreground=color)
+            style.configure("TButton", background=button, foreground=color,
+                            padding=(pad_x, pad_y))
             style.configure("TNotebook", background=frame)
-            style.configure("TNotebook.Tab", background=frame, foreground=color, padding=(8, 4))
+            style.configure("TNotebook.Tab", background=frame, foreground=color,
+                            padding=(pad_x, pad_y))
             style.map("TNotebook.Tab", background=[("selected", field)],
                       foreground=[("selected", color)])
             for cls in ("TEntry", "TCombobox", "TSpinbox"):
