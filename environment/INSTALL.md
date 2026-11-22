@@ -29,7 +29,7 @@ Common options:
 | `--without-paraview` | Skip the system ParaView GUI (installed by default) |
 | `--with-paraview` | Force the default system ParaView install |
 | `--cuda-arch NNN` | Override GPU arch (e.g. `86`, `89`, `120`); auto-detected otherwise |
-| `--jobs N` | Request parallel build jobs (default/ceiling: half of `nproc`) |
+| `--jobs N` | Request parallel build jobs (default/ceiling: `nproc - 2`, minimum 1) |
 | `--clean` | Remove `chrono-build/` and `chrono-install/` before rebuilding |
 | `--skip-build` | Install env/source/deps only, do not compile Chrono |
 | `--skip-patch` | Do not apply the local SPH patch to the Chrono checkout |
@@ -67,14 +67,15 @@ build uses `-O2`; set `CHRONO_CXX_RELEASE_FLAGS='-O3 -DNDEBUG'` only if you
 change the toolchain to one that has been tested with that setting.
 
 Chrono's Eigen-heavy sources need several GB of memory per compiler process.
-The installer uses half of the machine's available threads for the Chrono build
-(at least one), and the activated environment also defaults `OMP_NUM_THREADS`
-to half of the available threads. Use `--jobs 1` for the most conservative
-build. An explicit `OMP_NUM_THREADS` is never overridden. The build-job cap
-applies only to the Chrono build.
+The installer uses all but two of the machine's available threads for the Chrono
+build (at least one), while the activated environment still defaults
+`OMP_NUM_THREADS` to half of the available threads. Use `--jobs 1` for the most
+conservative build. An explicit `OMP_NUM_THREADS` is never overridden. The
+build-job cap applies only to the Chrono build.
 
 Thread detection ignores `OMP_NUM_THREADS`, so re-running the installer from an
-already activated shell still selects half of the machine's real CPUs.
+already activated shell still selects all but two of the machine's real CPUs for
+the build.
 
 The PyPI/conda-forge `pychrono` package is deliberately **not** used: it lacks
 `pychrono.fsi`/`pychrono.vehicle`, and its shared libraries conflict with the

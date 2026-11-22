@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -78,6 +81,63 @@ class StudyGuiLauncherTest(unittest.TestCase):
         ):
             launcher = (ROOT / name).read_text(encoding="utf-8")
             self.assertIn("chrono-env/bin:$PATH", launcher, name)
+
+
+class InstallerBuildThreadPolicyTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        start = cls.installer.index("cap_build_jobs() {")
+        end = cls.installer.index("\n}\n", start) + len("\n}\n")
+        cls.cap_function = cls.installer[start:end]
+        cls.build_script = (ROOT / "environment/build-chrono-source.sh").read_text(
+            encoding="utf-8"
+        )
+        cls.install_doc = (ROOT / "environment/INSTALL.md").read_text(encoding="utf-8")
+        cls.cli_doc = (ROOT / "docs/cli-reference.md").read_text(encoding="utf-8")
+
+    def _capped_jobs(self, total_threads: int, requested: int) -> int:
+        with tempfile.TemporaryDirectory() as directory:
+            fake_nproc = Path(directory) / "nproc"
+            fake_nproc.write_text(f"#!/bin/sh\necho {total_threads}\n", encoding="utf-8")
+            fake_nproc.chmod(0o755)
+            env = dict(os.environ)
+            env["PATH"] = os.pathsep.join([directory, env.get("PATH", "")])
+            script = "\n".join(
+                (
+                    "set -eu",
+                    "warn() { :; }",
+                    self.cap_function,
+                    f"build_jobs={requested}",
+                    "cap_build_jobs",
+                    'printf "%s\\n" "$build_jobs"',
+                )
+            )
+            result = subprocess.run(
+                ["bash", "-c", script],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return int(result.stdout.strip())
+
+    def test_installer_caps_build_jobs_to_total_threads_minus_two(self) -> None:
+        self.assertEqual(self._capped_jobs(16, 16), 14)
+        self.assertEqual(self._capped_jobs(16, 999), 14)
+        self.assertEqual(self._capped_jobs(8, 4), 4)
+        self.assertEqual(self._capped_jobs(2, 8), 1)
+        self.assertEqual(self._capped_jobs(1, 8), 1)
+
+    def test_standalone_build_defaults_to_total_threads_minus_two(self) -> None:
+        self.assertIn("JOBS=$(( JOBS - 2 ))", self.build_script)
+        self.assertIn("(( JOBS < 1 )) && JOBS=1", self.build_script)
+
+    def test_docs_match_build_thread_policy(self) -> None:
+        self.assertIn("all but two", self.install_doc)
+        self.assertIn("nproc - 2", self.install_doc)
+        self.assertIn("nproc - 2", self.cli_doc)
+        self.assertNotIn("default/ceiling: half of `nproc`", self.install_doc)
 
 
 if __name__ == "__main__":

@@ -39,19 +39,19 @@ SKIP_BUILD=0
 SKIP_PATCH=0
 
 # Chrono's Eigen-heavy translation units need a lot of memory, but the default
-# build parallelism is deliberately half the available threads. Users on smaller
-# hosts can pick a lower value explicitly with --jobs (for example --jobs 1).
+# build parallelism leaves two threads free for the rest of the machine. Users on
+# smaller hosts can pick a lower value explicitly with --jobs (for example --jobs 1).
 cap_build_jobs() {
   # nproc honours OMP_NUM_THREADS; ignore it so re-running from an already
   # activated environment still sees the machine's real CPU count.
   local total_threads thread_jobs
   total_threads="$(env -u OMP_NUM_THREADS nproc 2>/dev/null || printf '1\n')"
   [[ "$total_threads" =~ ^[0-9]+$ ]] || total_threads=1
-  thread_jobs=$(( total_threads / 2 ))
+  thread_jobs=$(( total_threads - 2 ))
   (( thread_jobs < 1 )) && thread_jobs=1
 
   if (( build_jobs > thread_jobs )); then
-    warn "Reducing Chrono build parallelism from $build_jobs to $thread_jobs (half of $total_threads threads)"
+    warn "Reducing Chrono build parallelism from $build_jobs to $thread_jobs ($total_threads threads minus 2)"
     build_jobs="$thread_jobs"
   fi
 }

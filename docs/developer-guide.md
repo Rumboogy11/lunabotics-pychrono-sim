@@ -110,7 +110,7 @@ The suite uses the standard library `unittest` module (no pytest needed):
 chrono-env/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Coverage includes GUI fields and settings, STEP/mesh geometry consistency, fill metrics, force descent, gravity controls, FEA summaries and export timing (including the one-way replay's CRM-frame duration limit), detector sizing, output preview, ParaView script generation (including first-frame camera priming, the non-parallel view-up guard, and default display opacity/visibility), and installer dependency text. `tests/test_fill_metrics.py` covers the driver-side metric logic.
+Coverage includes GUI fields and settings, STEP/mesh geometry consistency, fill metrics, force descent, gravity controls, FEA summaries and export timing (including the one-way replay's CRM-frame duration limit), detector sizing, output preview, ParaView script generation (including first-frame camera priming, the non-parallel view-up guard, and default display opacity/visibility), installer dependency text, and the installer build-thread cap. `tests/test_fill_metrics.py` covers the driver-side metric logic.
 
 All regression files live under `tests/`; `tests/__init__.py` keeps the repository root and the test directory importable. Run a single file as `chrono-env/bin/python tests/test_name.py` or `chrono-env/bin/python -m unittest tests.test_name`.
 

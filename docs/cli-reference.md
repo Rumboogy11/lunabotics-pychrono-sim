@@ -30,7 +30,7 @@ Run all commands from the project root unless noted. Most shell launchers add `c
 
 Installs system packages (unless `--no-system-packages`), creates `chrono-env/`, checks out the custom Chrono fork, applies the local SPH patch, and builds PyChrono with FSI/FSI-SPH/vehicle modules and CUDA 12.9.
 
-Common flags: `-h` / `--help`, `--no-system-packages`, `--with-paraview` / `--without-paraview`, `--cuda-arch NNN`, `--jobs N`, `--clean`, `--skip-build`, `--skip-patch`, `--chrono-repo URL`, `--chrono-ref REF`, `--work-root PATH`. Set `PYCHRONO_WORK_ROOT` instead of passing `--work-root` if you prefer. `CHRONO_REPO` defaults to the project's custom Chrono fork and `CHRONO_REF` to the tested commit unless overridden. See [environment/INSTALL.md](../environment/INSTALL.md).
+Common flags: `-h` / `--help`, `--no-system-packages`, `--with-paraview` / `--without-paraview`, `--cuda-arch NNN`, `--jobs N` (build jobs; default/ceiling: `nproc - 2`, minimum 1), `--clean`, `--skip-build`, `--skip-patch`, `--chrono-repo URL`, `--chrono-ref REF`, `--work-root PATH`. Set `PYCHRONO_WORK_ROOT` instead of passing `--work-root` if you prefer. `CHRONO_REPO` defaults to the project's custom Chrono fork and `CHRONO_REF` to the tested commit unless overridden. See [environment/INSTALL.md](../environment/INSTALL.md).
 
 ### `source environment/activate-chrono-source.sh`
 

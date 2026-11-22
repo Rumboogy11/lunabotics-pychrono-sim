@@ -15,9 +15,10 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$PROJECT_ROOT/environment/activate-chrono-source.sh"
 
 CLEAN=0
+# Leave two threads free by default; --jobs overrides this for direct builds.
 JOBS="$(env -u OMP_NUM_THREADS nproc 2>/dev/null || printf '1\n')"
 [[ "$JOBS" =~ ^[0-9]+$ ]] || JOBS=1
-JOBS=$(( JOBS / 2 ))
+JOBS=$(( JOBS - 2 ))
 (( JOBS < 1 )) && JOBS=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
