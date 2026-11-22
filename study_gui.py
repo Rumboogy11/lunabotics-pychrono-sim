@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -3430,14 +3431,23 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                 log_path = Path(step["log"])
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 with log_path.open("w", encoding="utf-8") as log:
+                    # Give every step its own session/process group.  The CRM and
+                    # export drivers spawn worker processes that inherit stdout;
+                    # on skip/stop we need to signal the whole group so those
+                    # writers die and _run_thread's stdout read gets EOF.
+                    popen_kwargs = {"start_new_session": True} if os.name != "nt" else {}
                     proc = subprocess.Popen(step["command"], cwd=ROOT, stdout=subprocess.PIPE,
-                                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+                                            stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                            **popen_kwargs)
                     self.proc = proc
                     assert proc.stdout is not None
-                    for line in proc.stdout:
-                        log.write(line)
-                        log.flush()
-                        self.log_queue.put(("line", line))
+                    try:
+                        for line in proc.stdout:
+                            log.write(line)
+                            log.flush()
+                            self.log_queue.put(("line", line))
+                    finally:
+                        proc.stdout.close()
                     rc = proc.wait()
                 if self._stop_requested.is_set():
                     self.log_queue.put(("line", f"[{step['name']}] stopped by user\n"))
@@ -3460,30 +3470,61 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             self.log_queue.put(("line", f"\nERROR: {e}\n"))
             self.log_queue.put(("done", "error"))
 
+    def _step_process_alive(self, proc: subprocess.Popen) -> bool:
+        """True while the step (or any process holding its stdout) is alive.
+
+        A step's parent can exit while its worker children keep the inherited
+        stdout pipe open and block the run thread.  ``poll()`` only sees the
+        parent, so on POSIX check the whole process group instead.
+        """
+        if os.name != "nt":
+            try:
+                os.killpg(proc.pid, 0)
+                return True
+            except (ProcessLookupError, PermissionError, OSError):
+                return False
+        return proc.poll() is None
+
+    def _terminate_step_process(self, proc: subprocess.Popen) -> None:
+        """Terminate a step and its descendants, not just the parent PID.
+
+        Each step runs in its own session (see ``_run_thread``), so on POSIX the
+        step and every worker it spawned share a process group.  Signalling only
+        the parent leaves CRM/export worker processes holding the inherited
+        stdout pipe open; the run thread then blocks in ``for line in stdout``
+        and never advances to the next stage.  Killing the group closes the
+        pipe so the pipeline can continue.
+        """
+        try:
+            if os.name != "nt":
+                os.killpg(proc.pid, signal.SIGTERM)
+                return
+        except (ProcessLookupError, PermissionError, OSError):
+            # Group already gone (or unsupported): fall back to the direct PID.
+            pass
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
     def _stop(self):
         """Terminate the active command and abort the remaining steps."""
         if self.proc is None:
             return
         self._stop_requested.set()
         p = self.proc
-        if isinstance(p, subprocess.Popen) and p.poll() is None:
-            try:
-                p.terminate()
-            except Exception:
-                pass
+        if isinstance(p, subprocess.Popen) and self._step_process_alive(p):
+            self._terminate_step_process(p)
         self.log_queue.put(("line", "\n[stop requested]\n"))
 
     def _skip_step(self):
         """Terminate only the active command; the remaining steps still run."""
         p = self.proc
-        if not isinstance(p, subprocess.Popen) or p.poll() is not None:
+        if not isinstance(p, subprocess.Popen) or not self._step_process_alive(p):
             messagebox.showinfo("Skip", "No step is currently running.")
             return
         self._skip_requested.set()
-        try:
-            p.terminate()
-        except Exception:
-            pass
+        self._terminate_step_process(p)
         self.log_queue.put(("line", "\n[skip requested; continuing with next step]\n"))
 
     def _drain_log(self):

@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -276,6 +277,72 @@ class GuiSkipControlTest(unittest.TestCase):
         self.assertIn(("step_done", "second"), events)
         self.assertEqual(events[-1], ("done", "ok"))
         self.assertEqual(calls["count"], 2)
+
+    @unittest.skipIf(os.name == "nt", "process-group test requires POSIX fork")
+    def test_skip_kills_process_group_and_reaches_fea_stage(self) -> None:
+        """A skipped CRM step must not hang the run on inherited stdout.
+
+        The CRM driver spawns particle-writer workers that inherit the stdout
+        pipe.  Terminating only the driver PID leaves those workers alive, so
+        ``_run_thread`` blocks in ``for line in proc.stdout`` forever and the
+        one-way FEA stage never starts.  Skip must signal the whole process
+        group so the pipe closes and the pipeline advances.
+        """
+        import subprocess as sp
+
+        marker = Path(self._tmp.name) / "fea_ran.txt"
+        # Fork a long-lived child that inherits stdout, mirroring the CRM
+        # particle writers.  Without a group kill the reader never sees EOF.
+        crm_script = (
+            "import os,time\n"
+            "pid=os.fork()\n"
+            "if pid==0:\n"
+            "    time.sleep(15)\n"
+            "    os._exit(0)\n"
+            "print('crm running',flush=True)\n"
+            "time.sleep(15)\n"
+        )
+        steps = [
+            {"name": "rigid-CRM", "command": [sys.executable, "-c", crm_script],
+             "log": str(Path(self._tmp.name) / "crm.log")},
+            {"name": "one-way-FEA",
+             "command": [sys.executable, "-c",
+                         f"open({str(marker)!r},'w').write('yes')"],
+             "log": str(Path(self._tmp.name) / "fea.log")},
+        ]
+
+        done = threading.Event()
+
+        def run() -> None:
+            self.app._stop_requested.clear()
+            self.app._skip_requested.clear()
+            self.app._run_thread({"output_dir": self._tmp.name}, steps)
+            done.set()
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            proc = self.app.proc
+            if isinstance(proc, sp.Popen) and proc.poll() is None:
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("CRM step never started")
+
+        with patch.object(self.gui.messagebox, "showinfo"):
+            self.app._skip_step()
+
+        self.assertTrue(
+            done.wait(8),
+            "run thread hung after skip; the one-way FEA stage never started",
+        )
+        self.assertTrue(marker.exists(), "FEA step did not run after skipping CRM")
+        events = self._collect_events()
+        self.assertIn(("step_skipped", "rigid-CRM"), events)
+        self.assertIn(("step_done", "one-way-FEA"), events)
+        self.assertEqual(events[-1], ("done", "ok"))
 
     def test_stop_aborts_without_starting_later_steps(self) -> None:
         class FakeProc:

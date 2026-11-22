@@ -128,8 +128,8 @@ Along the bottom of the Study Wizard tab (outside page 6):
 
 Inside page 6's lower run bar:
 
-- **Skip current step** — terminate the active command and mark it skipped; remaining queued stages still run. If no command is currently running, nothing is skipped and the status line says so.
-- **Stop running process** — terminate the active stage and abort the remaining steps.
+- **Skip current step** — terminate the active command and mark it skipped; remaining queued stages still run. The whole process group is signalled, so worker processes such as the CRM particle writers are stopped too and the runner can advance to the next stage. If no command is currently running, nothing is skipped and the status line says so.
+- **Stop running process** — terminate the active stage (including its worker processes) and abort the remaining steps.
 
 The status line reports what is happening (for example, "Viewing <doc>" when you use the Docs tab).
 
