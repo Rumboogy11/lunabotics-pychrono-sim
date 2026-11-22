@@ -1703,6 +1703,233 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def load_history_descent_mode(path: Path | str) -> str | None:
+    """Return the descent mode recorded in a soil-loads CSV header.
+
+    Force-mode CRM runs add ``descent_mode``/``actuator_force_n`` columns to
+    ``soil_loads.csv``; older kinematic files do not.  The one-way driver uses
+    this schema to reject a mismatched replay, so the FEA-only path honours it.
+    ``None`` means the header could not be read and no override is available.
+    """
+    try:
+        with Path(path).open(newline="", encoding="utf-8") as handle:
+            fields = csv.DictReader(handle).fieldnames or []
+    except (OSError, UnicodeError, csv.Error):
+        return None
+    return "force" if "descent_mode" in fields else "kinematic"
+
+
+def load_project_study_config(out_dir: Path) -> dict[str, Any]:
+    """Return the flat ``study_config.json`` for an existing project, if any."""
+    path = out_dir / "study_config.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def find_project_fea_mesh(out_dir: Path) -> tuple[Path | None, Path | None]:
+    """Find a FEA mesh pair in ``<out_dir>/mesh`` without relying on GUI paths."""
+    mesh_dir = out_dir / "mesh"
+    if not mesh_dir.is_dir():
+        return None, None
+    for pattern in ("*_fea.node", "*.node"):
+        for node in sorted(mesh_dir.glob(pattern)):
+            ele = node.with_suffix(".ele")
+            if ele.is_file():
+                return node, ele
+    return None, None
+
+
+def apply_crm_config_to_fea_cfg(cfg: dict[str, Any], out_dir: Path) -> None:
+    """Copy CRM-derived motion/geometry from ``crm/config.json`` into *cfg*.
+
+    The one-way FEA replay must use the same pose/schedule that produced
+    ``soil_loads.csv``.  These values are applied unconditionally: GUI fields
+    left over from another project would silently replay the loads against the
+    wrong drum.  FEA-specific choices (timestep, solver, materials, load radius,
+    VTK export) are deliberately left alone.
+    """
+    path = out_dir / "crm" / "config.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return
+    if not isinstance(data, dict):
+        return
+
+    run = data.get("run") if isinstance(data.get("run"), dict) else {}
+    geometry = data.get("geometry") if isinstance(data.get("geometry"), dict) else {}
+
+    def copy_value(key: str, source: dict[str, Any], source_key: str) -> None:
+        if source_key in source and source[source_key] is not None:
+            cfg[key] = source[source_key]
+
+    for key, source_key in (
+        ("duration", "duration"),
+        ("settle_time", "settle_time"),
+        ("descent_speed", "descent_speed"),
+        ("descent_mode", "descent_mode"),
+        ("descent_force_n", "descent_force_n"),
+        ("descent_force_ramp_s", "descent_force_ramp_s"),
+        ("gravity", "gravity"),
+        ("drum_gravity", "drum_gravity"),
+        ("bed_height", "bed_height"),
+        ("bed_padding", "bed_padding"),
+        ("spin_axis", "spin_axis"),
+        ("omega", "omega"),
+        ("reverse_spin", "reverse_spin"),
+        ("drum_radius", "drum_radius"),
+        ("drum_half_length", "drum_half_length"),
+        ("inner_radius", "inner_radius"),
+        ("spacing", "spacing"),
+        ("d0_multiplier", "d0_multiplier"),
+    ):
+        copy_value(key, run, source_key)
+
+    # Older CRM configs recorded geometry under a different section.  Apply it
+    # last so it wins over stale GUI values.
+    for key, source_key in (
+        ("bed_height", "bed_height_m"),
+        ("bed_padding", "bed_padding_radius_fraction"),
+        ("spin_axis", "spin_axis_global"),
+        ("drum_radius", "drum_radius_m"),
+        ("drum_half_length", "drum_half_length_m"),
+    ):
+        copy_value(key, geometry, source_key)
+
+    if "gravity" not in cfg and "gravity_m_s2" in data:
+        cfg["gravity"] = data["gravity_m_s2"]
+
+
+def build_oneway_fea_step(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Build the one-way CRM -> FEA step described by *cfg*.
+
+    This is the single source for the FEA command used by both the full study
+    and the FEA-only path.  It does not create or validate input files: a full
+    run generates the mesh/loads in earlier steps, while the FEA-only entry
+    point validates existing files before calling it.
+    """
+    out_dir: Path = Path(cfg["output_dir"])
+    crm_dir = out_dir / "crm"
+    fea_dir = out_dir / "fea"
+    loads = crm_dir / "soil_loads.csv"
+    gravity = float(cfg.get("gravity", -9.81))
+    if not math.isfinite(gravity):
+        raise StudyConfigError("gravity must be finite")
+
+    fea_cmd = [
+        str(ROOT / "crm" / "run_oneway_fea.sh"),
+        "--duration", f"{cfg['fea_duration']:g}",
+        "--dt", f"{cfg['fea_dt']:g}",
+        "--fps", f"{cfg['fea_fps']:g}",
+        "--loads", str(loads),
+        "--fea-node", str(cfg["fea_node"]),
+        "--fea-ele", str(cfg["fea_ele"]),
+        "--bed-height", f"{cfg['bed_height']:g}",
+        "--bed-padding", f"{cfg.get('bed_padding', BED_PADDING_RADIUS_FRACTION):g}",
+        "--settle-time", f"{cfg['settle_time']:g}",
+        "--gravity", f"{gravity:g}",
+        "--descent-speed", f"{cfg['descent_speed']:g}",
+        "--omega", f"{abs(cfg['omega']):g}",
+        *(['--reverse-spin'] if cfg.get('reverse_spin') else []),
+        "--spin-axis", cfg["spin_axis"],
+        "--drum-radius", f"{cfg['drum_radius']:g}",
+        "--drum-half-length", f"{cfg['drum_half_length']:g}",
+        "--inner-radius", f"{cfg['inner_radius']:g}",
+        "--hub-radius", f"{cfg['hub_radius']:g}",
+        "--solver", cfg["solver"],
+        "--num-threads", str(cfg["num_threads"]),
+        "--load-radius-fraction", f"{cfg['load_radius_fraction']:g}",
+        "--raw-stress-every", str(int(cfg["raw_stress_every"])),
+        "--output-dir", str(fea_dir),
+    ]
+    if is_force_descent(cfg):
+        fea_cmd.extend([
+            "--descent-mode", "force",
+            "--descent-force", f"{float(cfg.get('descent_force_n', 1.0)):g}",
+            "--descent-force-ramp", f"{float(cfg.get('descent_force_ramp_s', 0.0)):g}",
+        ])
+    pla_flags = {
+        "youngs_modulus": "--pla-youngs-modulus",
+        "poisson_ratio": "--pla-poisson-ratio",
+        "density": "--pla-density",
+        "rayleigh_beta": "--rayleigh-beta",
+    }
+    for key, value in cfg["pla"].items():
+        fea_cmd.extend([pla_flags[key], f"{value:g}"])
+    # Full 3D FEA stress/deformation output is opt-in.  The driver still writes
+    # every scalar field used by the GUI preview and result plots either way.
+    if cfg.get("fea_export_vtk"):
+        fea_cmd.extend(["--export-vtk",
+                        "--vtk-stride", str(max(1, int(cfg.get("fea_vtk_stride", 1))))])
+    return {"name": "one-way-FEA", "command": fea_cmd}
+
+
+def build_oneway_fea_only_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build only the one-way FEA step for a project with existing CRM data.
+
+    The rigid-CRM, mesh-generation, and ParaView export steps are omitted.  The
+    project must contain ``<output_dir>/crm/soil_loads.csv`` plus readable FEA
+    ``.node``/``.ele`` files.  Mesh paths are taken from the project's
+    ``study_config.json`` or ``<output_dir>/mesh`` so stale GUI fields cannot
+    point at a different study.  CRM-derived motion/geometry is refreshed from
+    ``crm/config.json`` when present, and the loads CSV header decides whether
+    the replay must use force descent.
+    """
+    out_dir = Path(cfg["output_dir"]).expanduser().resolve()
+    cfg["output_dir"] = out_dir
+    loads = out_dir / "crm" / "soil_loads.csv"
+    if not loads.is_file():
+        raise StudyConfigError(
+            f"no CRM load history found at {loads}; run rigid-CRM first or choose "
+            "a project directory that already contains soil_loads.csv"
+        )
+
+    project_cfg = load_project_study_config(out_dir)
+    for key in ("fea_node", "fea_ele"):
+        value = project_cfg.get(key)
+        if value not in (None, ""):
+            cfg[key] = value
+
+    project_node, project_ele = find_project_fea_mesh(out_dir)
+    configured_paths: dict[str, Path | None] = {}
+    for key in ("fea_node", "fea_ele"):
+        raw = cfg.get(key)
+        configured_paths[key] = Path(raw).expanduser().resolve() if raw else None
+
+    # Prefer a mesh inside this project over a configured path from elsewhere.
+    use_project_mesh = project_node is not None and project_ele is not None and any(
+        path is None or not path.is_file() or out_dir not in path.parents
+        for path in configured_paths.values()
+    )
+    if use_project_mesh:
+        cfg["fea_node"], cfg["fea_ele"] = project_node, project_ele
+
+    for key, label in (("fea_node", "FEA .node"), ("fea_ele", "FEA .ele")):
+        raw = cfg.get(key)
+        if not raw:
+            raise StudyConfigError(f"missing {label} path; set it on the Geometry page")
+        path = Path(raw).expanduser().resolve()
+        if not path.is_file():
+            raise StudyConfigError(f"{label} not found: {path}")
+        cfg[key] = path
+
+    apply_crm_config_to_fea_cfg(cfg, out_dir)
+    recorded_mode = load_history_descent_mode(loads)
+    if recorded_mode is not None:
+        cfg["descent_mode"] = recorded_mode
+
+    # Never rewrite the full-study reproducibility files with a one-step list.
+    cfg["mesh_steps"] = []
+    cfg["export_vtk"] = False
+    step = build_oneway_fea_step(cfg)
+    step["log"] = str(out_dir / "one-way-FEA.log")
+    cfg["commands"] = [{"name": step["name"], "command": step["command"]}]
+    return [step]
+
+
 def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     auto_correct_study_geometry(cfg)
     if cfg.get("detector_auto_size", True):
@@ -1784,52 +2011,7 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         crm_cmd.extend([soil_flags[key], f"{value:g}"])
     steps.append({"name": "rigid-CRM", "command": crm_cmd})
 
-    fea_cmd = [
-        str(ROOT / "crm" / "run_oneway_fea.sh"),
-        "--duration", f"{cfg['fea_duration']:g}",
-        "--dt", f"{cfg['fea_dt']:g}",
-        "--fps", f"{cfg['fea_fps']:g}",
-        "--loads", str(loads),
-        "--fea-node", str(cfg["fea_node"]),
-        "--fea-ele", str(cfg["fea_ele"]),
-        "--bed-height", f"{cfg['bed_height']:g}",
-        "--bed-padding", f"{cfg.get('bed_padding', BED_PADDING_RADIUS_FRACTION):g}",
-        "--settle-time", f"{cfg['settle_time']:g}",
-        "--gravity", f"{gravity:g}",
-        "--descent-speed", f"{cfg['descent_speed']:g}",
-        "--omega", f"{abs(cfg['omega']):g}",
-        *(['--reverse-spin'] if cfg.get('reverse_spin') else []),
-        "--spin-axis", cfg["spin_axis"],
-        "--drum-radius", f"{cfg['drum_radius']:g}",
-        "--drum-half-length", f"{cfg['drum_half_length']:g}",
-        "--inner-radius", f"{cfg['inner_radius']:g}",
-        "--hub-radius", f"{cfg['hub_radius']:g}",
-        "--solver", cfg["solver"],
-        "--num-threads", str(cfg["num_threads"]),
-        "--load-radius-fraction", f"{cfg['load_radius_fraction']:g}",
-        "--raw-stress-every", str(int(cfg["raw_stress_every"])),
-        "--output-dir", str(fea_dir),
-    ]
-    if is_force_descent(cfg):
-        fea_cmd.extend([
-            "--descent-mode", "force",
-            "--descent-force", f"{float(cfg.get('descent_force_n', 1.0)):g}",
-            "--descent-force-ramp", f"{float(cfg.get('descent_force_ramp_s', 0.0)):g}",
-        ])
-    pla_flags = {
-        "youngs_modulus": "--pla-youngs-modulus",
-        "poisson_ratio": "--pla-poisson-ratio",
-        "density": "--pla-density",
-        "rayleigh_beta": "--rayleigh-beta",
-    }
-    for key, value in cfg["pla"].items():
-        fea_cmd.extend([pla_flags[key], f"{value:g}"])
-    # Full 3D FEA stress/deformation output is opt-in.  The driver still writes
-    # every scalar field used by the GUI preview and result plots either way.
-    if cfg.get("fea_export_vtk"):
-        fea_cmd.extend(["--export-vtk",
-                        "--vtk-stride", str(max(1, int(cfg.get("fea_vtk_stride", 1))))])
-    steps.append({"name": "one-way-FEA", "command": fea_cmd})
+    steps.append(build_oneway_fea_step(cfg))
 
     if cfg.get("export_vtk", True):
         export_cmd = [
@@ -1849,13 +2031,22 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     return steps
 
 
-def write_reproducibility_files(cfg: dict[str, Any], steps: list[dict[str, Any]]) -> None:
+def write_reproducibility_files(
+    cfg: dict[str, Any], steps: list[dict[str, Any]], *,
+    config_name: str = "study_config.json",
+    commands_name: str = "commands.sh",
+) -> None:
+    """Write config/commands for *steps*.
+
+    FEA-only runs pass different file names so they do not replace the full
+    study's ``study_config.json``/``commands.sh``.
+    """
     out_dir: Path = cfg["output_dir"]
     serializable = {
         k: (str(v) if isinstance(v, Path) else v)
         for k, v in cfg.items()
     }
-    (out_dir / "study_config.json").write_text(
+    (out_dir / config_name).write_text(
         json.dumps(serializable, indent=2) + "\n", encoding="utf-8"
     )
 
@@ -1870,7 +2061,7 @@ def write_reproducibility_files(cfg: dict[str, Any], steps: list[dict[str, Any]]
         lines.append(f"# {step['name']}")
         lines.append(shlex.join(step["command"]) + " \\\n    | tee " + shlex.quote(step["log"]))
         lines.append("")
-    script = out_dir / "commands.sh"
+    script = out_dir / commands_name
     script.write_text("\n".join(lines), encoding="utf-8")
     script.chmod(0o755)
 

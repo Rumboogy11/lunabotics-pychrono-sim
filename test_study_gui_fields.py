@@ -538,6 +538,23 @@ class PreviewStyleSettingsTest(unittest.TestCase):
             gui.SETTINGS_FILE = original
 
 
+class GuiReexecDetectionTest(unittest.TestCase):
+    def test_chrono_python_and_python3_are_detected(self) -> None:
+        import study_gui as gui
+
+        chrono_py = Path("/opt/project/chrono-env/bin/python").resolve()
+        self.assertTrue(gui._is_chrono_python(
+            Path("/opt/project/chrono-env/bin/python"), chrono_py))
+        self.assertTrue(gui._is_chrono_python(
+            Path("/opt/project/chrono-env/bin/python3"), chrono_py))
+        self.assertTrue(gui._is_chrono_python(
+            Path("/opt/project/chrono-env/bin/python3.12"), chrono_py))
+        self.assertFalse(gui._is_chrono_python(
+            Path("/usr/bin/python3"), chrono_py))
+        self.assertFalse(gui._is_chrono_python(
+            Path("/opt/project/bin/python3"), chrono_py))
+
+
 class GuiScaleSettingsTest(IsolatedGuiDefaultsTest):
     def test_normal_scaling_is_the_shipped_default(self) -> None:
         import study_gui as gui
@@ -559,9 +576,10 @@ class GuiScaleSettingsTest(IsolatedGuiDefaultsTest):
         finally:
             gui.SETTINGS_FILE = original
 
-    def test_apply_scales_actual_font_sizes(self) -> None:
+    def test_font_size_applies_directly_and_scale_controls_density(self) -> None:
         import tkinter as tk
         from tkinter import font as tkfont
+        from tkinter import ttk
 
         import study_gui as gui
 
@@ -573,20 +591,43 @@ class GuiScaleSettingsTest(IsolatedGuiDefaultsTest):
                 with patch.object(gui, "SETTINGS_FILE", settings_file):
                     app = gui.StudyGUI(root)
                     font = tkfont.nametofont("TkDefaultFont")
-                    self.assertEqual(font.actual("size"), 10)
+                    style = ttk.Style()
+                    system_scale = app._system_scaling
 
+                    self.assertEqual(font.actual("size"), 10)
+                    self.assertEqual(style.lookup(".", "font"), "TkDefaultFont")
+                    self.assertEqual(app.log_text.cget("font"), "TkFixedFont")
+                    self.assertAlmostEqual(
+                        float(root.tk.call("tk", "scaling")), system_scale, delta=0.01)
+
+                    # Text size must change the rendered font regardless of scale.
+                    app.settings_vars["font_size"].set("16")
+                    app._apply_settings_now()
+                    self.assertEqual(font.actual("size"), 16)
+                    self.assertEqual(app.settings["font_size"], 16)
+
+                    # Scale changes density/padding, not the text point size.
                     app.settings_vars["ui_scale"].set("1.5")
                     app._apply_settings_now()
-                    self.assertEqual(font.actual("size"), 15)
+                    self.assertEqual(font.actual("size"), 16)
                     self.assertEqual(app.settings["ui_scale"], 1.5)
+                    self.assertAlmostEqual(
+                        float(root.tk.call("tk", "scaling")),
+                        system_scale * 1.5, delta=0.05)
 
                     app.settings_vars["ui_scale"].set("0.75")
                     app._apply_settings_now()
-                    self.assertEqual(font.actual("size"), 8)
+                    self.assertEqual(font.actual("size"), 16)
+                    self.assertAlmostEqual(
+                        float(root.tk.call("tk", "scaling")),
+                        system_scale * 0.75, delta=0.05)
 
-                    app.settings_vars["ui_scale"].set("1")
+                    # Legacy "0" still means normal density.
+                    app.settings_vars["ui_scale"].set("0")
                     app._apply_settings_now()
-                    self.assertEqual(font.actual("size"), 10)
+                    self.assertEqual(font.actual("size"), 16)
+                    self.assertAlmostEqual(
+                        float(root.tk.call("tk", "scaling")), system_scale, delta=0.01)
             finally:
                 root.destroy()
 

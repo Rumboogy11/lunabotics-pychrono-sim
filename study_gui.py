@@ -16,23 +16,38 @@ import tempfile
 from pathlib import Path
 
 
+def _is_chrono_python(current: Path, chrono_py: Path) -> bool:
+    """True when *current* is any ``chrono-env/bin/python*`` interpreter.
+
+    The environment ships both ``python`` and ``python3`` as separate files,
+    so comparing only with ``bin/python`` misses the common
+    ``chrono-env/bin/python3 study_gui.py`` launch path.
+    """
+    try:
+        return current.parent == chrono_py.parent and current.name.startswith("python")
+    except AttributeError:
+        return False
+
+
 def _maybe_reexec_for_display():
     """Prefer system Python for the Tk UI when launched from chrono-env.
 
-    chrono-env Python/Tk can appear small or blurry on some Wayland/XWayland setups,
-    while system Python/Tk may be properly scaled. Simulation tools, Chrono, and OCP
-    are still executed via chrono-env/bin/python by helper methods/subprocesses.
+    chrono-env Python/Tk has no scalable fonts here, so every font family falls
+    back to ``fixed`` and the GUI looks like a terminal. System Python/Tk finds
+    the normal scalable fonts and proper display scaling. Simulation tools,
+    Chrono, and OCP are still executed via chrono-env Python by helpers.
     Set PYCHRONO_GUI_NO_REEXEC=1 to disable.
     """
     if os.environ.get("PYCHRONO_GUI_NO_REEXEC") == "1":
         return
     root = Path(__file__).resolve().parent
-    chrono_py = (root / "chrono-env" / "bin" / "python").resolve()
+    chrono_bin = (root / "chrono-env" / "bin").resolve()
+    chrono_py = chrono_bin / "python"
     try:
         cur = Path(sys.executable).resolve()
     except Exception:
         return
-    if cur != chrono_py:
+    if not _is_chrono_python(cur, chrono_py):
         return
 
     candidates: list[str] = []
@@ -43,7 +58,7 @@ def _maybe_reexec_for_display():
             rp = str(Path(p).resolve())
         except Exception:
             rp = p
-        if rp and rp != str(chrono_py) and rp not in candidates:
+        if rp and Path(rp).parent != chrono_bin and rp not in candidates:
             candidates.append(rp)
 
     for cand in candidates:
@@ -243,9 +258,9 @@ SHIPPED_SETTINGS: dict[str, object] = {
 }
 
 SETTINGS_INFO: dict[str, str] = {
-    "ui_scale": "Whole-GUI scale factor applied to text and font-sized widgets. 1.0 is normal; "
-                "0.75-2.0 enlarges or shrinks the interface. Window width/height remain in pixels.",
-    "font_size": "Base text size (7-24). Applies to labels, entries, buttons, and log panels immediately.",
+    "ui_scale": "Whole-GUI density factor for widget padding and Tk scaling. 1.0 uses the system "
+                "density; 0.75-2.0 changes spacing and widget metrics. Text size is controlled separately.",
+    "font_size": "Text size in points (7-24). Applies directly to labels, entries, buttons, and log panels immediately.",
     "window_width": "Window width in pixels used the next time the GUI starts (640-3840).",
     "window_height": "Window height in pixels used the next time the GUI starts (480-2160).",
     "text_color": "Foreground text color as #RRGGBB. Pick... opens the system color dialog.",
@@ -754,10 +769,14 @@ class StudyGUI:
         self.settings_vars: dict[str, StringVar | BooleanVar] = {}
         self.text_widgets: list[tk.Text] = []
         self.ui_palette: dict[str, str] = {}
+        self._system_scaling = self._tk_scaling()
         self._apply_ui_settings(self.settings)
-        self.proc: subprocess.Popen | None = None
+        self.proc: subprocess.Popen | None | str = None
         self.log_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self.tools_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
+        # Stop ends the whole pipeline; skip terminates only the active step.
+        self._stop_requested = threading.Event()
+        self._skip_requested = threading.Event()
         self.vars: dict[str, StringVar | BooleanVar] = {}
         self.default_vars: dict[str, StringVar | BooleanVar] = {}
         self.detector_widgets: dict[str, object] = {}
@@ -768,6 +787,13 @@ class StudyGUI:
         self._update_particle_estimate()
         self.root.after(100, self._drain_log)
         self.root.after(100, self._drain_tools_log)
+
+    def _tk_scaling(self) -> float:
+        """Read Tk's system pixel-per-point scaling, falling back to 1.0."""
+        try:
+            return float(self.root.tk.call("tk", "scaling"))
+        except (tk.TclError, TypeError, ValueError):
+            return 1.0
 
     def _v(self, key: str, value, is_bool: bool = False, target=None):
         store = target if target is not None else self.vars
@@ -927,6 +953,8 @@ class StudyGUI:
         ttk.Button(nav, text="Apply CAD/mesh defaults", command=self._apply_geo_defaults).pack(side=LEFT, padx=12)
         ttk.Button(nav, text="Load study_config.json", command=self._load_config).pack(side=LEFT)
         ttk.Button(nav, text="Save config/commands (dry run)", command=self._save_only).pack(side=RIGHT)
+        ttk.Button(nav, text="Run one-way FEA only (existing CRM)",
+                   command=self._run_oneway_fea_only).pack(side=RIGHT, padx=6)
         ttk.Button(nav, text="Run study", command=self._run_study).pack(side=RIGHT, padx=6)
 
     def _add_page(self, title: str):
@@ -1108,7 +1136,8 @@ class StudyGUI:
         self.pages.append(p)
         top = ttk.Frame(p)
         top.pack(fill=X, padx=6, pady=6)
-        ttk.Label(top, text="Review generated configuration/commands. Go back to any step to change parameters.",
+        ttk.Label(top, text="Review generated configuration/commands. Go back to any step to change parameters. "
+                            "Skip current step bypasses one command and continues the run.",
                   font=HEADER_FONT).pack(side=LEFT)
         ttk.Button(top, text="Refresh preview", command=self._refresh_preview).pack(side=RIGHT)
         paned = ttk.Panedwindow(p, orient=VERTICAL)
@@ -1121,6 +1150,7 @@ class StudyGUI:
         self.log_text = self._text_widget(self.log_frame, height=18)
         runbar = ttk.Frame(p)
         runbar.pack(fill=X, padx=6, pady=4)
+        ttk.Button(runbar, text="Skip current step", command=self._skip_step).pack(side=LEFT)
         ttk.Button(runbar, text="Stop running process", command=self._stop).pack(side=LEFT)
         self.status_var = StringVar(value="Ready.")
         ttk.Label(runbar, textvariable=self.status_var).pack(side=LEFT, padx=12)
@@ -1614,7 +1644,7 @@ class StudyGUI:
         ttk.Label(
             p,
             text="Apply now changes this session only; Save settings also keeps the values for the next launch. "
-                 "GUI scale and text size affect the whole interface, including the log panels.",
+                 "Text size changes fonts immediately; GUI scale changes widget density and spacing.",
             justify=LEFT,
         ).grid(row=r, column=0, columnspan=5, sticky=W, padx=8, pady=(2, 8)); r += 1
         self._refresh_color_preview()
@@ -1732,10 +1762,16 @@ class StudyGUI:
         values = values or self.settings
         scale = _setting_scale(values.get("ui_scale"))
         base_size = _setting_int(values.get("font_size"), "Text size", 7, 24, 10)
-        # Some Tk/fontconfig builds ignore `tk scaling` for font metrics, so
-        # scale the point sizes directly.  ttk widgets derive their dimensions
-        # from these fonts, which scales the whole interface consistently.
-        size = max(6, min(64, int(round(base_size * scale))))
+        # Font size is a literal point size: changing Text size must always be
+        # visible.  GUI scale controls density (tk scaling + ttk padding)
+        # instead of being folded into the font metrics.
+        size = base_size
+        system_scale = getattr(self, "_system_scaling", 1.0)
+        effective_scale = system_scale * scale
+        try:
+            self.root.tk.call("tk", "scaling", effective_scale)
+        except tk.TclError:
+            pass
         pad_x = max(2, int(round(8 * scale)))
         pad_y = max(2, int(round(4 * scale)))
         width = _setting_int(values.get("window_width"), "Window width", 640, 3840, 1100)
@@ -1747,17 +1783,26 @@ class StudyGUI:
 
         self.root.geometry(f"{width}x{height}")
 
-        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont",
+                     "TkHeadingFont", "TkFixedFont"):
             try:
                 tkfont.nametofont(name).configure(size=size)
             except tk.TclError:
                 pass
+        # Use Tk's generic family names.  Passing "TkDefaultFont"/"TkFixedFont"
+        # as a *family* makes fontconfig fall back to a font that ignores the
+        # configured size and renders poorly.
+        try:
+            default_family = tkfont.nametofont("TkDefaultFont").cget("family")
+            fixed_family = tkfont.nametofont("TkFixedFont").cget("family")
+        except tk.TclError:
+            default_family, fixed_family = "sans-serif", "monospace"
         for name, font_size, family, weight in (
-            (HEADER_FONT, size, "TkDefaultFont", "bold"),
-            (SECTION_FONT, max(7, size - 1), "TkDefaultFont", "bold"),
-            (DOC_TITLE_FONT, size + 4, "TkDefaultFont", "bold"),
-            (DOC_HEADING_FONT, size + 1, "TkDefaultFont", "bold"),
-            (DOC_CODE_FONT, size, "TkFixedFont", "normal"),
+            (HEADER_FONT, size, default_family, "bold"),
+            (SECTION_FONT, max(7, size - 1), default_family, "bold"),
+            (DOC_TITLE_FONT, size + 4, default_family, "bold"),
+            (DOC_HEADING_FONT, size + 1, default_family, "bold"),
+            (DOC_CODE_FONT, size, fixed_family, "normal"),
         ):
             try:
                 font = tkfont.nametofont(name)
@@ -1780,7 +1825,9 @@ class StudyGUI:
             "text": color, "button": button,
         }
         try:
-            style.configure(".", background=bg, foreground=color, font=("TkDefaultFont", size))
+            # A named font reference keeps ttk in sync with TkDefaultFont;
+            # ("TkDefaultFont", size) is a literal family, not the named font.
+            style.configure(".", background=bg, foreground=color, font="TkDefaultFont")
             for cls in ("TFrame", "TLabelframe", "TLabelframe.Label", "TLabel",
                         "TButton", "TCheckbutton", "TRadiobutton", "TScale"):
                 style.configure(cls, background=bg, foreground=color)
@@ -1833,7 +1880,7 @@ class StudyGUI:
                 wclass = widget.winfo_class()
                 if wclass == "Text":
                     widget.configure(background=field, foreground=color,
-                                     insertbackground=color, font=("TkFixedFont", size))
+                                     insertbackground=color, font="TkFixedFont")
                 elif wclass == "Canvas":
                     widget.configure(background=bg)
                 elif wclass == "TCombobox":
@@ -2504,33 +2551,89 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             messagebox.showerror("Save", str(e))
 
     # ---- run ----
+    def _run_active(self) -> bool:
+        """True while a pipeline thread owns a process or is starting one."""
+        return self.proc is not None
+
     def _run_study(self):
-        if self.proc and self.proc.poll() is None:
+        if self._run_active():
             messagebox.showwarning("Run", "A process is already running.")
             return
         try:
             cfg = self._collect_cfg()
             steps = wiz.build_commands(cfg)
             wiz.write_reproducibility_files(cfg, steps)
-            run_dir = str(Path(self._g("output_dir")).expanduser().resolve())
-            if hasattr(self, "tools_study_dir"):
-                self.tools_study_dir.set(run_dir)
-            if hasattr(self, "output_preview"):
-                self.output_preview.set_directory(run_dir)
-            self._set_text(self.log_text, "")
-            self.status_var.set("Running study...")
-            self.step_nb.select(len(self.pages) - 1)
             self._refresh_preview()
-            self.proc = "starting"  # marker
-            t = threading.Thread(target=self._run_thread, args=(cfg, steps), daemon=True)
-            t.start()
+            self._start_run(cfg, steps, "Running study...")
         except Exception as e:
             messagebox.showerror("Run", str(e))
+
+    def _run_oneway_fea_only(self):
+        """Run just the one-way FEA step against an existing CRM study folder."""
+        if self._run_active():
+            messagebox.showwarning("Run", "A process is already running.")
+            return
+        try:
+            cfg = self._collect_cfg()
+            out_dir = Path(cfg["output_dir"]).expanduser().resolve()
+            loads = out_dir / "crm" / "soil_loads.csv"
+            if not loads.is_file():
+                raise ValueError(
+                    f"No CRM load history at {loads}. Set Output directory to a project "
+                    "that already contains crm/soil_loads.csv."
+                )
+            if not messagebox.askyesno(
+                "One-way FEA only",
+                f"Run only the one-way FEA replay using CRM data in:\n{out_dir}\n\n"
+                "Mesh generation and the rigid-CRM stage will be skipped.\n"
+                "CRM-derived motion settings are read from crm/config.json when present.",
+            ):
+                return
+            steps = wiz.build_oneway_fea_only_commands(cfg)
+            wiz.write_reproducibility_files(
+                cfg, steps,
+                config_name="oneway_fea_config.json",
+                commands_name="oneway_fea_commands.sh",
+            )
+            lines = [
+                f"Output: {out_dir}",
+                f"Config: {out_dir / 'oneway_fea_config.json'}",
+                f"Commands: {out_dir / 'oneway_fea_commands.sh'}",
+                "",
+            ]
+            for step in steps:
+                lines.append(f"[{step['name']}]")
+                lines.append(shlex.join(step["command"]))
+                lines.append("")
+            self._set_text(self.cmd_text, "\n".join(lines))
+            self._start_run(cfg, steps, "Running one-way FEA only (existing CRM data)...")
+        except Exception as e:
+            messagebox.showerror("One-way FEA only", str(e))
+
+    def _start_run(self, cfg, steps, status: str):
+        run_dir = str(Path(cfg["output_dir"]).expanduser().resolve())
+        if hasattr(self, "tools_study_dir"):
+            self.tools_study_dir.set(run_dir)
+        if hasattr(self, "output_preview"):
+            self.output_preview.set_directory(run_dir)
+        self._set_text(self.log_text, "")
+        self.step_nb.select(len(self.pages) - 1)
+        self._stop_requested.clear()
+        self._skip_requested.clear()
+        self.proc = "starting"  # marker until the worker publishes the Popen
+        self.status_var.set(status)
+        threading.Thread(target=self._run_thread, args=(cfg, steps), daemon=True).start()
 
     def _run_thread(self, cfg, steps):
         try:
             started = time.perf_counter()
             for step in steps:
+                if self._stop_requested.is_set():
+                    self.log_queue.put(("line", "\n[stop requested; aborting]\n"))
+                    self.log_queue.put(("done", "stopped"))
+                    return
+                # A skip applies to the step that was active when requested.
+                self._skip_requested.clear()
                 self.log_queue.put(("line", f"\n[{step['name']}] {shlex.join(step['command'])}\n"))
                 log_path = Path(step["log"])
                 log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2544,6 +2647,14 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                         log.flush()
                         self.log_queue.put(("line", line))
                     rc = proc.wait()
+                if self._stop_requested.is_set():
+                    self.log_queue.put(("line", f"[{step['name']}] stopped by user\n"))
+                    self.log_queue.put(("done", "stopped"))
+                    return
+                if self._skip_requested.is_set():
+                    self.log_queue.put(("line", f"[{step['name']}] skipped by user\n"))
+                    self.log_queue.put(("step_skipped", step["name"]))
+                    continue
                 if rc != 0:
                     self.log_queue.put(("line", f"[{step['name']}] FAILED (exit {rc})\n"))
                     self.log_queue.put(("done", f"failed:{step['name']}"))
@@ -2558,13 +2669,30 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             self.log_queue.put(("done", "error"))
 
     def _stop(self):
+        """Terminate the active command and abort the remaining steps."""
+        if self.proc is None:
+            return
+        self._stop_requested.set()
         p = self.proc
         if isinstance(p, subprocess.Popen) and p.poll() is None:
             try:
                 p.terminate()
-                self.log_queue.put(("line", "\n[stop requested]\n"))
             except Exception:
                 pass
+        self.log_queue.put(("line", "\n[stop requested]\n"))
+
+    def _skip_step(self):
+        """Terminate only the active command; the remaining steps still run."""
+        p = self.proc
+        if not isinstance(p, subprocess.Popen) or p.poll() is not None:
+            messagebox.showinfo("Skip", "No step is currently running.")
+            return
+        self._skip_requested.set()
+        try:
+            p.terminate()
+        except Exception:
+            pass
+        self.log_queue.put(("line", "\n[skip requested; continuing with next step]\n"))
 
     def _drain_log(self):
         try:
@@ -2575,6 +2703,8 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                     self.log_text.see(END)
                 elif kind == "step_done":
                     self._refresh_output_preview()
+                elif kind == "step_skipped":
+                    self.status_var.set(f"Skipped {payload}; continuing with next step.")
                 elif kind == "done":
                     status = str(payload)
                     self.proc = None
@@ -2612,6 +2742,8 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                             self._refresh_output_preview()
                         except Exception:
                             pass
+                    elif status == "stopped":
+                        self.status_var.set("Study stopped by user. Check logs.")
                     else:
                         self.status_var.set(f"Study stopped ({status}). Check logs.")
         except queue.Empty:
