@@ -156,7 +156,7 @@ PARAM_INFO: dict[str, str] = {
     "drum_gravity": "Rigid CRM only: also apply global gravity to the drum body. Off preserves older force-descent behavior; FEA drums always follow global gravity. Kinematic descent overrides the drum pose either way.",
     "descent_mode": "Kinematic prescribes a constant lowering speed. Force applies a downward actuator after settling, holds at the final target, and makes the FEA replay follow the recorded trajectory. Spin stays prescribed in both modes.",
     "descent_speed": "Vertical lowering speed of the drum into the bed in kinematic mode. 0 keeps it at constant height; ignored by force descent except for duration guidance.",
-    "descent_force_n": "Downward actuator force in newtons after settling in force mode. Soil reaction always acts on the drum; global gravity adds to it only when 'Apply gravity to CRM drum' is enabled.",
+    "descent_force_n": "Downward actuator force in newtons after settling in force mode. Soil reaction always acts on the drum; global gravity adds to it only when 'Apply gravity to CRM drum' is enabled. Use 0 with drum gravity enabled for gravity-only descent.",
     "descent_force_ramp_s": "Linear ramp from zero to the descent actuator force in force mode. 0 applies full force immediately after settling.",
     "omega": "Drum angular speed magnitude about the spin axis (~3.14 rad/s = 30 rpm). Sign is controlled by Reverse spin.",
     "reverse_spin": "Flip rotation direction if the CAD excavator spins the wrong way. Signed omega is written as negative.",
@@ -2126,8 +2126,8 @@ class StudyGUI:
         descent_force_n = float(self._g("descent_force_n"))
         descent_force_ramp_s = float(self._g("descent_force_ramp_s"))
         if descent_mode == "force":
-            if descent_force_n <= 0.0:
-                raise ValueError("Descent force must be positive")
+            if descent_force_n < 0.0:
+                raise ValueError("Descent force must be non-negative")
             if descent_force_ramp_s < 0.0:
                 raise ValueError("Descent force ramp cannot be negative")
         omega_mag = float(self._g("omega"))

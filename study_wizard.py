@@ -446,8 +446,8 @@ def validate_study_geometry(cfg: dict[str, Any]) -> list[str]:
             ramp_s = float(cfg.get("descent_force_ramp_s", 0.0))
         except (TypeError, ValueError):
             raise StudyConfigError("force descent needs numeric descent_force_n and descent_force_ramp_s")
-        if force_n <= 0.0:
-            raise StudyConfigError("descent_force_n must be positive")
+        if force_n < 0.0:
+            raise StudyConfigError("descent_force_n must be non-negative")
         if ramp_s < 0.0:
             raise StudyConfigError("descent_force_ramp_s cannot be negative")
 
@@ -664,7 +664,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--descent-mode", choices=("kinematic", "force"), default=None,
                    help="descent control mode (default: kinematic)")
     p.add_argument("--descent-force", type=float, default=None,
-                   help="downward actuator force in N for --descent-mode force (default: 1.0)")
+                   help="downward actuator force in N for --descent-mode force (default: 1.0; "
+                        "0 allows gravity-only descent with --drum-gravity)")
     p.add_argument("--descent-force-ramp", type=float, default=None,
                    help="linear force ramp duration in s for force descent (default: 0)")
     p.add_argument("--omega", type=float, default=None, help="drum spin rate magnitude in rad/s")
@@ -1404,8 +1405,9 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
                "duration guidance.",
     )
     descent_force_n = args.descent_force if args.descent_force is not None else prompt_float(
-        "Descent actuator force (N; force mode)", 1.0, minimum=1e-9,
-        detail="Downward force applied to the drum after settling in force mode.",
+        "Descent actuator force (N; force mode)", 1.0, minimum=0.0,
+        detail="Downward force applied to the drum after settling in force mode. "
+               "Use 0 with drum gravity enabled for gravity-only descent.",
     )
     descent_force_ramp_s = args.descent_force_ramp if args.descent_force_ramp is not None else prompt_float(
         "Descent force ramp (s; force mode)", 0.0, minimum=0.0,

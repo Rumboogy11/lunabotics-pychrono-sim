@@ -48,7 +48,9 @@ descent is opt-in with `--descent-mode force --descent-force N` (optional
 drum downward after `--settle-time`; a position motor holds the initial height
 beforehand and `z_target` after the descent, while spin remains prescribed. The
 coupled diagnostic FEA path applies the same force/hold drive to the prismatic
-slider and keeps the revolute spin motor unchanged.
+slider and keeps the revolute spin motor unchanged. Use `--descent-force 0` with
+`--drum-gravity` in the rigid CRM for gravity-only descent; the one-way replay
+still follows the recorded height trajectory.
 
 The one-way replay has no SPH soil reaction to balance an actuator force, so it
 does **not** apply a force motor. It instead uses a position motor built from

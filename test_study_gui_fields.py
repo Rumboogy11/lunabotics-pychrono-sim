@@ -643,6 +643,13 @@ class ForceDescentGuiFieldsTest(IsolatedGuiDefaultsTest):
                     self.assertEqual(force_cmd[force_cmd.index("--descent-mode") + 1], "force")
                     self.assertEqual(force_cmd[force_cmd.index("--descent-force") + 1], "2.5")
 
+                app.vars["descent_force_n"].set("0")
+                app.vars["drum_gravity"].set(True)
+                gravity_only = app._collect_cfg()
+                self.assertEqual(gravity_only["descent_mode"], "force")
+                self.assertEqual(gravity_only["descent_force_n"], 0.0)
+                self.assertTrue(gravity_only["drum_gravity"])
+
                 app.vars["descent_mode"].set("kinematic")
                 app._apply_config({
                     "descent_mode": "force",

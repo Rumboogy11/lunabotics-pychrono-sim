@@ -53,7 +53,7 @@ class SolidContainerTest(unittest.TestCase):
         self.assertAlmostEqual(min_z, 0.0)
         self.assertAlmostEqual(max_z, 0.2)
 
-    def test_container_gap_clears_bed_bce_layers(self) -> None:
+    def test_default_container_gap_is_half_spacing(self) -> None:
         run = make_run()
         padding = crm.solid_container_padding(run)
         self.assertAlmostEqual(padding, 0.5 * run.spacing)

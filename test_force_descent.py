@@ -218,11 +218,16 @@ class ForceDescentParamsTest(unittest.TestCase):
         self.assertEqual(run.descent_mode, "force")
         self.assertEqual(run.descent_speed, 0.0)
 
+    def test_zero_actuator_force_is_allowed(self) -> None:
+        run = force_run(descent_force_n=0.0, drum_gravity=True)
+        self.assertEqual(run.descent_force_n, 0.0)
+        self.assertTrue(run.drum_gravity)
+
     def test_invalid_values_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "descent_mode"):
             replace(crm.CrmRunParams(), descent_mode="dynamic")
         with self.assertRaisesRegex(ValueError, "descent_force_n"):
-            replace(force_run(), descent_force_n=0.0)
+            replace(force_run(), descent_force_n=-0.1)
         with self.assertRaisesRegex(ValueError, "descent_force_ramp_s"):
             replace(force_run(), descent_force_ramp_s=-0.1)
         with self.assertRaisesRegex(ValueError, "descent_speed cannot be negative"):
@@ -274,6 +279,12 @@ class ForceDescentParamsTest(unittest.TestCase):
 
 
 class ForceDescentControlTest(unittest.TestCase):
+    def test_zero_force_sequence_is_identically_zero(self) -> None:
+        run = force_run(descent_force_n=0.0, descent_force_ramp_s=0.1, drum_gravity=True)
+        sequence = crm.build_descent_force_function(FakeChrono, run, 1.0)
+        for t in (0.0, 0.1, 0.25, 0.5, 0.9):
+            self.assertAlmostEqual(sequence.GetVal(t), 0.0)
+
     def test_force_sequence_uses_absolute_values_without_c0_offsets(self) -> None:
         sequence = crm.build_descent_force_function(
             FakeChrono, force_run(descent_force_n=3.0, descent_force_ramp_s=0.0), 1.0
@@ -327,6 +338,16 @@ class ForceDescentControlTest(unittest.TestCase):
         self.assertTrue(drive["force_motor"].disabled)
         self.assertFalse(drive["hold_motor"].disabled)
         self.assertAlmostEqual(drive["hold_motor"].motion_function.value, -0.1)
+
+    def test_zero_settle_starts_with_force_motor_already_enabled(self) -> None:
+        motion = SimpleNamespace(drum_center_z0=0.3, z_target=0.2)
+        run = force_run(settle_time=0.0)
+        drive = crm.create_force_descent(
+            FakeChrono, FakeSystem(), FakeBody(), motion, run, 1.0
+        )
+        self.assertEqual(drive["state"], "descend")
+        self.assertFalse(drive["force_motor"].disabled)
+        self.assertTrue(drive["hold_motor"].disabled)
 
     def test_predicted_crossing_hands_off_before_the_step(self) -> None:
         motion = SimpleNamespace(drum_center_z0=0.3, z_target=0.2)
@@ -463,6 +484,21 @@ class ForceWizardCommandsTest(unittest.TestCase):
                 for step in steps if step["name"] not in {"rigid-CRM", "one-way-FEA"}
             ))
 
+    def test_zero_force_commands_support_gravity_only_descent(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="gravity_force_wizard_", dir="/tmp/opencode") as tmp:
+            cfg = consistent_cfg(Path(tmp))
+            cfg["descent_mode"] = "force"
+            cfg["descent_speed"] = 0.0
+            cfg["descent_force_n"] = 0.0
+            cfg["descent_force_ramp_s"] = 0.0
+            cfg["drum_gravity"] = True
+            with patch.object(wiz, "measured_geometry_for_cfg", return_value=None):
+                wiz.validate_study_geometry(cfg)
+                steps = wiz.build_commands(cfg)
+            crm_cmd = next(step["command"] for step in steps if step["name"] == "rigid-CRM")
+            self.assertEqual(crm_cmd[crm_cmd.index("--descent-force") + 1], "0")
+            self.assertIn("--drum-gravity", crm_cmd)
+
     def test_kinematic_studies_do_not_generate_force_flags(self) -> None:
         with tempfile.TemporaryDirectory(prefix="kinematic_wizard_", dir="/tmp/opencode") as tmp:
             cfg = consistent_cfg(Path(tmp))
@@ -478,7 +514,7 @@ class ForceWizardCommandsTest(unittest.TestCase):
     def test_force_validation_rejects_bad_values(self) -> None:
         cfg = consistent_cfg(Path("/tmp/opencode"))
         cfg["descent_mode"] = "force"
-        cfg["descent_force_n"] = 0.0
+        cfg["descent_force_n"] = -0.1
         with self.assertRaisesRegex(wiz.StudyConfigError, "descent_force_n"):
             wiz.validate_study_geometry(cfg)
 
