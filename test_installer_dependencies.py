@@ -54,6 +54,12 @@ class InstallerPackageListsTest(unittest.TestCase):
         command_check = self.installer.index('for cmd in git curl tar bzip2')
         self.assertLess(package_call, command_check)
 
+    def test_sudo_is_used_only_for_system_packages(self) -> None:
+        self.assertIn("sudo pacman", self.arch)
+        self.assertIn("sudo apt-get", self.debian)
+        for unprivileged_command in ("sudo pip", "sudo curl", "sudo git", "sudo cmake"):
+            self.assertNotIn(unprivileged_command, self.installer)
+
 
 class StudyGuiLauncherTest(unittest.TestCase):
     def test_launcher_selects_a_python_with_tkinter(self) -> None:
