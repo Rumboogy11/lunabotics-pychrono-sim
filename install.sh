@@ -182,6 +182,7 @@ install_system_packages() {
         libice libsm fontconfig xdg-utils xorg-server-xvfb
       )
       if [[ "$INSTALL_PARAVIEW" -eq 1 ]]; then
+        # Arch's paraview package includes pvpython and paraview.simple.
         packages+=(paraview)
       fi
       "${pacman_cmd[@]}" -S --needed --noconfirm "${packages[@]}"
@@ -206,7 +207,9 @@ install_system_packages() {
         xdg-utils xvfb "$glib_pkg"
       )
       if [[ "$INSTALL_PARAVIEW" -eq 1 ]]; then
-        packages+=(paraview)
+        # Debian splits the ParaView Python bindings into python3-paraview.
+        # Without it, --script fails with "No module named 'paraview.simple'".
+        packages+=(paraview python3-paraview)
       fi
       "${apt_cmd[@]}" install -y --no-install-recommends "${packages[@]}"
       ;;
@@ -436,7 +439,8 @@ PY
       pvpython -c 'import paraview.simple' >/dev/null 2>&1 \
         || warn "pvpython could not import paraview.simple."
     else
-      warn "pvpython not found on PATH; ParaView scripts need the system package."
+      warn "pvpython not found on PATH; ParaView scripts need the system Python bindings"
+      warn "(python3-paraview on Debian/Ubuntu, included in paraview on Arch)."
     fi
   else
     warn "ParaView not verified (system packages skipped or --without-paraview)."

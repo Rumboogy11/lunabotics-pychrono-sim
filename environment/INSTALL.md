@@ -119,7 +119,8 @@ because Chrono imports are deferred until a simulation starts.
 The installer uses `pacman` on Arch/CachyOS and `apt-get` on Debian/Ubuntu to
 install: `git`, `curl`, `bzip2`, `tar`, coreutils/awk/sed, `python3`, Tk support,
 `xdg-utils`, Xvfb, X11/GL/Qt xcb runtime libraries needed by VTK, PyVista, OCP,
-and the Tk GUI, plus the full ParaView GUI (`paraview`/`pvpython`). When not
+and the Tk GUI, plus the full ParaView GUI and Python bindings (`paraview`/
+`pvpython`; Debian/Ubuntu also installs `python3-paraview`). When not
 already running as root, those package commands are invoked through `sudo`
 (prompting for a password if needed). No other installer command is elevated:
 pip/conda packages, downloads, git operations, and the Chrono build run as the
