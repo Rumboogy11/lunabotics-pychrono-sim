@@ -2073,6 +2073,29 @@ def print_tail(path: str | Path, lines: int = 30) -> None:
         print("\n".join(text[-lines:]))
 
 
+def simulation_timing_lines(step_times: dict[str, float]) -> list[str]:
+    """Format the CRM/FEA elapsed-time block shared by the CLI and GUI.
+
+    ``step_times`` holds one entry per stage that was actually launched.  A
+    stage that was skipped, stopped, or failed partway through keeps the time
+    spent on it; only a stage that was never started prints ``not run``.
+    """
+    lines = ["Simulation elapsed times:"]
+    for step_name, label in (("rigid-CRM", "CRM"), ("one-way-FEA", "One-way FEA")):
+        elapsed = step_times.get(step_name)
+        value = f"{elapsed:.1f} s" if elapsed is not None else "not run"
+        lines.append(f"  {label}: {value}")
+    return lines
+
+
+def print_timing_summary(step_times: dict[str, float], started: float) -> None:
+    """Print the simulation stage times and total wall time for a CLI study."""
+    print()
+    for line in simulation_timing_lines(step_times):
+        print(line)
+    print(f"Total wall time: {time.perf_counter() - started:.1f} s", flush=True)
+
+
 def run_step(step: dict[str, Any]) -> bool:
     name = step["name"]
     command = step["command"]
@@ -2273,6 +2296,7 @@ def main() -> int:
     args = build_parser().parse_args()
     ACCEPT_DEFAULTS = bool(args.yes)
     started = time.perf_counter()
+    step_times: dict[str, float] = {}
     cfg = collect_settings(args)
     try:
         steps = build_commands(cfg)
@@ -2290,13 +2314,26 @@ def main() -> int:
             print(f"  {step['name']}: {shlex.join(step['command'])}")
         return 0
 
-    for step in steps:
-        if not run_step(step):
-            print(f"\nStudy stopped at {step['name']}. See {step['log']}", flush=True)
-            return 1
+    try:
+        for step in steps:
+            step_started = time.perf_counter()
+            try:
+                ok = run_step(step)
+            finally:
+                # Keep the time even when the stage fails or is interrupted.
+                step_times[step["name"]] = time.perf_counter() - step_started
+            if not ok:
+                print(f"\nStudy stopped at {step['name']}. See {step['log']}", flush=True)
+                print_timing_summary(step_times, started)
+                return 1
 
-    print_results(cfg, offer_open=not cfg["dry_run"])
-    print(f"\nTotal wall time: {time.perf_counter() - started:.1f} s")
+        print_results(cfg, offer_open=not cfg["dry_run"])
+    except KeyboardInterrupt:
+        print("\nStudy interrupted by user.", flush=True)
+        print_timing_summary(step_times, started)
+        return 130
+
+    print_timing_summary(step_times, started)
     return 0
 
 

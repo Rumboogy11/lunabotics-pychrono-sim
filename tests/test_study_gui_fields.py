@@ -35,6 +35,31 @@ class IsolatedGuiDefaultsTest(unittest.TestCase):
         self._tmp.cleanup()
 
 
+class TopTabOrderTest(IsolatedGuiDefaultsTest):
+    def test_top_tabs_follow_the_workflow_order(self) -> None:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        with patch.object(gui, "SETTINGS_FILE", Path(self._tmp.name) / "settings.json"):
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                app = gui.StudyGUI(root)
+                tabs = [app.notebook.tab(tab, "text")
+                        for tab in app.notebook.tabs()]
+                self.assertEqual(tabs, [
+                    "Study Wizard",
+                    "Output Preview",
+                    "Tools / View Results",
+                    "Docs",
+                    "Defaults",
+                    "Settings",
+                ])
+            finally:
+                root.destroy()
+
+
 class StudyNameOutputDirSyncTest(IsolatedGuiDefaultsTest):
     def test_study_name_resets_output_directory(self) -> None:
         import tkinter as tk

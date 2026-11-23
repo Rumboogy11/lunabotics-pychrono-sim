@@ -13,7 +13,9 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -279,7 +281,7 @@ class GuiSkipControlTest(unittest.TestCase):
         self.assertEqual(events[-1], ("done", "ok"))
         self.assertEqual(calls["count"], 2)
 
-    def test_skipped_crm_still_prints_timing_summary(self) -> None:
+    def test_skipped_crm_still_reports_its_elapsed_time(self) -> None:
         class FakeProc:
             def __init__(self):
                 self.stdout = io.StringIO("running\n")
@@ -309,13 +311,54 @@ class GuiSkipControlTest(unittest.TestCase):
 
         events = self._collect_events()
         lines = [text for kind, text in events if kind == "line"]
-        self.assertIn("  CRM: not run\n", lines)
+        self.assertTrue(
+            any(re.fullmatch(r"  CRM: \d+\.\d+ s\n", line) for line in lines),
+            lines,
+        )
         self.assertTrue(
             any(re.fullmatch(r"  One-way FEA: \d+\.\d+ s\n", line) for line in lines),
             lines,
         )
         self.assertIn(("step_skipped", "rigid-CRM"), events)
         self.assertEqual(events[-1], ("done", "ok"))
+
+    def test_crm_skipped_partway_reports_time_spent(self) -> None:
+        class SlowStdout(io.StringIO):
+            def __iter__(self):
+                time.sleep(0.08)
+                yield "running\n"
+
+        class FakeProc:
+            def __init__(self, stdout):
+                self.stdout = stdout
+
+            def wait(self) -> int:
+                return 0
+
+        def fake_popen(command, **_kwargs):
+            stdout = SlowStdout() if command == ["crm"] else io.StringIO("running\n")
+            if command == ["crm"]:
+                self.app._skip_requested.set()
+            return FakeProc(stdout)
+
+        steps = [
+            {"name": "rigid-CRM", "command": ["crm"],
+             "log": str(Path(self._tmp.name) / "crm.log")},
+            {"name": "one-way-FEA", "command": ["fea"],
+             "log": str(Path(self._tmp.name) / "fea.log")},
+        ]
+        self.app._stop_requested.clear()
+        self.app._skip_requested.clear()
+        with patch.object(self.gui.subprocess, "Popen", side_effect=fake_popen):
+            self.app._run_thread({"output_dir": self._tmp.name}, steps)
+
+        events = self._collect_events()
+        lines = [text for kind, text in events if kind == "line"]
+        crm_line = next(line for line in lines if line.startswith("  CRM: "))
+        seconds = float(crm_line.split(": ", 1)[1].removesuffix(" s\n"))
+        self.assertGreaterEqual(seconds, 0.05, lines)
+        self.assertTrue(any(line.startswith("Total wall time: ") for line in lines))
+        self.assertIn(("step_skipped", "rigid-CRM"), events)
 
     def test_completed_run_prints_crm_and_fea_elapsed_times(self) -> None:
         class FakeProc:
@@ -355,7 +398,7 @@ class GuiSkipControlTest(unittest.TestCase):
             lines,
         )
 
-    def test_failed_fea_run_still_reports_completed_crm_time(self) -> None:
+    def test_failed_fea_run_reports_both_elapsed_times(self) -> None:
         class FakeProc:
             def __init__(self, rc: int):
                 self.stdout = io.StringIO("running\n")
@@ -384,7 +427,10 @@ class GuiSkipControlTest(unittest.TestCase):
             any(re.fullmatch(r"  CRM: \d+\.\d+ s\n", line) for line in lines),
             lines,
         )
-        self.assertIn("  One-way FEA: not run\n", lines)
+        self.assertTrue(
+            any(re.fullmatch(r"  One-way FEA: \d+\.\d+ s\n", line) for line in lines),
+            lines,
+        )
         self.assertEqual(events[-1], ("done", "failed:one-way-FEA"))
 
     def test_fea_only_run_reports_crm_as_not_run(self) -> None:
@@ -516,6 +562,46 @@ class GuiSkipControlTest(unittest.TestCase):
         self.assertIn("  One-way FEA: not run\n", lines)
         self.assertIn(("done", "stopped"), events)
         self.assertEqual(calls["count"], 1)
+
+
+class WizardTimingTest(unittest.TestCase):
+    def test_timing_lines_mark_unstarted_stage_as_not_run(self) -> None:
+        self.assertEqual(
+            wiz.simulation_timing_lines({"rigid-CRM": 12.34}),
+            ["Simulation elapsed times:", "  CRM: 12.3 s", "  One-way FEA: not run"],
+        )
+
+    def test_main_reports_partial_stage_time_when_a_stage_fails(self) -> None:
+        args = SimpleNamespace(yes=True)
+        cfg = {"output_dir": Path("/tmp/opencode/unused_study"), "dry_run": False}
+        steps = [{"name": "rigid-CRM", "command": ["crm"],
+                  "log": "/tmp/opencode/unused_study/crm.log"}]
+
+        def fail_step(step):
+            time.sleep(0.06)
+            return False
+
+        out = io.StringIO()
+        previous_accept = wiz.ACCEPT_DEFAULTS
+        try:
+            with patch.object(wiz, "_ensure_chrono_python"), \
+                    patch.object(wiz, "build_parser",
+                                 return_value=SimpleNamespace(parse_args=lambda: args)), \
+                    patch.object(wiz, "collect_settings", return_value=cfg), \
+                    patch.object(wiz, "build_commands", return_value=steps), \
+                    patch.object(wiz, "write_reproducibility_files"), \
+                    patch.object(wiz, "run_step", side_effect=fail_step), \
+                    redirect_stdout(out):
+                rc = wiz.main()
+        finally:
+            wiz.ACCEPT_DEFAULTS = previous_accept
+        self.assertEqual(rc, 1)
+        text = out.getvalue()
+        match = re.search(r"  CRM: (\d+\.\d+) s", text)
+        self.assertIsNotNone(match, text)
+        self.assertGreaterEqual(float(match.group(1)), 0.05, text)
+        self.assertIn("  One-way FEA: not run", text)
+        self.assertIn("Total wall time: ", text)
 
 
 if __name__ == "__main__":

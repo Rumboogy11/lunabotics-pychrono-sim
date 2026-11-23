@@ -10,6 +10,7 @@ Run all commands from the project root unless noted. Most shell launchers add `c
 | --- | --- |
 | `./install.sh` | Install/build the local Chrono environment. |
 | `./run_study_gui.sh` | Launch the desktop GUI. |
+| `./run_study_gui_modern.sh` | Launch the same GUI with the optional modern rounded/colour-coded theme. |
 | `./run_study.sh` | Interactive or flag-driven study wizard. |
 | `./crm/run.sh` | Rigid Chrono::CRM production simulation. |
 | `./crm/run_oneway_fea.sh` | Replay recorded CRM loads on the solid FEA drum. |
@@ -40,9 +41,13 @@ Sets project/build paths (`CHRONO_PROJECT_ROOT`, `CHRONO_ENV`, `CHRONO_SRC`, `CH
 
 Starts `study_gui.py`. The GUI has no command-line options. It prefers a system Python with Tkinter for display scaling and falls back to the local environment. Set `PYTHON` to override. Use `xvfb-run ./run_study_gui.sh` on headless hosts.
 
+### `./run_study_gui_modern.sh`
+
+Starts `study_gui_modern.py`, a thin subclass of `study_gui.py` with a modern theme: rounded ttk elements (Pillow-backed, with a square fallback), a header bar, colour-coded action buttons, and a light/dark toggle. It accepts no command-line options and uses the same interpreter policy and settings file as the classic launcher.
+
 ### `./run_study.sh`
 
-Forwards all arguments to `study_wizard.py`. `--help` prints every wizard flag; see the [wizard guide](wizard-guide.md).
+Forwards all arguments to `study_wizard.py`. `--help` prints every wizard flag; see the [wizard guide](wizard-guide.md). A real run prints a `Simulation elapsed times` block with the CRM, one-way FEA, and total wall times, including partial times if a stage fails or the run is interrupted; stages that never started show `not run`.
 
 ## Simulation drivers
 
@@ -178,7 +183,7 @@ The suites cover GUI fields, geometry consistency, fill metrics, force descent, 
 
 | Variable | Effect |
 | --- | --- |
-| `PYTHON` | Overrides the interpreter used by simulation/CLI shell launchers; `run_study_gui.sh` still chooses its own Tk-capable display Python. |
+| `PYTHON` | Overrides the interpreter used by simulation/CLI shell launchers; `run_study_gui.sh` and `run_study_gui_modern.sh` still choose their own Tk-capable display Python. |
 | `CHRONO_ENV`, `CHRONO_SRC`, etc. | Set by `environment/activate-chrono-source.sh`; used by direct tool invocations. |
 | `OMP_NUM_THREADS` | CPU thread count for OpenMP work; the activation script defaults it to half the machine's threads but never overrides an explicit value. |
 | `PYCHRONO_EXPORT_DIR` / `PYCHRONO_STUDY_DIR` | Tells `view_study_paraview.py` which export folder to open. |

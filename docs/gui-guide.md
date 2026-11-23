@@ -14,6 +14,16 @@ The launcher chooses a Python with Tkinter for the window (system `python3` if a
 xvfb-run ./run_study_gui.sh
 ```
 
+### Modern-styled launcher
+
+```bash
+./run_study_gui_modern.sh
+```
+
+This optional front end uses the same wizard, settings, tools, and Docs pages, but applies a flatter theme with rounded buttons, entry fields, tabs, checkboxes, and framed sections. Action buttons use different colours: indigo for **Run study**, teal for secondary simulation/refresh actions, blue for file and info actions, violet for saving/configuration, green for viewing results, amber for **Skip current step**, and red for **Stop running process**. A **Dark mode** / **Light mode** button in the new header switches and saves the theme.
+
+Tabs use a smaller bold font, tighter padding, and a reduced corner radius, with one shared padding value for every state so selecting a tab never changes its width. Button labels and parameter input boxes use compact padding and reduced corner radii so they stay slim without changing the text size. The **Configure**, **Simulate**, and **Review** chips in the header are clickable shortcuts: **Configure** opens page 1 of the Study Wizard, **Simulate** opens page 6 (Review & Run), and **Review** opens the **Tools / View Results** tab. The chip for the view you are using is highlighted automatically. Checkboxes such as **Auto-scale from CAD/mesh** use a larger rounded indicator with a drawn check mark. The **GUI scale** and **Text size** settings affect the modern header, action buttons, tabs, rounded images, checkboxes, navigation bars, toolbars, and padding together instead of only the text and input fields. The Docs text tags, embedded tables, and Output Preview 3D/2D plot canvases also use the modern palette, so the classic dark-mode greys no longer show through those areas. Pillow provides the rounded corners and checkbox marks; without it the layout falls back to the usual square ttk controls. The classic launcher keeps its original visual styling; both launchers now share the same top-tab order from `study_gui.py`.
+
 > The **Docs** tab of this application contains this page and all other documentation, so you can read it without leaving the GUI.
 
 ## The top-level tabs
@@ -21,10 +31,10 @@ xvfb-run ./run_study_gui.sh
 | Tab | Purpose |
 | --- | --- |
 | **Study Wizard** | Configure and run a new study. Contains six sub-pages and the run controls. |
-| **Defaults** | Persistent starting values for new studies. |
-| **Tools / View Results** | Export and view results for an existing study; preview STEP meshes; adjust the fill detector. |
 | **Output Preview** | Lightweight, CSV-only particle cloud and timeline viewer. Shown by default; can be hidden in Settings. |
+| **Tools / View Results** | Export and view results for an existing study; preview STEP meshes; adjust the fill detector. |
 | **Docs** | This documentation, with a searchable text pane. |
+| **Defaults** | Persistent starting values for new studies. |
 | **Settings** | Fonts, scaling, theme, window size, and preview options. |
 
 ## Study Wizard
@@ -117,7 +127,7 @@ The note at the bottom of the page summarizes the ParaView behaviour; the same i
 
 ### Page 6 — Review & Run
 
-The top pane shows the generated commands; the lower pane streams the stage log while running. Use **Refresh preview** after changing a field. When a run ends, the log prints wall-clock elapsed times for the CRM and one-way FEA stages; a successful run also prints the total wall time. A stage that was skipped, stopped, not completed, or not part of the run (`rigid-CRM` in a one-way-FEA-only run) is shown as `not run`.
+The top pane shows the generated commands; the lower pane streams the stage log while running. Use **Refresh preview** after changing a field. When a run ends — successfully or after a stage is skipped, stopped, or fails — the log prints wall-clock elapsed times for the CRM and one-way FEA stages plus the total wall time. A stage that was launched keeps the time it spent running even if it was cancelled partway through; only stages that never started (`rigid-CRM` in a one-way-FEA-only run, or stages after an early stop) are shown as `not run`.
 
 Along the bottom of the Study Wizard tab (outside page 6):
 

@@ -63,9 +63,9 @@ Launch the application:
 ./run_study_gui.sh
 ```
 
-On a machine without a display, use `xvfb-run ./run_study_gui.sh`. The launcher picks a Python with Tkinter for the window and uses the project environment for simulations.
+On a machine without a display, use `xvfb-run ./run_study_gui.sh`. The launcher picks a Python with Tkinter for the window and uses the project environment for simulations. For a rounded, colour-coded version of the same application, run `./run_study_gui_modern.sh` instead; it has the same tabs and controls.
 
-The GUI opens on the **Study Wizard** tab with six pages. Work left to right; use **Next >** and **< Back** at the bottom.
+The GUI opens on the **Study Wizard** tab with six pages. Work left to right; use **Next >** and **< Back** at the bottom. The top tabs run in this order: **Study Wizard**, **Output Preview**, **Tools / View Results**, **Docs**, **Defaults**, **Settings** — the same order in both GUI launchers.
 
 ### Page 1 — Study
 
@@ -112,7 +112,7 @@ Recommended for a first study:
 
 Click **Refresh preview** to see the exact commands that will run. This is also a good moment to click **Save config/commands (dry run)** if you want a reproducible recipe without simulating.
 
-Click **Run study**. Watch the log panel: the runner executes the STEP conversion (if needed), the rigid CRM stage, the one-way FEA replay, and finally the ParaView export. At the end, the log reports elapsed time for the CRM and one-way FEA stages plus the total wall time. You can **Skip current step** to terminate the active command and continue, or **Stop running process** to abort the remaining stages.
+Click **Run study**. Watch the log panel: the runner executes the STEP conversion (if needed), the rigid CRM stage, the one-way FEA replay, and finally the ParaView export. At the end, the log reports elapsed time for the CRM and one-way FEA stages plus the total wall time, even if a stage was skipped or stopped partway through; a stage that never ran shows `not run`. You can **Skip current step** to terminate the active command and continue, or **Stop running process** to abort the remaining stages.
 
 ## 4. Find and view your results
 
