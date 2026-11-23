@@ -785,6 +785,38 @@ class GuiScaleSettingsTest(IsolatedGuiDefaultsTest):
             finally:
                 root.destroy()
 
+    def test_window_size_does_not_follow_gui_scale(self) -> None:
+        import tkinter as tk
+
+        import study_gui as gui
+
+        with tempfile.TemporaryDirectory(prefix="gui_window_scale_", dir="/tmp/opencode") as tmp:
+            root = tk.Tk()
+            root.geometry(
+                f"{gui.SHIPPED_SETTINGS['window_width']}x"
+                f"{gui.SHIPPED_SETTINGS['window_height']}+0+0")
+            root.deiconify()
+            try:
+                with patch.object(gui, "SETTINGS_FILE", Path(tmp) / "settings.json"):
+                    app = gui.StudyGUI(root)
+                    root.update_idletasks()
+                    root.update()
+                    expected = (int(gui.SHIPPED_SETTINGS["window_width"]),
+                                int(gui.SHIPPED_SETTINGS["window_height"]))
+                    self.assertEqual((root.winfo_width(), root.winfo_height()), expected)
+
+                    for scale in ("1.5", "0.75"):
+                        app.settings_vars["ui_scale"].set(scale)
+                        app._apply_settings_now()
+                        root.update_idletasks()
+                        root.update()
+                        self.assertEqual(
+                            (root.winfo_width(), root.winfo_height()), expected,
+                            f"window resized at ui_scale={scale}",
+                        )
+            finally:
+                root.destroy()
+
 
 class ReverseSpinToggleTest(IsolatedGuiDefaultsTest):
     def test_toggle_flips_signed_omega_and_command_flags(self) -> None:

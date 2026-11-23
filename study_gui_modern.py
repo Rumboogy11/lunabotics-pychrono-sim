@@ -250,6 +250,7 @@ class ModernStudyGUI(gui.StudyGUI):
         self.root.title("PyChrono Excavator — Modern Studio")
         self._build_modern_chrome()
         self._apply_modern_theme(self.settings)
+        self._apply_window_geometry(self.settings)
 
     # -- setup ---------------------------------------------------------
     def _prepare_base_fonts(self, root: tk.Misc) -> None:
@@ -374,8 +375,12 @@ class ModernStudyGUI(gui.StudyGUI):
     # -- theming -------------------------------------------------------
     def _apply_ui_settings(self, values: dict[str, object] | None = None) -> None:
         """Keep the modern skin applied even when inherited settings change."""
+        values = values or self.settings
         super()._apply_ui_settings(values)
-        self._apply_modern_theme(values or self.settings)
+        self._apply_modern_theme(values)
+        # The modern theme changes padding and image sizes after the classic
+        # pass, so reassert the literal pixel window size once more.
+        self._apply_window_geometry(values)
 
     def _palette(self, values: dict[str, object]) -> dict[str, str]:
         return dict(DARK_PALETTE if values.get("dark_mode") else LIGHT_PALETTE)

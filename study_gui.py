@@ -545,7 +545,7 @@ SHIPPED_SETTINGS: dict[str, object] = {
 
 SETTINGS_INFO: dict[str, str] = {
     "ui_scale": _info(
-        "Whole-GUI density factor for widget padding and Tk scaling, from 0.75 to 2.0. 1.0 uses the system density; text size is controlled separately.",
+        "Whole-GUI density factor for widget padding and Tk scaling, from 0.75 to 2.0. 1.0 uses the system density; text size is controlled separately. The window size setting is in pixels and does not change with this factor.",
         "Cost: a rendering choice with negligible startup cost; it never changes the simulation or its files.",
     ),
     "font_size": _info(
@@ -553,11 +553,11 @@ SETTINGS_INFO: dict[str, str] = {
         "Cost: drawing only; larger text can make panes scroll more but has no simulation effect.",
     ),
     "window_width": _info(
-        "Window width in pixels from 640 to 3840. Apply now resizes the open window; the saved value is used at the next launch.",
+        "Window width in pixels from 640 to 3840. This is a literal pixel size, independent of GUI scale and Text size. Apply now resizes the open window; the saved value is used at the next launch.",
         "Cost: drawing only; a very wide window needs more screen space but does not affect the run.",
     ),
     "window_height": _info(
-        "Window height in pixels from 480 to 2160. Apply now resizes the open window; the saved value is used at the next launch.",
+        "Window height in pixels from 480 to 2160. This is a literal pixel size, independent of GUI scale and Text size. Apply now resizes the open window; the saved value is used at the next launch.",
         "Cost: drawing only; a very tall window needs more screen space but does not affect the run.",
     ),
     "text_color": _info(
@@ -2542,6 +2542,21 @@ class StudyGUI:
         for child in children:
             yield from self._walk_widgets(child)
 
+    def _apply_window_geometry(self, values: dict[str, object] | None = None) -> tuple[int, int]:
+        """Apply the saved pixel size independently of GUI scale.
+
+        Scaling changes widget density and fonts, so this is called after all
+        styling work.  Applying geometry first can let a larger theme resize
+        the top-level window on some platforms.
+        """
+        values = values or self.settings
+        width = _setting_int(values.get("window_width"), "Window width", 640, 3840,
+                             int(SHIPPED_SETTINGS["window_width"]))
+        height = _setting_int(values.get("window_height"), "Window height", 480, 2160,
+                              int(SHIPPED_SETTINGS["window_height"]))
+        self.root.geometry(f"{width}x{height}")
+        return width, height
+
     def _apply_ui_settings(self, values: dict[str, object] | None = None) -> None:
         """Apply appearance preferences to the live Tk widgets."""
         values = values or self.settings
@@ -2559,14 +2574,10 @@ class StudyGUI:
             pass
         pad_x = max(2, int(round(8 * scale)))
         pad_y = max(2, int(round(4 * scale)))
-        width = _setting_int(values.get("window_width"), "Window width", 640, 3840, 1100)
-        height = _setting_int(values.get("window_height"), "Window height", 480, 2160, 1080)
         color = str(values.get("text_color") or LIGHT_TEXT)
         if not _valid_color(color):
             color = str(SHIPPED_SETTINGS["text_color"])
         dark = bool(values.get("dark_mode"))
-
-        self.root.geometry(f"{width}x{height}")
 
         for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont",
                      "TkHeadingFont", "TkFixedFont"):
@@ -2684,6 +2695,8 @@ class StudyGUI:
         self._apply_preview_limits(values)
         self._apply_preview_style(values)
         self._apply_preview_visibility(bool(values.get("show_output_preview", True)))
+        # Geometry is applied last so scale/theme changes cannot resize the window.
+        self._apply_window_geometry(values)
 
     def _style_combobox_popdown(self, widget, bg: str, field: str,
                                button: str, color: str) -> None:

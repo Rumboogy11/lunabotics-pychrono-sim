@@ -238,6 +238,23 @@ class ModernGuiTest(unittest.TestCase):
         self.assertEqual(self.app._accent_bar.cget("width"),
                          self.app._px(6))
 
+    def test_window_size_does_not_follow_gui_scale(self) -> None:
+        self.root.deiconify()
+        self.root.update_idletasks()
+        self.root.update()
+        expected = (int(gui.SHIPPED_SETTINGS["window_width"]),
+                    int(gui.SHIPPED_SETTINGS["window_height"]))
+        self.assertEqual((self.root.winfo_width(), self.root.winfo_height()), expected)
+
+        for scale in (1.5, 0.75):
+            self.app._apply_ui_settings(dict(self.app.settings, ui_scale=scale))
+            self.root.update_idletasks()
+            self.root.update()
+            self.assertEqual(
+                (self.root.winfo_width(), self.root.winfo_height()), expected,
+                f"window resized at ui_scale={scale}",
+            )
+
     def test_theme_toggle_updates_palette_and_persists(self) -> None:
         self.assertFalse(bool(self.app.settings.get("dark_mode")))
         self.app._toggle_modern_theme()
