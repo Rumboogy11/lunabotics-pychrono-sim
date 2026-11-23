@@ -26,6 +26,7 @@ For contributors and advanced users who want to change the tools, understand the
 ├── detector_size_tool.py              interactive fill-detector sizer
 ├── study_wizard.py                    CLI wizard: prompts, config, commands, execution
 ├── study_gui.py                       Tkinter GUI (Imports wizard helpers directly)
+├── study_gui_modern.py                optional themed GUI subclass (Pillow rounded ttk)
 ├── study_gui_defaults.json            saved GUI run defaults (gitignored)
 ├── study_gui_settings.json            saved GUI appearance settings (gitignored)
 ├── study_output_preview.py            CSV-only Tk preview widget

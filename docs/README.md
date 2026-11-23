@@ -4,7 +4,7 @@ Welcome. This project simulates a lunar bucket-drum excavator digging into a soi
 
 These pages are written to be read in order if you are new, or jumped into directly if you know what you need.
 
-> All of these documents are also available **inside the application**. Launch `./run_study_gui.sh`, open the **Docs** tab, and pick a page from the list on the left. The built-in reader styles headings, inline code, and quotes, renders tables as real columns, and its links jump between pages. **Find** steps through matches on the page you are viewing, and **Refresh** reloads the selected page after you edit a file or change GUI help text.
+> All of these documents are also available **inside the application**. Launch `./run_study_gui.sh` (or the modern-styled `./run_study_gui_modern.sh`), open the **Docs** tab, and pick a page from the list on the left. The built-in reader styles headings, inline code, and quotes, renders tables as real columns, and its links jump between pages. **Find** steps through matches on the page you are viewing, and **Refresh** reloads the selected page after you edit a file or change GUI help text.
 
 ## Start here (beginner path)
 
