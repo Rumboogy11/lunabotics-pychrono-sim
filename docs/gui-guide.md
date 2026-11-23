@@ -117,7 +117,7 @@ The note at the bottom of the page summarizes the ParaView behaviour; the same i
 
 ### Page 6 — Review & Run
 
-The top pane shows the generated commands; the lower pane streams the stage log while running. Use **Refresh preview** after changing a field.
+The top pane shows the generated commands; the lower pane streams the stage log while running. Use **Refresh preview** after changing a field. When a run ends, the log prints wall-clock elapsed times for the CRM and one-way FEA stages; a successful run also prints the total wall time. A stage that was skipped, stopped, not completed, or not part of the run (`rigid-CRM` in a one-way-FEA-only run) is shown as `not run`.
 
 Along the bottom of the Study Wizard tab (outside page 6):
 

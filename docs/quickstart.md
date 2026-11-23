@@ -112,7 +112,7 @@ Recommended for a first study:
 
 Click **Refresh preview** to see the exact commands that will run. This is also a good moment to click **Save config/commands (dry run)** if you want a reproducible recipe without simulating.
 
-Click **Run study**. Watch the log panel: the runner executes the STEP conversion (if needed), the rigid CRM stage, the one-way FEA replay, and finally the ParaView export. You can **Skip current step** to terminate the active command and continue, or **Stop running process** to abort the remaining stages.
+Click **Run study**. Watch the log panel: the runner executes the STEP conversion (if needed), the rigid CRM stage, the one-way FEA replay, and finally the ParaView export. At the end, the log reports elapsed time for the CRM and one-way FEA stages plus the total wall time. You can **Skip current step** to terminate the active command and continue, or **Stop running process** to abort the remaining stages.
 
 ## 4. Find and view your results
 

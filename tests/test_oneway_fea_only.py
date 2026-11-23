@@ -7,6 +7,7 @@ import csv
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -278,6 +279,138 @@ class GuiSkipControlTest(unittest.TestCase):
         self.assertEqual(events[-1], ("done", "ok"))
         self.assertEqual(calls["count"], 2)
 
+    def test_skipped_crm_still_prints_timing_summary(self) -> None:
+        class FakeProc:
+            def __init__(self):
+                self.stdout = io.StringIO("running\n")
+
+            def wait(self) -> int:
+                return 0
+
+        calls = {"count": 0}
+
+        def fake_popen(command, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                # Skip the CRM stage while it is active.
+                self.app._skip_requested.set()
+            return FakeProc()
+
+        steps = [
+            {"name": "rigid-CRM", "command": ["crm"],
+             "log": str(Path(self._tmp.name) / "crm.log")},
+            {"name": "one-way-FEA", "command": ["fea"],
+             "log": str(Path(self._tmp.name) / "fea.log")},
+        ]
+        self.app._stop_requested.clear()
+        self.app._skip_requested.clear()
+        with patch.object(self.gui.subprocess, "Popen", side_effect=fake_popen):
+            self.app._run_thread({"output_dir": self._tmp.name}, steps)
+
+        events = self._collect_events()
+        lines = [text for kind, text in events if kind == "line"]
+        self.assertIn("  CRM: not run\n", lines)
+        self.assertTrue(
+            any(re.fullmatch(r"  One-way FEA: \d+\.\d+ s\n", line) for line in lines),
+            lines,
+        )
+        self.assertIn(("step_skipped", "rigid-CRM"), events)
+        self.assertEqual(events[-1], ("done", "ok"))
+
+    def test_completed_run_prints_crm_and_fea_elapsed_times(self) -> None:
+        class FakeProc:
+            def __init__(self):
+                self.stdout = io.StringIO("running\n")
+
+            def wait(self) -> int:
+                return 0
+
+        def fake_popen(command, **_kwargs):
+            return FakeProc()
+
+        steps = [
+            {"name": "rigid-CRM", "command": ["crm"],
+             "log": str(Path(self._tmp.name) / "crm.log")},
+            {"name": "one-way-FEA", "command": ["fea"],
+             "log": str(Path(self._tmp.name) / "fea.log")},
+            {"name": "export-ParaView-VTK", "command": ["export"],
+             "log": str(Path(self._tmp.name) / "export.log")},
+        ]
+        self.app._stop_requested.clear()
+        self.app._skip_requested.clear()
+        with patch.object(self.gui.subprocess, "Popen", side_effect=fake_popen):
+            self.app._run_thread({"output_dir": self._tmp.name}, steps)
+
+        lines = [text for kind, text in self._collect_events() if kind == "line"]
+        self.assertTrue(
+            any(re.fullmatch(r"  CRM: \d+\.\d+ s\n", line) for line in lines),
+            lines,
+        )
+        self.assertTrue(
+            any(re.fullmatch(r"  One-way FEA: \d+\.\d+ s\n", line) for line in lines),
+            lines,
+        )
+        self.assertFalse(
+            any("export-ParaView-VTK:" in line for line in lines),
+            lines,
+        )
+
+    def test_failed_fea_run_still_reports_completed_crm_time(self) -> None:
+        class FakeProc:
+            def __init__(self, rc: int):
+                self.stdout = io.StringIO("running\n")
+                self.rc = rc
+
+            def wait(self) -> int:
+                return self.rc
+
+        def fake_popen(command, **_kwargs):
+            return FakeProc(0 if command == ["crm"] else 1)
+
+        steps = [
+            {"name": "rigid-CRM", "command": ["crm"],
+             "log": str(Path(self._tmp.name) / "crm.log")},
+            {"name": "one-way-FEA", "command": ["fea"],
+             "log": str(Path(self._tmp.name) / "fea.log")},
+        ]
+        self.app._stop_requested.clear()
+        self.app._skip_requested.clear()
+        with patch.object(self.gui.subprocess, "Popen", side_effect=fake_popen):
+            self.app._run_thread({"output_dir": self._tmp.name}, steps)
+
+        events = self._collect_events()
+        lines = [text for kind, text in events if kind == "line"]
+        self.assertTrue(
+            any(re.fullmatch(r"  CRM: \d+\.\d+ s\n", line) for line in lines),
+            lines,
+        )
+        self.assertIn("  One-way FEA: not run\n", lines)
+        self.assertEqual(events[-1], ("done", "failed:one-way-FEA"))
+
+    def test_fea_only_run_reports_crm_as_not_run(self) -> None:
+        class FakeProc:
+            def __init__(self):
+                self.stdout = io.StringIO("running\n")
+
+            def wait(self) -> int:
+                return 0
+
+        steps = [
+            {"name": "one-way-FEA", "command": ["fea"],
+             "log": str(Path(self._tmp.name) / "fea.log")},
+        ]
+        self.app._stop_requested.clear()
+        self.app._skip_requested.clear()
+        with patch.object(self.gui.subprocess, "Popen", return_value=FakeProc()):
+            self.app._run_thread({"output_dir": self._tmp.name}, steps)
+
+        lines = [text for kind, text in self._collect_events() if kind == "line"]
+        self.assertIn("  CRM: not run\n", lines)
+        self.assertTrue(
+            any(re.fullmatch(r"  One-way FEA: \d+\.\d+ s\n", line) for line in lines),
+            lines,
+        )
+
     @unittest.skipIf(os.name == "nt", "process-group test requires POSIX fork")
     def test_skip_kills_process_group_and_reaches_fea_stage(self) -> None:
         """A skipped CRM step must not hang the run on inherited stdout.
@@ -378,6 +511,9 @@ class GuiSkipControlTest(unittest.TestCase):
             self.app._run_thread({"output_dir": self._tmp.name}, steps)
 
         events = self._collect_events()
+        lines = [text for kind, text in events if kind == "line"]
+        self.assertIn("  CRM: not run\n", lines)
+        self.assertIn("  One-way FEA: not run\n", lines)
         self.assertIn(("done", "stopped"), events)
         self.assertEqual(calls["count"], 1)
 

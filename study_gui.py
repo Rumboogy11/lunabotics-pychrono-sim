@@ -3417,16 +3417,27 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         self.status_var.set(status)
         threading.Thread(target=self._run_thread, args=(cfg, steps), daemon=True).start()
 
+    def _log_simulation_timings(self, step_times: dict[str, float]) -> None:
+        """Report wall-clock times for the two simulation stages in the log."""
+        self.log_queue.put(("line", "\nSimulation elapsed times:\n"))
+        for step_name, label in (("rigid-CRM", "CRM"), ("one-way-FEA", "One-way FEA")):
+            elapsed = step_times.get(step_name)
+            value = f"{elapsed:.1f} s" if elapsed is not None else "not run"
+            self.log_queue.put(("line", f"  {label}: {value}\n"))
+
     def _run_thread(self, cfg, steps):
+        step_times: dict[str, float] = {}
         try:
             started = time.perf_counter()
             for step in steps:
                 if self._stop_requested.is_set():
                     self.log_queue.put(("line", "\n[stop requested; aborting]\n"))
+                    self._log_simulation_timings(step_times)
                     self.log_queue.put(("done", "stopped"))
                     return
                 # A skip applies to the step that was active when requested.
                 self._skip_requested.clear()
+                step_started = time.perf_counter()
                 self.log_queue.put(("line", f"\n[{step['name']}] {shlex.join(step['command'])}\n"))
                 log_path = Path(step["log"])
                 log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3449,8 +3460,10 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                     finally:
                         proc.stdout.close()
                     rc = proc.wait()
+                step_elapsed = time.perf_counter() - step_started
                 if self._stop_requested.is_set():
                     self.log_queue.put(("line", f"[{step['name']}] stopped by user\n"))
+                    self._log_simulation_timings(step_times)
                     self.log_queue.put(("done", "stopped"))
                     return
                 if self._skip_requested.is_set():
@@ -3459,15 +3472,19 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                     continue
                 if rc != 0:
                     self.log_queue.put(("line", f"[{step['name']}] FAILED (exit {rc})\n"))
+                    self._log_simulation_timings(step_times)
                     self.log_queue.put(("done", f"failed:{step['name']}"))
                     return
+                step_times[step["name"]] = step_elapsed
                 self.log_queue.put(("line", f"[{step['name']}] complete\n"))
                 self.log_queue.put(("step_done", step["name"]))
             # post results (capture summary text)
-            self.log_queue.put(("line", f"\nTotal wall time: {time.perf_counter()-started:.1f} s\n"))
+            self._log_simulation_timings(step_times)
+            self.log_queue.put(("line", f"Total wall time: {time.perf_counter()-started:.1f} s\n"))
             self.log_queue.put(("done", "ok"))
         except Exception as e:
             self.log_queue.put(("line", f"\nERROR: {e}\n"))
+            self._log_simulation_timings(step_times)
             self.log_queue.put(("done", "error"))
 
     def _step_process_alive(self, proc: subprocess.Popen) -> bool:
