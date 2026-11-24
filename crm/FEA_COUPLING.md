@@ -35,6 +35,16 @@ completes with the shorter history; it no longer extends the run by holding the
 final wrench. This is a normal non-fatal run: the FEA summary and optional VTU
 series cover only the time for which real CRM wrench samples exist.
 
+A full study can optionally overlap the two stages (`--concurrent-crm-fea`, or
+the GUI's **Run CRM + one-way FEA together** toggle). The orchestrator writes a
+liveness marker under `<study>/crm/` while rigid CRM is running and passes
+`--wait-for-crm --crm-alive-file` to the replay. The replay waits for at least two
+valid CRM samples, reloads the CSV as it grows, and does not stop at a
+temporarily short file while the marker is current. When CRM exits, the runner
+removes the marker and the replay applies the same duration/frame cap described
+above. The load interpolation, motor settings, and outputs are unchanged; only
+the timing of the cap is deferred.
+
 This avoids flex-BCE instability and gives stable short-run PLA stress
 estimates. It is a structural response to rigid-CRM loads, not two-way FSI:
 deformation cannot feed back into the soil, and the rigid drum wrench is only
@@ -70,7 +80,10 @@ add `descent_mode`, `descent_state`, `actuator_force_n` (positive magnitude) and
 `recorded_trajectory_error_m`. Kinematic CSV schemas are unchanged.
 
 Force descent does not change fill/capacity classification or SPH/BCE
-bookkeeping. The wizard/GUI store the mode as `descent_mode` (`kinematic`/
+bookkeeping. Baseline fill capacity is computed once before the CRM run from
+the nominal cavity minus the loaded excavator mesh overlap; that constant is
+recorded in `crm/config.json` and is independent of the FEA replay or descent
+mode. The wizard/GUI store the mode as `descent_mode` (`kinematic`/
 `force`), `descent_force_n` (N) and `descent_force_ramp_s` (s) in
 `study_config.json`, and emit the CLI flags only for force studies. Because
 descent time is load-dependent, wizard duration guidance based on

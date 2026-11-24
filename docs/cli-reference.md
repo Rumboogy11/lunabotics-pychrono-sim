@@ -47,7 +47,7 @@ Starts `study_gui_modern.py`, a thin subclass of `study_gui.py` with a modern th
 
 ### `./run_study.sh`
 
-Forwards all arguments to `study_wizard.py`. `--help` prints every wizard flag; see the [wizard guide](wizard-guide.md). A real run prints a `Simulation elapsed times` block with the CRM, one-way FEA, and total wall times, including partial times if a stage fails or the run is interrupted; stages that never started show `not run`.
+Forwards all arguments to `study_wizard.py`. `--help` prints every wizard flag; see the [wizard guide](wizard-guide.md). Pass `--concurrent-crm-fea` to start rigid CRM and one-way FEA together; `--no-concurrent-crm-fea` forces the default sequential order. A real run prints a `Simulation elapsed times` block with the CRM, one-way FEA, and total wall times, including partial times if a stage fails or the run is interrupted; stages that never started show `not run`. In concurrent mode the two stage times overlap, so their sum can exceed the total wall time.
 
 ## Simulation drivers
 
@@ -68,7 +68,7 @@ The main design model. Common flags:
 | Output | `--output-dir DIR`, `--loads-file PATH`, `--save-particles`, `--particle-fps F`, `--loads-fps F`, `--particle-writers N`, `--keep-old-particles`, `--no-output` |
 | Checks | `--print-soil`, `--smoke-test --mesh-file PATH` |
 
-`--mesh {coarse,medium}` selects legacy local OBJ names from `lunar_excavator_config.py`; those files are not shipped, so supply `--mesh-file` with your own surface. The CRM launchers pin local Chrono libraries with `LD_PRELOAD` through `crm/chrono_runtime_env.sh`, including `libChrono_pardisomkl.so`, and inject local `PYTHONPATH`/`LD_LIBRARY_PATH`. Full option meanings are in [crm/README.md](../crm/README.md).
+`--mesh {coarse,medium}` selects legacy local OBJ names from `lunar_excavator_config.py`; those files are not shipped, so supply `--mesh-file` with your own surface. For a derived fill capacity, the rigid CRM driver measures the loaded mesh volume inside the nominal cavity once at startup and subtracts it from the denominator. `--capacity-volume` is an already-free CAD volume and is used unchanged. The CRM launchers pin local Chrono libraries with `LD_PRELOAD` through `crm/chrono_runtime_env.sh`, including `libChrono_pardisomkl.so`, and inject local `PYTHONPATH`/`LD_LIBRARY_PATH`. Full option meanings are in [crm/README.md](../crm/README.md).
 
 ### `./crm/run_oneway_fea.sh` — one-way structural replay
 
@@ -78,6 +78,7 @@ Replays a recorded soil wrench; no SPH contact is simulated in this stage. The m
 | --- | --- |
 | `--loads PATH` | Required; `soil_loads.csv` recorded by rigid CRM. |
 | `--duration T`, `--dt S`, `--fps F` | Replay length, structural timestep, summary cadence. The replay runs for the smaller of `T` and the last recorded CRM load frame. |
+| `--wait-for-crm`, `--crm-alive-file PATH` | Live replay mode used by the full-study orchestrator. Wait for CRM's liveness marker and follow newly written load frames while CRM runs; after CRM exits, apply the ordinary duration/frame cap. |
 | `--fea-node PATH`, `--fea-ele PATH` | Solid tetrahedral mesh. |
 | `--solver {pardiso-mkl,sparse-lu,sparse-qr,gmres}`, `--num-threads N` | Linear solver. |
 | `--load-radius-fraction F`, `--load-scale F`, `--min-stress-volume V`, `--raw-stress-every N`, `--no-lock-sparsity-pattern` | Load spread/scaling, peak-stress filtering, scan cadence, and solver sparsity-pattern control. |
@@ -85,7 +86,7 @@ Replays a recorded soil wrench; no SPH contact is simulated in this stage. The m
 | Motion/gravity | Match the CRM stage: `--descent-mode`, `--descent-force*`, `--gravity`, `--omega`, `--reverse-spin`, `--spin-axis`, bed and buffer options. |
 | Material | `--pla-youngs-modulus`, `--pla-poisson-ratio`, `--pla-density`, `--rayleigh-beta`, `--hub-radius`. |
 
-The replay checks required telemetry, sample count/order, descent mode, and (in kinematic mode) the Z trajectory, then interpolates the wrench by time. It runs for the minimum of `--duration` and the time of the last CRM load sample: if the loads file is shorter, it prints a `NOTICE` naming the shortened duration and finishes normally rather than holding the final wrench. Gravity, spin, and actuator-force settings are not validated from the CSV, so keep them matched manually. It rejects detector and SPH-only flags used by rigid CRM. The launcher always adds local `PYTHONPATH`/`LD_LIBRARY_PATH` entries and pins the matching local libraries with `LD_PRELOAD`, including PardisoMKL; a stale conda PyChrono installation cannot be mixed into this stage.
+The replay checks required telemetry, sample count/order, descent mode, and (in kinematic mode) the Z trajectory, then interpolates the wrench by time. It runs for the minimum of `--duration` and the time of the last CRM load sample: if the loads file is shorter, it prints a `NOTICE` naming the shortened duration and finishes normally rather than holding the final wrench. With `--wait-for-crm`, that cap is deferred while the CRM liveness marker exists; the driver prints `waiting for CRM load frames` messages while it catches up, then prints the ordinary `NOTICE` if CRM ends early. Gravity, spin, and actuator-force settings are not validated from the CSV, so keep them matched manually. It rejects detector and SPH-only flags used by rigid CRM. The launcher always adds local `PYTHONPATH`/`LD_LIBRARY_PATH` entries and pins the matching local libraries with `LD_PRELOAD`, including PardisoMKL; a stale conda PyChrono installation cannot be mixed into this stage.
 
 ### `./crm/run_fea.sh` — two-way FEA (diagnostic)
 
@@ -119,15 +120,15 @@ With no arguments it tries the legacy medium/coarse STL names from `lunar_excava
 
 ### `detector_size_tool.py`
 
-Interactive 3D sizing of the fill-detector cylinder. It can read STEP (`--step`), a converted surface (`--surface`), or FEA nodes (`--fea-node`), and overlays an orange nominal cylinder plus a green eroded classifier cylinder.
+Interactive 3D sizing of the fill-detector cylinder. It can read STEP (`--step`), a converted surface (`--surface`), or FEA nodes (`--fea-node`), and overlays an orange nominal cylinder plus a green eroded classifier cylinder. Excavator and detector opacity sliders control visibility, and a magenta curved arrow shows rotation about the study `--spin-axis` (flip it with `--reverse-spin`).
 
 ```bash
 ./chrono-env/bin/python detector_size_tool.py --step geometry/MyDrum.step \
   --radius 0.061 --length 0.066 --spacing 0.002 --source-axis Y \
-  --unit-scale 0.001 --show --result-json /tmp/detector_size.json
+  --unit-scale 0.001 --spin-axis X --show --result-json /tmp/detector_size.json
 ```
 
-Sliders update the JSON while dragging; the GUI reads it into the Geometry page. `--output PNG` saves a still image instead of opening the window.
+Radius/length sliders update the JSON while dragging; the GUI reads it into the Geometry page. Opacity and rotation display are view-only. `--output PNG` saves a still image instead of opening the window.
 
 ## Viewers and exporters
 

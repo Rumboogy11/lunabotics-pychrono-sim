@@ -664,6 +664,37 @@ class ScrollFrameWheelTest(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_wheel_reaches_the_same_bottom_as_the_scrollbar(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        import study_gui as gui
+
+        root = tk.Tk()
+        # The canvas must be mapped: an unmapped widget reports a height of 1,
+        # which hides the difference between wheel and scrollbar bounds.
+        root.geometry("600x500")
+        root.update()
+        try:
+            frame = gui.ScrollFrame(root, width=400, height=200)
+            frame.pack(fill=tk.BOTH, expand=True)
+            for i in range(60):
+                ttk.Label(frame.inner, text=f"row {i}").grid(row=i, column=0, sticky="w")
+            root.update()
+
+            label = frame.inner.winfo_children()[0]
+            for _ in range(200):
+                label.event_generate("<Button-5>")
+            root.update()
+            wheel_view = frame.canvas.yview()
+
+            frame.canvas.yview_moveto(1.0)
+            root.update()
+            self.assertEqual(wheel_view, frame.canvas.yview())
+            self.assertEqual(wheel_view[1], 1.0)
+        finally:
+            root.destroy()
+
 
 class PreviewStyleSettingsTest(unittest.TestCase):
     def test_style_defaults_are_shipped(self) -> None:
@@ -1217,6 +1248,16 @@ class FillDetectorSizeControlsTest(IsolatedGuiDefaultsTest):
             self.assertEqual(cmd[cmd.index("--step") + 1], str(step))
             self.assertEqual(cmd[cmd.index("--threads") + 1], "2")
             self.assertIn("--show", cmd)
+
+            spin_cmd = gui.build_detector_sizer_command(
+                python="py", root=base, step_file=None, surface_file=None,
+                fea_node=None, radius=0.061, length=0.066, spacing=0.002,
+                cad_axis="Y", unit_scale=0.001,
+                result_json=base / "result.json", show=False,
+                spin_axis="z", reverse_spin=True,
+            )
+            self.assertEqual(spin_cmd[spin_cmd.index("--spin-axis") + 1], "Z")
+            self.assertIn("--reverse-spin", spin_cmd)
 
             result = base / "result.json"
             result.write_text("{not json", encoding="utf-8")

@@ -3,7 +3,9 @@
 
 It asks for geometry, run time, bed/numerics, and solver settings, writes a
 reproducible ``commands.sh`` plus ``study_config.json``, then runs the rigid
-Chrono::CRM stage followed by the one-way FEA replay.
+Chrono::CRM stage followed by the one-way FEA replay.  An optional concurrent
+mode starts both stages together and keeps the replay alive on newly written
+CRM load frames while CRM is running.
 
 All important prompts also have CLI flags, so the same wizard can be used
 non-interactively for automation:
@@ -22,8 +24,10 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +48,18 @@ except Exception:  # pragma: no cover - fallback keeps the wizard usable
 
     def fit_active_box(run) -> tuple[float, float, float]:
         return (0.631333, 0.687407, 0.866370)
+
+
+# Marker written by the study runner while rigid CRM is alive.  The one-way
+# replay checks it (including the recorded PID) so it can keep waiting for new
+# load frames instead of stopping at a temporarily short CSV.
+CRM_ALIVE_NAME = "crm_running.flag"
+CONCURRENT_CRM_FEA_GROUP = "crm-fea"
+
+
+def crm_alive_file(cfg: dict[str, Any]) -> Path:
+    """Path to the CRM-liveness marker for *cfg*'s study directory."""
+    return Path(cfg["output_dir"]) / "crm" / CRM_ALIVE_NAME
 
 
 def discover_default(relative: str) -> Path:
@@ -734,6 +750,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--solver", choices=("pardiso-mkl", "sparse-lu", "sparse-qr", "gmres"),
                    default=None, help="one-way FEA linear solver")
     p.add_argument("--num-threads", type=int, default=None, help="FEA solver threads")
+    p.add_argument("--concurrent-crm-fea", action=argparse.BooleanOptionalAction, default=None,
+                   help="start rigid CRM and one-way FEA together; the replay follows newly "
+                        "written CRM load frames while CRM is running and stops at the usual "
+                        "minimum of requested duration and available frames once CRM exits "
+                        "(default: off; use --no-concurrent-crm-fea to force sequential)")
     p.add_argument("--load-radius-fraction", type=float, default=None,
                    help="apply soil loads to nodes with r >= fraction * drum radius (default: 0.95; lower spreads loads wider)")
     p.add_argument("--raw-stress-every", type=int, default=None,
@@ -1472,6 +1493,15 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "FEA threads", 8, minimum=1,
         detail="Thread count for the FEA solver (effective with pardiso-mkl).",
     )
+    if args.concurrent_crm_fea is not None:
+        concurrent_crm_fea = bool(args.concurrent_crm_fea)
+    else:
+        concurrent_crm_fea = prompt_bool(
+            "Run CRM and one-way FEA simultaneously?", False,
+            detail="Both stages start together. The FEA replay waits for new CRM load frames "
+                   "while CRM runs, then stops at the minimum of the requested replay length "
+                   "and the frames CRM actually wrote. Off runs CRM first, then FEA.",
+        )
     load_radius_fraction = args.load_radius_fraction if args.load_radius_fraction is not None else prompt_float(
         "Load node radius fraction", 0.95, minimum=0.01, maximum=1.0,
         detail="Soil loads go to exterior nodes at or beyond this fraction of drum radius; 0.95 limits them to a narrow outer band and cuts per-step load work while preserving the wrench.",
@@ -1609,6 +1639,8 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
             ),
             f"FEA:          dt={fea_dt:g} s, solver={solver}, threads={num_threads} "
             f"(3D stress VTU: {'stride ' + str(fea_vtk_stride) if fea_export_vtk else 'off'})",
+            "Execution:    CRM + one-way FEA "
+            + ("concurrently" if concurrent_crm_fea else "sequentially"),
             f"ParaView:     export={export_vtk} (frame stride {paraview_stride}, "
             f"particle frame stride {paraview_particle_stride or paraview_stride}, "
             f"particle render stride {paraview_particle_render_stride})",
@@ -1685,6 +1717,7 @@ def collect_settings(args: argparse.Namespace) -> dict[str, Any]:
         "fea_dt": fea_dt,
         "solver": solver,
         "num_threads": num_threads,
+        "concurrent_crm_fea": concurrent_crm_fea,
         "load_radius_fraction": load_radius_fraction,
         "raw_stress_every": raw_stress_every,
         "export_workers": export_workers,
@@ -1864,6 +1897,14 @@ def build_oneway_fea_step(cfg: dict[str, Any]) -> dict[str, Any]:
     if cfg.get("fea_export_vtk"):
         fea_cmd.extend(["--export-vtk",
                         "--vtk-stride", str(max(1, int(cfg.get("fea_vtk_stride", 1))))])
+    if cfg.get("concurrent_crm_fea"):
+        # The runner keeps this marker alive for exactly as long as the CRM
+        # stage is running.  The driver uses it to keep the replay alive while
+        # new load frames are still being written.
+        fea_cmd.extend([
+            "--wait-for-crm",
+            "--crm-alive-file", str(crm_alive_file(cfg)),
+        ])
     return {"name": "one-way-FEA", "command": fea_cmd}
 
 
@@ -1922,8 +1963,11 @@ def build_oneway_fea_only_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         cfg["descent_mode"] = recorded_mode
 
     # Never rewrite the full-study reproducibility files with a one-step list.
+    # A FEA-only replay has no live CRM stage, so it must keep the ordinary
+    # "stop at the last recorded frame" duration rule.
     cfg["mesh_steps"] = []
     cfg["export_vtk"] = False
+    cfg["concurrent_crm_fea"] = False
     step = build_oneway_fea_step(cfg)
     step["log"] = str(out_dir / "one-way-FEA.log")
     cfg["commands"] = [{"name": step["name"], "command": step["command"]}]
@@ -2027,6 +2071,17 @@ def build_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
 
     for step in steps:
         step["log"] = str(out_dir / f"{step['name']}.log")
+    if cfg.get("concurrent_crm_fea"):
+        marker = crm_alive_file(cfg)
+        for step in steps:
+            if step["name"] in ("rigid-CRM", "one-way-FEA"):
+                step["concurrent_group"] = CONCURRENT_CRM_FEA_GROUP
+                step["crm_alive_file"] = str(marker)
+        crm_step = next(s for s in steps if s["name"] == "rigid-CRM")
+        # Stale loads from a previous study would let FEA replay the wrong run
+        # before CRM has written its first sample.  The runner removes both
+        # files immediately before launching the pair.
+        crm_step["cleanup_files"] = [str(loads), str(marker)]
     cfg["commands"] = [{"name": s["name"], "command": s["command"]} for s in steps]
     return steps
 
@@ -2057,9 +2112,56 @@ def write_reproducibility_files(
         f"cd {shlex.quote(str(ROOT))}",
         "",
     ]
-    for step in steps:
-        lines.append(f"# {step['name']}")
-        lines.append(shlex.join(step["command"]) + " \\\n    | tee " + shlex.quote(step["log"]))
+    index = 0
+    while index < len(steps):
+        step = steps[index]
+        group_name = step.get("concurrent_group")
+        if not group_name:
+            lines.append(f"# {step['name']}")
+            lines.append(shlex.join(step["command"]) + " \\\n    | tee " + shlex.quote(step["log"]))
+            lines.append("")
+            index += 1
+            continue
+
+        group: list[dict[str, Any]] = []
+        while index < len(steps) and steps[index].get("concurrent_group") == group_name:
+            group.append(steps[index])
+            index += 1
+        crm_step = next(s for s in group if s["name"] == "rigid-CRM")
+        fea_step = next(s for s in group if s["name"] == "one-way-FEA")
+        marker_var = "crm_alive_marker"
+        lines.append("# rigid-CRM + one-way-FEA (concurrent)")
+        for raw in crm_step.get("cleanup_files", []):
+            lines.append(f"rm -f {shlex.quote(str(raw))}")
+        # Keep the marker path in a shell variable so the EXIT traps stay
+        # correct even when the study directory contains spaces or quotes.
+        lines.append(f"{marker_var}={shlex.quote(str(crm_step['crm_alive_file']))}")
+        # The marker holds a live PID and is removed by the CRM subshell as
+        # soon as CRM exits.  FEA therefore sees an absent marker immediately,
+        # without waiting for the shell to reap the background child.
+        lines.append(f'echo "$$" > "${marker_var}"')
+        lines.append("(")
+        lines.append(f"  trap 'rm -f \"${marker_var}\"' EXIT")
+        lines.append(
+            "  " + shlex.join(crm_step["command"]) + " > "
+            + shlex.quote(crm_step["log"]) + " 2>&1"
+        )
+        lines.append(") &")
+        lines.append("crm_pid=$!")
+        lines.append(f"trap 'rm -f \"${marker_var}\"' EXIT")
+        lines.append("set +e")
+        lines.append(
+            shlex.join(fea_step["command"]) + " > " + shlex.quote(fea_step["log"]) + " 2>&1"
+        )
+        lines.append("fea_rc=$?")
+        lines.append('wait "$crm_pid"')
+        lines.append("crm_rc=$?")
+        lines.append(f'rm -f "${marker_var}"')
+        lines.append("trap - EXIT")
+        lines.append("set -e")
+        lines.append('if [ "$crm_rc" -ne 0 ] || [ "$fea_rc" -ne 0 ]; then')
+        lines.append("  exit 1")
+        lines.append("fi")
         lines.append("")
     script = out_dir / commands_name
     script.write_text("\n".join(lines), encoding="utf-8")
@@ -2123,6 +2225,132 @@ def run_step(step: dict[str, Any]) -> bool:
         return False
     print(f"[{name}] complete", flush=True)
     return True
+
+
+def concurrent_groups(steps: list[dict[str, Any]]):
+    """Yield consecutive step lists; stages marked with a group stay together.
+
+    A non-grouped stage is yielded as a single-step list so both the CLI and
+    GUI runners can use the same sequence without changing ordinary studies.
+    """
+    index = 0
+    while index < len(steps):
+        group_name = steps[index].get("concurrent_group")
+        if not group_name:
+            yield [steps[index]]
+            index += 1
+            continue
+        group: list[dict[str, Any]] = []
+        while index < len(steps) and steps[index].get("concurrent_group") == group_name:
+            group.append(steps[index])
+            index += 1
+        yield group
+
+
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    """Stop a stage and its worker children (CRM uses particle-writer workers)."""
+    if os.name != "nt":
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+
+
+def run_concurrent_steps(steps: list[dict[str, Any]]) -> dict[str, bool]:
+    """Launch a marked CRM/FEA pair together and keep the FEA replay alive.
+
+    The CRM stage owns a liveness marker file written before either process
+    starts.  A watcher removes it as soon as CRM exits, so the one-way driver
+    sees a live marker only while CRM is genuinely still producing frames.
+    """
+    by_name = {step["name"]: step for step in steps}
+    crm_step = by_name.get("rigid-CRM")
+    fea_step = by_name.get("one-way-FEA")
+    if crm_step is None or fea_step is None:
+        raise StudyConfigError("concurrent group needs rigid-CRM and one-way-FEA steps")
+
+    marker = Path(crm_step["crm_alive_file"])
+    for raw in crm_step.get("cleanup_files", []):
+        try:
+            Path(raw).unlink()
+        except FileNotFoundError:
+            pass
+    marker.parent.mkdir(parents=True, exist_ok=True)
+
+    procs: dict[str, subprocess.Popen] = {}
+    logs: dict[str, Any] = {}
+    results = {step["name"]: False for step in steps}
+
+    def pump(proc: subprocess.Popen, log, name: str) -> None:
+        assert proc.stdout is not None
+        try:
+            for line in proc.stdout:
+                print(f"[{name}] {line}", end="", flush=True)
+                log.write(line)
+                log.flush()
+        finally:
+            proc.stdout.close()
+
+    def watch_crm() -> None:
+        # Reap CRM promptly so the marker never outlives the stage.  Without
+        # this, FEA could wait forever on a zombie PID after CRM has exited.
+        procs["rigid-CRM"].wait()
+        marker.unlink(missing_ok=True)
+
+    threads: list[threading.Thread] = []
+    watcher: threading.Thread | None = None
+    try:
+        for step in (crm_step, fea_step):
+            name = step["name"]
+            print(f"\n[{name}] {shlex.join(step['command'])}", flush=True)
+            log_path = Path(step["log"])
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log = log_path.open("w", encoding="utf-8")
+            logs[name] = log
+            kwargs = {"start_new_session": True} if os.name != "nt" else {}
+            proc = subprocess.Popen(
+                step["command"], cwd=ROOT, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, bufsize=1, **kwargs,
+            )
+            procs[name] = proc
+            if name == "rigid-CRM":
+                # Written before FEA starts so it never sees an absent marker
+                # and mistakes a live CRM stage for a finished one.
+                marker.write_text(str(proc.pid), encoding="utf-8")
+            thread = threading.Thread(target=pump, args=(proc, log, name), daemon=True)
+            thread.start()
+            threads.append(thread)
+
+        watcher = threading.Thread(target=watch_crm, daemon=True)
+        watcher.start()
+        for thread in threads:
+            thread.join()
+        watcher.join()
+        for name, proc in procs.items():
+            returncode = proc.wait()
+            if returncode != 0:
+                print(f"[{name}] FAILED with exit code {returncode}", flush=True)
+                print_tail(by_name[name]["log"])
+            else:
+                print(f"[{name}] complete", flush=True)
+            results[name] = returncode == 0
+        return results
+    except (Exception, KeyboardInterrupt):
+        for proc in procs.values():
+            try:
+                _terminate_process_group(proc)
+            except Exception:
+                pass
+        raise
+    finally:
+        marker.unlink(missing_ok=True)
+        for log in logs.values():
+            log.close()
 
 
 def last_csv_row(path: Path) -> dict[str, str] | None:
@@ -2315,15 +2543,27 @@ def main() -> int:
         return 0
 
     try:
-        for step in steps:
+        for group in concurrent_groups(steps):
             step_started = time.perf_counter()
             try:
-                ok = run_step(step)
+                if len(group) > 1:
+                    outcomes = run_concurrent_steps(group)
+                    ok = all(outcomes.values())
+                    failed = next((name for name, passed in outcomes.items() if not passed), None)
+                else:
+                    step = group[0]
+                    outcomes = None
+                    ok = run_step(step)
+                    failed = step["name"] if not ok else None
             finally:
-                # Keep the time even when the stage fails or is interrupted.
-                step_times[step["name"]] = time.perf_counter() - step_started
+                # Keep the time even when a stage fails or is interrupted.
+                # Concurrent stages start together, so they share a wall time.
+                for step in group:
+                    step_times[step["name"]] = time.perf_counter() - step_started
             if not ok:
-                print(f"\nStudy stopped at {step['name']}. See {step['log']}", flush=True)
+                name = failed or group[0]["name"]
+                log = next(s["log"] for s in group if s["name"] == name)
+                print(f"\nStudy stopped at {name}. See {log}", flush=True)
                 print_timing_summary(step_times, started)
                 return 1
 

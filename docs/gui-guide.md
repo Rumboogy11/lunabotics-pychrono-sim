@@ -22,7 +22,7 @@ xvfb-run ./run_study_gui.sh
 
 This optional front end uses the same wizard, settings, tools, and Docs pages, but applies a flatter theme with rounded buttons, entry fields, tabs, checkboxes, and framed sections. Action buttons use different colours: indigo for **Run study**, teal for secondary simulation/refresh actions, blue for file and info actions, violet for saving/configuration, green for viewing results, amber for **Skip current step**, and red for **Stop running process**. A **Dark mode** / **Light mode** button in the new header switches and saves the theme.
 
-Tabs use a smaller bold font, tighter padding, and a reduced corner radius, with one shared padding value for every state so selecting a tab never changes its width. Button labels and parameter input boxes use compact padding and reduced corner radii so they stay slim without changing the text size. The **Configure**, **Simulate**, and **Review** chips in the header are clickable shortcuts: **Configure** opens page 1 of the Study Wizard, **Simulate** opens page 6 (Review & Run), and **Review** opens the **Tools / View Results** tab. The chip for the view you are using is highlighted automatically. Checkboxes such as **Auto-scale from CAD/mesh** use a larger rounded indicator with a drawn check mark. The **GUI scale** and **Text size** settings affect the modern header, action buttons, tabs, rounded images, checkboxes, navigation bars, toolbars, and padding together instead of only the text and input fields; they do not resize the window. The **Window width** and **Window height** settings are literal pixels in both launchers. The Docs text tags, embedded tables, and Output Preview 3D/2D plot canvases also use the modern palette, so the classic dark-mode greys no longer show through those areas. Pillow provides the rounded corners and checkbox marks; without it the layout falls back to the usual square ttk controls. The classic launcher keeps its original visual styling; both launchers now share the same top-tab order from `study_gui.py`.
+Tabs use a smaller bold font, tighter padding, and a reduced corner radius, with one shared padding value for every state so selecting a tab never changes its width. Button labels and parameter input boxes use compact padding and reduced corner radii so they stay slim without changing the text size. The **Configure**, **Simulate**, and **Review** chips in the header are clickable shortcuts: **Configure** opens page 1 of the Study Wizard, **Simulate** opens page 6 (Review & Run), and **Review** opens the **Tools / View Results** tab. The chip for the view you are using is highlighted automatically: **Configure** stays lit on wizard pages 1-5, **Simulate** on page 6, and **Review** on the **Tools / View Results** or **Output Preview** tab. Checkboxes such as **Auto-scale from CAD/mesh** use a larger rounded indicator with a drawn check mark. The **GUI scale** and **Text size** settings affect the modern header, action buttons, tabs, rounded images, checkboxes, navigation bars, toolbars, and padding together instead of only the text and input fields; they do not resize the window. The **Window width** and **Window height** settings are literal pixels in both launchers. The Docs text tags, embedded tables, and Output Preview 3D/2D plot canvases also use the modern palette, so the classic dark-mode greys no longer show through those areas. Pillow provides the rounded corners and checkbox marks; without it the layout falls back to the usual square ttk controls. The classic launcher keeps its original visual styling; both launchers now share the same top-tab order from `study_gui.py`.
 
 > The **Docs** tab of this application contains this page and all other documentation, so you can read it without leaving the GUI.
 
@@ -39,7 +39,7 @@ Tabs use a smaller bold font, tighter padding, and a reduced corner radius, with
 
 ## Study Wizard
 
-The wizard occupies the left large area of the window. Six sub-tabs guide you through a study. Use **< Back** and **Next >** at the bottom to move between them; the pages are scrollable.
+The wizard occupies the left large area of the window. Six sub-tabs guide you through a study. Use **< Back** and **Next >** at the bottom to move between them; the pages are scrollable with either the mouse wheel or the scrollbar, all the way to the last field.
 
 There is an **Info** button next to most fields. It opens a short explanation that says what the value controls and notes the runtime, disk, or display cost where it matters. The same help text is collected into the **GUI parameter reference** page in the Docs tab.
 
@@ -73,13 +73,13 @@ Surface conversion controls (for STEP studies):
 - **Hub radius (m)** — nodes inside this radius are tied rigidly to the spindle in FEA.
 - **Coarsen hub/interior mesh** and its three controls — the recommended part-aware simplification: only interior faces are decimated; bucket exterior faces stay unchanged.
 
-Physical dimensions: **Drum radius (m)**, **Drum half-length (m)**, **Inner/cavity radius (m)**, and **Capacity volume override (m^3)**. When auto geometry is on, outer dimensions are checked against the mesh actually loaded and restored if they disagree.
+Physical dimensions: **Drum radius (m)**, **Drum half-length (m)**, **Inner/cavity radius (m)**, and **Capacity volume override (m^3)**. When auto geometry is on, outer dimensions are checked against the mesh actually loaded and restored if they disagree. A derived fill capacity subtracts the excavator mesh volume overlapping the cavity once at startup; an explicit override is treated as an already-free volume and is not adjusted.
 
 Fill-detector section:
 
 - **Auto-size fill detector** — on by default; cylinder radius and length follow the measured drum.
 - **Detector cylinder radius / length (m)** — manual values, enabled only when auto sizing is off. Length is the *full* axial length.
-- **Open live 3D detector sizer** — launches the interactive viewer. Slider changes update these fields live; opening the viewer alone does not turn off auto sizing.
+- **Open live 3D detector sizer** — launches the interactive viewer. Radius/length slider changes update these fields live; excavator and detector opacity sliders and the magenta spin-direction arrow are view-only. Opening the viewer alone does not turn off auto sizing.
 
 ### Page 3 — Run & Domain
 
@@ -88,16 +88,17 @@ This page controls time, motion, SPH resolution, and solver behaviour:
 | Group | Fields |
 | --- | --- |
 | Timing | CRM duration, FEA duration, CRM/FEA summary FPS, soil loads FPS, particle CSV FPS |
-
-The FEA duration is capped by the CRM load history: if `soil_loads.csv` ends before the requested replay length, the one-way driver prints a `NOTICE` and finishes at the last recorded frame instead of failing.
 | SPH | spacing, d0 multiplier, artificial viscosity, PPST shifting push, CRM dt (`auto` recommended) |
 | Bed/domain | bed height, bed padding (fraction of radius), active box X,Y,Z, settle time |
 | Gravity | gravity Z, apply gravity to CRM drum |
 | Descent | mode (`kinematic` or `force`), speed, force, force ramp |
 | Spin | spin rate magnitude, reverse spin, spin axis |
 | FEA solver | FEA dt, solver choice, threads, load node radius fraction, raw stress interval, particle writer processes |
+| Execution | Run CRM + one-way FEA together (under FEA threads; off by default) |
 
 A live line under the bed settings estimates the starting SPH particle count from bed size, padding, and spacing. Use it to keep your first run affordable.
+
+The FEA duration is normally capped by the CRM load history: if `soil_loads.csv` ends before the requested replay length, the one-way driver prints a `NOTICE` and finishes at the last recorded frame instead of failing. With **Run CRM + one-way FEA together** enabled, the replay keeps waiting for newly written load frames while CRM is running; the ordinary cap is applied as soon as CRM exits. Both classic and modern GUIs expose the same toggle.
 
 Important distinctions:
 
@@ -166,7 +167,7 @@ Fields are grouped by wizard page. Study name and output directory are intention
 | **Open lightweight CRM/FEA output preview** | Opens the Output Preview tab for this study. |
 | **Preview STEP mesh (full-run mesher + comparison)** | Runs the current Geometry-page settings through the real mesher into `geometry_checks/mesh_preview/` and opens the geometry comparison. Active study outputs are untouched. |
 | **View geometry comparison (STEP vs converted)** | Renders the CAD and converted surface side by side. |
-| **Live 3D fill-detector size adjuster** | Opens the standalone detector sizer. |
+| **Live 3D fill-detector size adjuster** | Opens the standalone detector sizer with radius/length sliders, excavator/detector opacity controls, and a spin-direction arrow. |
 | **Open study folder** | Opens the output folder in your file manager. |
 
 Checkboxes:

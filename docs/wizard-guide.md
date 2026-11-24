@@ -1,6 +1,6 @@
 # Command-line study wizard
 
-`study_wizard.py` is the terminal counterpart of the GUI. It asks a series of questions, writes a reproducible configuration, and then runs the same stages the GUI runs: optional STEP conversion → rigid CRM → one-way FEA → optional ParaView export. Most prompts also have command-line flags, so the wizard works well non-interactively in scripts; a few final post-run choices are controlled by dedicated flags rather than a matching prompt.
+`study_wizard.py` is the terminal counterpart of the GUI. It asks a series of questions, writes a reproducible configuration, and then runs the same stages the GUI runs: optional STEP conversion → rigid CRM → one-way FEA → optional ParaView export. By default those stages run sequentially; `--concurrent-crm-fea` starts rigid CRM and one-way FEA together. Most prompts also have command-line flags, so the wizard works well non-interactively in scripts; a few final post-run choices are controlled by dedicated flags rather than a matching prompt.
 
 For a first run, the [GUI quick start](quickstart.md) is easier. Use this page when you want automation, remote runs, or exact control over every setting.
 
@@ -49,7 +49,7 @@ Run `./run_study.sh --help` for the authoritative complete list. The tables belo
 | `--crm-obj PATH`, `--fea-node PATH`, `--fea-ele PATH` | Existing mesh files for `files`/`supplied` mode. |
 | `--no-auto-geometry` | Keep fixed legacy defaults instead of scaling from CAD size. |
 | `--cad-axis {auto,X,Y,Z}`, `--unit-scale F` | Drum axis in CAD space and coordinate scale to metres. |
-| `--drum-radius R`, `--drum-half-length L`, `--inner-radius R`, `--capacity-volume V` | Physical drum dimensions and nominal capacity. |
+| `--drum-radius R`, `--drum-half-length L`, `--inner-radius R`, `--capacity-volume V` | Physical drum dimensions and capacity. Derived capacity subtracts the loaded excavator mesh overlap once at startup; a `--capacity-volume` value is treated as an already-free CAD volume. |
 | `--detector-auto-size` / `--no-detector-auto-size`, `--detector-radius R`, `--detector-length L` | Fill-detector sizing; length is the full axial length. |
 | `--mesh-size D`, `--surface-target-faces N`, `--surface-max-faces N`, `--surface-fit-tolerance D` | STEP meshing and exterior fit controls. |
 | `--surface-repair-order {none,before,after}`, `--min-solid-volume V`, `--hub-radius R` | Legacy repair order, tiny-solid filter, and rigid hub radius. |
@@ -60,6 +60,7 @@ Run `./run_study.sh --help` for the authoritative complete list. The tables belo
 | Flag | Purpose |
 | --- | --- |
 | `--duration T`, `--fea-duration T` | CRM duration and replay length. The wizard rejects an FEA duration above the CRM duration, and the replay additionally stops at the last recorded load sample if the loads file is shorter (with a notice, not an error). |
+| `--concurrent-crm-fea` / `--no-concurrent-crm-fea` | Run rigid CRM and one-way FEA at the same time (off by default). FEA follows newly written load frames while CRM is alive, then applies the usual duration/frame cap once CRM exits. `--no-concurrent-crm-fea` restores the original sequential order. |
 | `--spacing D`, `--crm-dt S` | SPH spacing and timestep; `--crm-dt auto` picks the suggested value. |
 | `--d0-multiplier F`, `--artificial-viscosity V`, `--shifting-ppst-push V` | SPH kernel and damping/particle-shift controls. |
 | `--fps F`, `--crm-fps F`, `--fea-fps F`, `--loads-fps F`, `--particle-fps F`, `--particle-writers N` | Independent output cadences and background particle writers. |

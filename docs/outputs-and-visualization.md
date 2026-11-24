@@ -37,7 +37,7 @@ Output_<study_name>/
 └── results_overview.png        four-panel summary plots written by view_results.py
 ```
 
-`study_config.json` and `commands.sh` are the reproducibility pair. If you want to rerun or audit a study, start there. `commands.sh` shows each stage command together with its `tee` log destination; the config's `commands` array stores the stage names and command argument lists.
+`study_config.json` and `commands.sh` are the reproducibility pair. If you want to rerun or audit a study, start there. `commands.sh` shows each stage command together with its log destination; the config's `commands` array stores the stage names and command argument lists. For a concurrent study, `commands.sh` starts rigid CRM in a background subshell, writes its PID to `crm/crm_running.flag`, runs one-way FEA in the foreground, and waits for CRM before continuing. The flag is transient and is removed as soon as CRM exits; it is not a result file.
 
 ## Numeric outputs
 
@@ -51,7 +51,7 @@ One row per CRM output frame (`--fps`). The columns fall into groups:
 - **Energy:** `fluid_torque_x_nm`, `input_power_w`, `work_j`, `specific_energy_j_kg`.
 - **Force-descent telemetry** (only in force mode): `descent_mode`, `descent_state`, `actuator_force_n`, `vertical_speed_m_s`.
 
-`fill_ratio_mass` is the primary design metric. Both fill ratios and the particle flags use the *same* instantaneous `excavated` set: SPH markers fully inside the detector cylinder eroded by one particle radius. Capacity remains the nominal cavity volume, so compare runs with the same capacity convention. `lifted` is reported separately as a diagnostic and does not gate fill.
+`fill_ratio_mass` is the primary design metric. Both fill ratios and the particle flags use the *same* instantaneous `excavated` set: SPH markers fully inside the detector cylinder eroded by one particle radius. Capacity is computed once at startup from the nominal cavity volume minus the excavator mesh volume inside that cavity, so hubs, spokes, and flights do not appear as unfillable volume; `crm/config.json` records `excavator_overlap_m3` and the capacity source. A `--capacity-volume` override is treated as an already-free volume. `lifted` is reported separately as a diagnostic and does not gate fill.
 
 ### `crm/soil_loads.csv`
 

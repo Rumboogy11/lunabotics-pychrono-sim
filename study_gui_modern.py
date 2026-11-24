@@ -357,9 +357,12 @@ class ModernStudyGUI(gui.StudyGUI):
         if selected == str(self.study_tab):
             try:
                 page = self.step_nb.index(self.step_nb.select())
+                last_page = self.step_nb.index("end") - 1
             except (tk.TclError, ValueError):
                 page = 0
-            if page <= 1:
+                last_page = 0
+            # Pages 1-5 are configuration; page 6 is Review & Run.
+            if page < last_page:
                 active = "configure"
             else:
                 active = "simulate"

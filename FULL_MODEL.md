@@ -9,7 +9,7 @@ with shared motion/soil settings, then writes a combined report.
 - Soil metrics count **SPH fluid markers only**; older comparisons that included BCE markers are invalid.
 - By default the orchestrator records FEA failure but still succeeds if rigid CRM succeeded. Use `--strict-fea` to fail on FEA errors.
 
-For a stable structural screening path, use the one-way workflow instead: export rigid CRM loads and replay with `./crm/run_oneway_fea.sh` (see `crm/README.md`).
+For a stable structural screening path, use the one-way workflow instead: export rigid CRM loads and replay with `./crm/run_oneway_fea.sh` (see `crm/README.md`). The wizard and both GUIs can also run that supported one-way pair concurrently with `--concurrent-crm-fea`; this diagnostic runner remains sequential and is not part of that mode.
 
 ## Usage
 

@@ -16,6 +16,7 @@ import sys
 import tempfile
 import webbrowser
 from pathlib import Path
+from typing import Any
 from urllib.parse import unquote, urlparse
 
 
@@ -223,12 +224,12 @@ PARAM_INFO: dict[str, str] = {
         "Cost: a wider bucket needs more soil and more particles, so the CRM run slows roughly with the added volume.",
     ),
     "inner_radius": _info(
-        "Nominal cavity radius used to estimate fill ratio and capacity volume.",
+        "Nominal cavity radius used to estimate fill ratio and capacity volume. The derived denominator subtracts the loaded excavator mesh volume inside this cavity once at startup.",
         "Cost: little by itself, but it feeds capacity and detector estimates that affect what is counted as fill.",
     ),
     "capacity_volume": _info(
-        "Known internal cavity volume. Leave blank to derive capacity from the drum radii and length.",
-        "Cost: none; it changes the denominator of the fill-ratio calculation, not the solver workload.",
+        "Known internal free volume. Leave blank to derive capacity from the drum geometry minus the excavator mesh overlap measured at startup.",
+        "Cost: the mesh overlap check runs once before the solver; an explicit free-volume override skips it.",
     ),
     "detector_auto_size": _info(
         "Automatically size the fill-detector cylinder from the measured drum radius and full length. Uncheck to enter radius and length manually; the 3D adjuster is also available.",
@@ -354,6 +355,10 @@ PARAM_INFO: dict[str, str] = {
     "num_threads": _info(
         "Thread count for the Pardiso-MKL FEA solver and for the geometry preview tool's CAD tessellation and fuse. Default 8.",
         "Cost: helps Pardiso up to about 8 threads on a 16-core machine and speeds CAD meshing; Eigen SparseLU/QR factorization stays single-threaded, so extra threads do not help those solvers.",
+    ),
+    "concurrent_crm_fea": _info(
+        "Start rigid CRM and one-way FEA together instead of waiting for CRM to finish. The FEA replay watches the CRM liveness marker and keeps waiting for new soil-load frames while CRM is running; once CRM exits it stops at the smaller of the requested FEA duration and the frames CRM wrote. Off means the original sequential CRM-then-FEA run.",
+        "Cost: overlaps the two stages, so the total wall time can be shorter, but both solvers compete for CPU, memory, and disk. The physics and outputs are unchanged; the replay still uses only recorded CRM frames.",
     ),
     "load_radius_fraction": _info(
         "Inner cutoff for applying the recorded soil wrench in FEA: exterior nodes at a radius of at least this fraction of the drum radius receive the load. 0.95 limits it to a narrow outer band.",
@@ -777,6 +782,7 @@ def shipped_defaults() -> dict[str, object]:
         "spin_axis": "X",
         "solver": "pardiso-mkl",
         "num_threads": "8",
+        "concurrent_crm_fea": False,
         "load_radius_fraction": "0.95",
         "raw_stress_every": "5",
         "export_workers": "4",
@@ -856,6 +862,7 @@ DEFAULT_GROUPS: list[tuple[str, list[tuple[str, str, dict]]]] = [
         ("Spin axis", "spin_axis", {"combo": ["X", "Y", "Z"]}),
         ("FEA solver", "solver", {"combo": ["pardiso-mkl", "sparse-lu", "sparse-qr", "gmres"]}),
         ("FEA threads", "num_threads", {}),
+        ("Run CRM + one-way FEA together", "concurrent_crm_fea", {"check": True}),
         ("Load node radius fraction", "load_radius_fraction", {}),
         ("Raw stress interval (frames)", "raw_stress_every", {}),
     ]),
@@ -951,7 +958,8 @@ def build_detector_sizer_command(
         surface_file: Path | None, fea_node: Path | None,
         radius: float, length: float, spacing: float, cad_axis: str,
         unit_scale: float, result_json: Path, threads: int = 0,
-        show: bool = True) -> list[str]:
+        show: bool = True, spin_axis: str | None = None,
+        reverse_spin: bool = False) -> list[str]:
     """Build the live 3D adjuster command without launching it."""
     cmd = [python, str(root / "detector_size_tool.py")]
     if step_file is not None and step_file.is_file():
@@ -968,6 +976,10 @@ def build_detector_sizer_command(
         "--unit-scale", f"{unit_scale:g}",
         "--result-json", str(result_json),
     ])
+    if spin_axis:
+        cmd.extend(["--spin-axis", str(spin_axis).upper()])
+        if reverse_spin:
+            cmd.append("--reverse-spin")
     if threads > 0:
         cmd.extend(["--threads", str(threads)])
     if show:
@@ -1039,11 +1051,14 @@ class ScrollFrame(ttk.Frame):
         return isinstance(widget, (tk.Text, tk.Listbox, ttk.Treeview))
 
     def _scroll_units(self, amount: int) -> str:
-        """Scroll by wheel units, clamped to the content bounds.
+        """Scroll by wheel units, letting Tk clamp to the content bounds.
 
-        Tk normally clamps yview, but some wheel bindings deliver duplicate or
-        oversized deltas.  Computing the target explicitly keeps the view from
-        drifting above the first row (or below the last row).
+        ``winfo_height()`` is not the viewport Tk uses for ``yview``: the
+        canvas' effective viewport is a few pixels smaller, so deriving a
+        maximum offset from the widget height stops the wheel short of the
+        bottom while the scrollbar still reaches it.  ``yview_moveto`` already
+        clamps out-of-range targets, including the duplicate or oversized
+        deltas some wheel bindings deliver.
         """
         region = self.canvas.cget("scrollregion")
         if not region:
@@ -1056,16 +1071,13 @@ class ScrollFrame(ttk.Frame):
         if span <= 0.0:
             return "break"
 
-        visible = self.canvas.winfo_height() / span
-        if visible >= 1.0:  # content fits; nothing to scroll
+        first, last = self.canvas.yview()
+        if last - first >= 1.0:  # content fits; nothing to scroll
             self.canvas.yview_moveto(0.0)
             return "break"
 
-        first, _last = self.canvas.yview()
-        max_first = max(0.0, 1.0 - visible)
         step = amount * 36.0 / span
-        target = min(max_first, max(0.0, first + step))
-        self.canvas.yview_moveto(target)
+        self.canvas.yview_moveto(first + step)
         # Stop class/toplevel bindings from also handling this wheel event.
         return "break"
 
@@ -1102,6 +1114,7 @@ class StudyGUI:
         self._system_scaling = self._tk_scaling()
         self._apply_ui_settings(self.settings)
         self.proc: subprocess.Popen | None | str = None
+        self._concurrent_procs: list[subprocess.Popen] = []
         self.log_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self.tools_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
         # Stop ends the whole pipeline; skip terminates only the active step.
@@ -1400,8 +1413,8 @@ class StudyGUI:
         ttk.Button(
             p, text="Open live 3D detector sizer", command=self._tool_detector_sizer,
         ).grid(row=r, column=1, sticky=W, padx=6, pady=4)
-        ttk.Label(p, text="Shows the STEP/drum at 50% opacity with the detector cylinder; "
-                          "slider changes update the fields live.",
+        ttk.Label(p, text="Shows the STEP/drum with adjustable opacity, the detector cylinder, "
+                          "and a spin-direction arrow; radius/length sliders update the fields live.",
                   foreground="#666666").grid(row=r, column=2, columnspan=2, sticky=W, padx=6)
         r += 1
 
@@ -1440,6 +1453,7 @@ class StudyGUI:
         r = self._row(p, r, "Spin axis", "spin_axis", combo=["X", "Y", "Z"])
         r = self._row(p, r, "FEA solver", "solver", combo=["pardiso-mkl", "sparse-lu", "sparse-qr", "gmres"])
         r = self._row(p, r, "FEA threads", "num_threads")
+        r = self._row(p, r, "Run CRM + one-way FEA together", "concurrent_crm_fea", check=True)
 
     def _page_materials(self):
         p = self._add_page("4. Soil & Material")
@@ -3037,6 +3051,7 @@ class StudyGUI:
         spin_axis = self._g("spin_axis") or "X"
         solver = self._g("solver") or "pardiso-mkl"
         num_threads = int(float(self._g("num_threads") or 8))
+        concurrent_crm_fea = self._gb("concurrent_crm_fea")
         load_radius_fraction = float(self._g("load_radius_fraction") or 0.95)
         raw_stress_every = max(1, int(float(self._g("raw_stress_every") or 5)))
         export_workers = max(1, int(float(self._g("export_workers") or 4)))
@@ -3105,6 +3120,7 @@ class StudyGUI:
             "fea_dt": fea_dt,
             "solver": solver,
             "num_threads": num_threads,
+            "concurrent_crm_fea": concurrent_crm_fea,
             "load_radius_fraction": load_radius_fraction,
             "raw_stress_every": raw_stress_every,
             "export_workers": export_workers,
@@ -3300,7 +3316,7 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                   "fea_vtk_stride", "paraview_stride", "paraview_particle_stride",
                   "paraview_particle_render_stride"]:
             setv(k, data.get(k))
-        for k in ["reverse_spin", "drum_gravity", "save_particles", "fea_export_vtk", "export_vtk", "open_results", "open_paraview", "auto_geometry",
+        for k in ["reverse_spin", "drum_gravity", "concurrent_crm_fea", "save_particles", "fea_export_vtk", "export_vtk", "open_results", "open_paraview", "auto_geometry",
                   "detector_auto_size", "part_aware_simplify"]:
             if k in data:
                 setv(k, data.get(k))
@@ -3428,6 +3444,7 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         self.step_nb.select(len(self.pages) - 1)
         self._stop_requested.clear()
         self._skip_requested.clear()
+        self._concurrent_procs = []
         self.proc = "starting"  # marker until the worker publishes the Popen
         self.status_var.set(status)
         threading.Thread(target=self._run_thread, args=(cfg, steps), daemon=True).start()
@@ -3439,18 +3456,137 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             self.log_queue.put(("line", f"{line}\n"))
         self.log_queue.put(("line", f"Total wall time: {time.perf_counter() - started:.1f} s\n"))
 
+    def _pump_concurrent_output(self, proc: subprocess.Popen, log, name: str) -> None:
+        """Forward one concurrent stage's stdout to its log and the GUI queue."""
+        assert proc.stdout is not None
+        try:
+            for line in proc.stdout:
+                log.write(line)
+                log.flush()
+                self.log_queue.put(("line", line))
+        finally:
+            proc.stdout.close()
+
+    def _run_concurrent_group(self, group, step_times: dict[str, float], started: float) -> bool:
+        """Run a CRM/FEA group together; return False when the study must stop."""
+        by_name = {step["name"]: step for step in group}
+        crm_step = by_name["rigid-CRM"]
+        fea_step = by_name["one-way-FEA"]
+        marker = Path(crm_step["crm_alive_file"])
+        for raw in crm_step.get("cleanup_files", []):
+            try:
+                Path(raw).unlink()
+            except FileNotFoundError:
+                pass
+        marker.parent.mkdir(parents=True, exist_ok=True)
+
+        logs: dict[str, Any] = {}
+        procs: dict[str, subprocess.Popen] = {}
+        threads: list[threading.Thread] = []
+        watcher: threading.Thread | None = None
+        group_started = time.perf_counter()
+        try:
+            for step in (crm_step, fea_step):
+                name = step["name"]
+                self.log_queue.put(("line", f"\n[{name}] {shlex.join(step['command'])}\n"))
+                log_path = Path(step["log"])
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log = log_path.open("w", encoding="utf-8")
+                logs[name] = log
+                popen_kwargs = {"start_new_session": True} if os.name != "nt" else {}
+                proc = subprocess.Popen(
+                    step["command"], cwd=ROOT, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, bufsize=1, **popen_kwargs,
+                )
+                procs[name] = proc
+                if name == "rigid-CRM":
+                    # Published before FEA starts so it cannot mistake a live
+                    # CRM stage for a finished one.
+                    marker.write_text(str(getattr(proc, "pid", os.getpid())), encoding="utf-8")
+                thread = threading.Thread(
+                    target=self._pump_concurrent_output, args=(proc, log, name), daemon=True,
+                )
+                thread.start()
+                threads.append(thread)
+
+            self.proc = procs["rigid-CRM"]
+            self._concurrent_procs = list(procs.values())
+
+            def watch_crm() -> None:
+                # Reap CRM and drop the marker immediately on exit.  A zombie
+                # PID would otherwise keep the replay waiting forever.
+                procs["rigid-CRM"].wait()
+                marker.unlink(missing_ok=True)
+
+            watcher = threading.Thread(target=watch_crm, daemon=True)
+            watcher.start()
+            for thread in threads:
+                thread.join()
+            watcher.join()
+
+            returncodes = {name: proc.wait() for name, proc in procs.items()}
+            elapsed = time.perf_counter() - group_started
+            for step in group:
+                step_times[step["name"]] = elapsed
+
+            if self._stop_requested.is_set():
+                for step in group:
+                    self.log_queue.put(("line", f"[{step['name']}] stopped by user\n"))
+                self._log_simulation_timings(step_times, started)
+                self.log_queue.put(("done", "stopped"))
+                return False
+            if self._skip_requested.is_set():
+                for step in group:
+                    self.log_queue.put(("line", f"[{step['name']}] skipped by user\n"))
+                    self.log_queue.put(("step_skipped", step["name"]))
+                return True
+            failed = next((name for name, rc in returncodes.items() if rc != 0), None)
+            if failed is not None:
+                self.log_queue.put(("line", f"[{failed}] FAILED (exit {returncodes[failed]})\n"))
+                self._log_simulation_timings(step_times, started)
+                self.log_queue.put(("done", f"failed:{failed}"))
+                return False
+            for step in group:
+                self.log_queue.put(("line", f"[{step['name']}] complete\n"))
+                self.log_queue.put(("step_done", step["name"]))
+            return True
+        except (Exception, KeyboardInterrupt):
+            for proc in procs.values():
+                try:
+                    self._terminate_step_process(proc)
+                except Exception:
+                    pass
+            raise
+        finally:
+            marker.unlink(missing_ok=True)
+            for log in logs.values():
+                log.close()
+            self._concurrent_procs = []
+            self.proc = None
+
     def _run_thread(self, cfg, steps):
         step_times: dict[str, float] = {}
         active_step: str | None = None
         active_started = 0.0
         started = time.perf_counter()
         try:
-            for step in steps:
+            for group in wiz.concurrent_groups(steps):
                 if self._stop_requested.is_set():
                     self.log_queue.put(("line", "\n[stop requested; aborting]\n"))
                     self._log_simulation_timings(step_times, started)
                     self.log_queue.put(("done", "stopped"))
                     return
+                if len(group) > 1:
+                    # A skip applies to the group that was active when requested.
+                    self._skip_requested.clear()
+                    active_step = " + ".join(step["name"] for step in group)
+                    active_started = time.perf_counter()
+                    if not self._run_concurrent_group(group, step_times, started):
+                        return
+                    active_step = None
+                    continue
+
+                step = group[0]
                 # A skip applies to the step that was active when requested.
                 self._skip_requested.clear()
                 active_step = step["name"]
@@ -3514,9 +3650,10 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         stdout pipe open and block the run thread.  ``poll()`` only sees the
         parent, so on POSIX check the whole process group instead.
         """
-        if os.name != "nt":
+        pid = getattr(proc, "pid", None)
+        if os.name != "nt" and pid is not None:
             try:
-                os.killpg(proc.pid, 0)
+                os.killpg(pid, 0)
                 return True
             except (ProcessLookupError, PermissionError, OSError):
                 return False
@@ -3544,24 +3681,33 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         except Exception:
             pass
 
+    def _active_processes(self) -> list[subprocess.Popen]:
+        """Every live child of the active step or concurrent stage group."""
+        if self._concurrent_procs:
+            return list(self._concurrent_procs)
+        p = self.proc
+        return [p] if isinstance(p, subprocess.Popen) else []
+
     def _stop(self):
-        """Terminate the active command and abort the remaining steps."""
-        if self.proc is None:
+        """Terminate the active command(s) and abort the remaining steps."""
+        procs = self._active_processes()
+        if not procs:
             return
         self._stop_requested.set()
-        p = self.proc
-        if isinstance(p, subprocess.Popen) and self._step_process_alive(p):
-            self._terminate_step_process(p)
+        for p in procs:
+            if self._step_process_alive(p):
+                self._terminate_step_process(p)
         self.log_queue.put(("line", "\n[stop requested]\n"))
 
     def _skip_step(self):
-        """Terminate only the active command; the remaining steps still run."""
-        p = self.proc
-        if not isinstance(p, subprocess.Popen) or not self._step_process_alive(p):
+        """Terminate only the active command(s); the remaining steps still run."""
+        procs = [p for p in self._active_processes() if self._step_process_alive(p)]
+        if not procs:
             messagebox.showinfo("Skip", "No step is currently running.")
             return
         self._skip_requested.set()
-        self._terminate_step_process(p)
+        for p in procs:
+            self._terminate_step_process(p)
         self.log_queue.put(("line", "\n[skip requested; continuing with next step]\n"))
 
     def _drain_log(self):
@@ -3768,6 +3914,8 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             unit_scale=float(mesh.get("unit_scale") or 0.001),
             result_json=result_path,
             show=True,
+            spin_axis=str(self._g("spin_axis") or "X"),
+            reverse_spin=self._gb("reverse_spin"),
         )
         self._tool_log("$ " + shlex.join(cmd))
         env = os.environ.copy()

@@ -70,9 +70,9 @@ Plain-language definitions for the terms you will see in the GUI, command output
 
 **inside_drum** — The count of particles currently in the excavated set. A particle loses the flag as soon as it leaves the cylinder or falls back to the bed.
 
-**Fill ratio** — Excavated soil mass (or count) divided by the nominal cavity capacity. `fill_ratio_mass` is the main design metric; `fill_ratio_count` is the simpler count-based version.
+**Fill ratio** — Excavated soil mass (or count) divided by the constant free-capacity mass. `fill_ratio_mass` is the main design metric; `fill_ratio_count` is the simpler count-based version.
 
-**Capacity volume** — The nominal cavity volume used as the denominator. By default it is derived from the drum radius and length; a CAD-derived value can override it.
+**Capacity volume** — The constant denominator volume. By default it starts as the nominal cavity cylinder from the drum radius and length, then subtracts the excavator mesh volume overlapping that cavity once at startup. Hubs, spokes, and flights are therefore not counted as unfillable space. A `--capacity-volume` override is already a free volume and is used unchanged.
 
 **Torque / work / specific energy** — Soil resistance torque about the spin axis, accumulated mechanical work, and work per kilogram of excavated soil. Lower specific energy means more efficient excavation.
 

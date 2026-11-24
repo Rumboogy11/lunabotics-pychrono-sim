@@ -29,12 +29,15 @@ the current drum pose and above the initial bed, and loses the flag when it
 leaves either condition.  Fill uses exactly this excavated set::
 
     retained_mass = n_excavated * particle_mass
-    capacity_mass = bulk_density * pi * inner_radius**2 * drum_length
+    capacity_mass = bulk_density * capacity_volume
     fill_ratio    = retained_mass / capacity_mass
 
-The cylindrical capacity denominator stays the nominal envelope; the bucket
-drum excavator flights displace some of it.  Pass ``--capacity-volume`` if a
-CAD-derived free volume is available.
+For a derived capacity, ``capacity_volume`` starts as the nominal inner
+cylinder and then subtracts the volume of the loaded excavator mesh that lies
+inside that cavity.  This removes hubs, spokes, and flights from the unfillable
+denominator.  The overlap is measured once before the run starts.  Pass
+``--capacity-volume`` when a CAD-derived free volume is already known; that
+override is used unchanged.
 
 Requirements
 ------------
@@ -1123,6 +1126,143 @@ def obj_mesh_volume(path: Path) -> float | None:
     return abs(volume) if vertices else None
 
 
+def excavator_overlap_volume(mesh: Path, radius: float, half_length: float,
+                             resolution: int = 96) -> float | None:
+    """Volume of the loaded excavator mesh inside a drum-local cylinder.
+
+    The capacity cavity is a cylinder centred on the rigid drum's local origin
+    with its axis on local Z, matching the frame used by the analytic fill
+    detector.  A one-time VTK boolean gives the solid volume that the excavator
+    itself occupies there.  Subtracted from the nominal cavity volume, it keeps
+    hubs, spokes, and flights from being counted as unfillable soil space.
+
+    Returns ``None`` when the mesh cannot be read or the boolean is not usable;
+    callers then keep the historical nominal capacity.  PyVista is imported
+    lazily so ``--help`` and metric-only tests work without visualization
+    packages.
+    """
+    if not (math.isfinite(radius) and math.isfinite(half_length)):
+        return None
+    if radius <= 0.0 or half_length <= 0.0 or not mesh.is_file():
+        return None
+    try:
+        import pyvista as pv
+
+        surface = pv.read(str(mesh))
+        if getattr(surface, "n_cells", 0) == 0:
+            return None
+        surface = surface.triangulate()
+        try:
+            surface = surface.clean()
+        except Exception:
+            pass
+        mesh_volume = abs(float(surface.volume))
+        if (not math.isfinite(mesh_volume) or mesh_volume <= 0.0
+                or getattr(surface, "n_cells", 0) == 0):
+            return None
+
+        cylinder = pv.Cylinder(
+            center=(0.0, 0.0, 0.0),
+            direction=(0.0, 0.0, 1.0),
+            radius=radius,
+            height=2.0 * half_length,
+            resolution=resolution,
+            capping=True,
+        ).triangulate()
+        cylinder_volume = abs(float(cylinder.volume))
+        if not math.isfinite(cylinder_volume) or cylinder_volume <= 0.0:
+            return None
+
+        # A mesh wholly inside the cavity is simple and avoids a VTK boolean.
+        points = np.asarray(surface.points, dtype=np.float64)
+        tol = 1.0e-9 * max(1.0, radius, half_length)
+        radial2 = points[:, 0] ** 2 + points[:, 1] ** 2
+        mesh_inside_cavity = bool(
+            np.all(np.abs(points[:, 2]) <= half_length + tol)
+            and np.all(radial2 <= (radius + tol) ** 2)
+        )
+        if mesh_inside_cavity:
+            return mesh_volume
+
+        # For normal partial overlaps, the boolean is both faster and far more
+        # reliable than point-containment tests on a complex multi-solid mesh.
+        overlap_volume = None
+        try:
+            overlap = surface.boolean_intersection(cylinder)
+            if getattr(overlap, "n_cells", 0):
+                candidate = abs(float(overlap.volume))
+                if math.isfinite(candidate):
+                    overlap_volume = max(0.0, candidate)
+        except Exception:
+            pass
+        if overlap_volume is not None:
+            return overlap_volume
+
+        # VTK returns nothing when one closed surface is fully contained in the
+        # other.  Only use containment tests for that fallback, and test both
+        # winding conventions because exported meshes are not consistent.
+        if cylinder_volume < mesh_volume:
+            for inside_out in (False, True):
+                try:
+                    classified = cylinder.select_interior_points(
+                        surface, check_surface=False, inside_out=inside_out)
+                    mask = np.asarray(classified["selected_points"], dtype=bool)
+                    if mask.size and bool(np.all(mask)):
+                        return cylinder_volume
+                except Exception:
+                    pass
+        return 0.0
+    except Exception:
+        return None
+
+
+def capacity_volume_from_mesh(run: CrmRunParams, motion, mesh: Path
+                              ) -> tuple[float, dict]:
+    """Return the constant fill-ratio denominator and its provenance.
+
+    A user-supplied cavity volume is already a free-volume estimate and is
+    never modified.  Otherwise the nominal cylindrical cavity is reduced once
+    by the excavator volume that overlaps it.  Bad or unsupported meshes fall
+    back to the nominal volume rather than stopping the simulation.
+    """
+    if run.capacity_volume is not None:
+        nominal = float(run.capacity_volume)
+        return nominal, {
+            "volume": nominal,
+            "nominal_volume": nominal,
+            "excavator_overlap_m3": 0.0,
+            "source": "user override (free volume)",
+            "overlap_status": "not applied; override is already free volume",
+        }
+
+    nominal = math.pi * run.inner_radius**2 * (2.0 * float(motion.drum_half_length))
+    overlap = excavator_overlap_volume(mesh, run.inner_radius,
+                                       float(motion.drum_half_length))
+    if overlap is None or not math.isfinite(overlap):
+        return nominal, {
+            "volume": nominal,
+            "nominal_volume": nominal,
+            "excavator_overlap_m3": 0.0,
+            "source": "pi*r_i^2*L (mesh overlap unavailable)",
+            "overlap_status": "unavailable; mesh overlap could not be measured",
+        }
+
+    overlap = max(0.0, float(overlap))
+    effective = nominal - overlap
+    if effective <= 1.0e-12:
+        effective = 1.0e-12
+        status = "excavator overlap consumed the cavity; denominator clamped"
+    else:
+        status = "nominal cylinder minus loaded excavator mesh overlap"
+    return effective, {
+        "volume": effective,
+        "nominal_volume": nominal,
+        "excavator_overlap_m3": overlap,
+        "source": "pi*r_i^2*L - excavator overlap",
+        "overlap_status": status,
+    }
+
+
 def drum_mass_properties(motion, mesh: Path) -> tuple[float, tuple[float, float, float]]:
     """Scale drum mass/inertia with the mesh actually used by the simulation.
 
@@ -1280,9 +1420,17 @@ def write_particle_csv(path: Path, positions: np.ndarray, flags: np.ndarray) -> 
 def write_config(path: Path, soil: CrmSoilParams, run: CrmRunParams,
                  mesh: Path, motion, capacity_volume: float,
                  particle_mass: float, particle_mass_source: str,
-                 computational_domain: tuple[tuple[float, float, float], tuple[float, float, float]]) -> None:
+                 computational_domain: tuple[tuple[float, float, float], tuple[float, float, float]],
+                 capacity_details: dict | None = None) -> None:
     container_min, container_max = fit_solid_container(run, motion)
     detector_radius, detector_half_length = run.detector_cylinder()
+    details = capacity_details or {
+        "volume": capacity_volume,
+        "nominal_volume": capacity_volume,
+        "excavator_overlap_m3": 0.0,
+        "source": "user override" if run.capacity_volume else "pi*r_i^2*L",
+        "overlap_status": "not measured",
+    }
     config = {
         "model": "Chrono::CRM (SPH continuum)",
         "soil": asdict(soil),
@@ -1312,7 +1460,13 @@ def write_config(path: Path, soil: CrmSoilParams, run: CrmRunParams,
             "target_bottom_clearance_m": motion.target_bottom_clearance,
             "spin_axis_global": motion.drum_spin_axis,
             "capacity_volume_m3": capacity_volume,
-            "capacity_source": "user override" if run.capacity_volume else "pi*r_i^2*L",
+            "nominal_capacity_volume_m3": details.get("nominal_volume", capacity_volume),
+            "excavator_overlap_m3": details.get("excavator_overlap_m3", 0.0),
+            "capacity_source": details.get(
+                "source",
+                "user override" if run.capacity_volume else "pi*r_i^2*L",
+            ),
+            "capacity_overlap_status": details.get("overlap_status", "not measured"),
         },
         "fill_detector": {
             "kind": "analytic_cylinder",
@@ -1326,7 +1480,9 @@ def write_config(path: Path, soil: CrmSoilParams, run: CrmRunParams,
         },
         "particle_mass_kg": particle_mass,
         "particle_mass_source": particle_mass_source,
-        "fill_ratio_definition": "excavated SPH mass / (bulk density * nominal cavity volume)",
+        "fill_ratio_definition": (
+            "excavated SPH mass / (bulk density * constant free cavity volume)"
+        ),
     }
     with path.open("w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2)
@@ -1383,15 +1539,11 @@ def main() -> int:
             "solid container lid is below the drum crest; increase --active-box Z"
         )
     comp_domain = fit_computational_domain(run, motion, container_bounds)
-    capacity_volume = (
-        run.capacity_volume
-        if run.capacity_volume is not None
-        else math.pi * run.inner_radius**2 * (2.0 * motion.drum_half_length)
-    )
+    mesh = resolve_mesh(args)
+    capacity_volume, capacity_details = capacity_volume_from_mesh(run, motion, mesh)
     if capacity_volume <= 0.0:
         raise SystemExit("capacity volume must be positive")
 
-    mesh = resolve_mesh(args)
     drum_mass_kg = drum_mass_properties(motion, mesh)[0]
     surface_z = motion.floor_z + motion.bed_height
     detector_radius, detector_half_length = run.detector_cylinder()
@@ -1424,7 +1576,10 @@ def main() -> int:
                 f"solid reflective container: interior min={container_bounds[0]}, "
                 f"max={container_bounds[1]}, padding={solid_container_padding(run):g} m",
                 f"world computational domain: min={comp_domain[0]}, max={comp_domain[1]}",
-                f"capacity={capacity_volume:.6g} m^3 ({capacity_volume * soil.density:.4f} kg)",
+                f"capacity={capacity_volume:.6g} m^3 ({capacity_volume * soil.density:.4f} kg); "
+                f"nominal={capacity_details['nominal_volume']:.6g} m^3, "
+                f"excavator overlap={capacity_details['excavator_overlap_m3']:.6g} m^3 "
+                f"({capacity_details['overlap_status']})",
                 f"fill detector: {'auto' if run.detector_auto_size else 'manual'} analytic cylinder "
                 f"R={detector_radius:g} m, length={2.0 * detector_half_length:g} m; "
                 f"eroded by {0.5 * run.spacing:g} m plus the bed lift gate",
@@ -1521,6 +1676,7 @@ def main() -> int:
         write_config(
             out_dir / "config.json", soil, run, mesh, motion,
             capacity_volume, particle_mass, mass_source, comp_domain,
+            capacity_details=capacity_details,
         )
         state_file = (out_dir / "summary.csv").open("w", newline="", encoding="utf-8")
         writer = csv.DictWriter(state_file, fieldnames=metric_fields(run))

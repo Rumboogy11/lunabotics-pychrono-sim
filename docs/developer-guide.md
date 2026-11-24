@@ -49,10 +49,13 @@ Generated directories (`chrono-src`, `chrono-build`, `chrono-install`, `chrono-e
 - `build_parser()` — all CLI flags.
 - `build_commands()` — builds the mesh, CRM, FEA, and export command list.
 - `build_oneway_fea_only_commands()` — FEA replay for an existing CRM load file (used by the GUI button).
+- `concurrent_groups()` / `run_concurrent_steps()` — group and launch the optional simultaneous CRM/FEA pair.
 - `write_reproducibility_files()` — writes `study_config.json` and `commands.sh`.
 - `main()` — prompts, resolves defaults, runs stages, and offers to view results.
 
 `study_gui.py` imports the wizard module as `wiz` and calls the same helpers, so GUI and CLI studies remain equivalent. The GUI owns presentation, settings files, and interactive tools. Its `PARAM_INFO` and `SETTINGS_INFO` dictionaries are the single source of truth for the Info buttons and the generated Docs page.
+
+For concurrent studies, `build_commands()` marks the rigid-CRM and one-way-FEA steps with a shared `concurrent_group`, adds the live-replay flags to the FEA command, and records a cleanup marker path on the CRM step. Both runners (`main()` and the GUI's `_run_thread()`) call `concurrent_groups()` so the pair starts together and later stages stay sequential. The marker path is `crm/crm_running.flag`; the runner writes a live PID before FEA starts and removes the file as soon as CRM is reaped. Skip and stop signal both members of the group. The generated `commands.sh` mirrors this with a CRM subshell that removes the marker on exit, so the script does not depend on the Python orchestrator.
 
 The drivers under `crm/` are standalone argparse programs. They defer Chrono imports so `--help`, `--print-soil`, and geometry checks work without a GPU or a built environment. The CRM launchers set local `PYTHONPATH`/`LD_LIBRARY_PATH`, and `crm/run.sh` and `crm/run_oneway_fea.sh` source `crm/chrono_runtime_env.sh` to pin `LD_PRELOAD` to the locally installed Chrono libraries, including PardisoMKL. The one-way driver's opt-in 3D VTU export snapshots each frame into plain NumPy arrays and hands them to a `spawn`ed writer process through a bounded queue; the Chrono SWIG wrapper holds the GIL during solver steps, so a Python thread would not overlap file I/O.
 
@@ -75,7 +78,7 @@ Several CLI tools re-exec themselves under `chrono-env/bin/python` once (guarded
 | Domain/motion | `bed_height`, `bed_padding`, `active_box`, `settle_time`, `gravity`, `drum_gravity`, `descent_mode`, `descent_force_n`, `descent_force_ramp_s`, `omega`, `reverse_spin`, `spin_axis` |
 | Materials | `soil` (density, Young's modulus, Poisson ratio, friction, cohesion, grain diameter), `pla` (modulus, Poisson ratio, density, Rayleigh beta) |
 | FEA/export | `solver`, `num_threads`, `load_radius_fraction`, `raw_stress_every`, `save_particles`, `export_vtk`, `fea_export_vtk`, `paraview_*` |
-| Execution | `commands` (list of `{name, command}`), `dry_run`, `open_results`, `open_paraview` |
+| Execution | `commands` (list of `{name, command}`), `concurrent_crm_fea`, `dry_run`, `open_results`, `open_paraview` |
 
 Keep key names in sync between the wizard's default dictionaries (`SOIL_DEFAULTS`, `PLA_DEFAULTS`, and the scalar defaults in `build_parser()`), the GUI's `shipped_defaults()`/`_v()` variable creation, and `study_gui_defaults.json`. Tests in `tests/test_study_gui_fields.py` cover many of these fields.
 
@@ -90,7 +93,8 @@ When adding a setting, update:
 ## GUI architecture notes
 
 - `StudyGUI._build_ui()` creates the top-level `ttk.Notebook`. The Output Preview tab is inserted before Docs by `_apply_preview_visibility()` when enabled in Settings.
-- Wizard pages are `ScrollFrame` instances added by `_add_page()`; page 6 (Review & Run) is a plain frame with command/log panes.
+- Wizard pages are `ScrollFrame` instances added by `_add_page()`; page 6 (Review & Run) is a plain frame with command/log panes. `ScrollFrame._scroll_units()` passes wheel targets straight to `yview_moveto()` instead of deriving a maximum from `winfo_height()`: Tk's canvas viewport is smaller than the reported widget height, so a hand-computed limit left the last rows reachable only with the scrollbar.
+- The modern launcher's `ModernStudyGUI._update_step_chips()` highlights **Configure** for wizard pages 1-5, **Simulate** for page 6, and **Review** for the results tabs; `_goto_step()` jumps to page 1 or 6 for the first two chips.
 - `_row()` builds a labelled entry/combobox/checkbox plus an **Info** button whose text comes from `PARAM_INFO`.
 - Theme and fonts are configured in `_apply_ui_settings()` using named fonts (`StudyHeaderFont`, `StudyDocTitleFont`, `StudyDocHeadingFont`, `StudyDocSubheadingFont`, `StudyDocCodeFont`, `StudyDocBoldFont`, `StudyDocItalicFont`, `StudyDocTableHeaderFont`, `StudyDocTableBoldFont`). `text_widgets` is the list of `tk.Text` widgets recoloured when settings change.
 - The Docs tab (`_build_docs_tab()`) is a left `ttk.Treeview` plus a read-only `tk.Text` pane. `_show_doc()` reads the selected Markdown file from disk, except for the generated GUI parameter reference, which is assembled from `PARAM_INFO`/`SETTINGS_INFO`. `_render_doc_markdown()` implements a small Markdown subset with semantic text tags: distinct heading levels, inline bold/italic/code, shaded fenced code boxes, quotes, nested list indentation, and rules. Pipe tables are embedded `ttk.Treeview` widgets (`_render_doc_table()`) with real columns, a styled header, a horizontal scrollbar, and clickable link spans, so alignment does not depend on a monospaced font. `_configure_doc_tags()` keeps colors in sync with light/dark settings. `_doc_follow_link()` switches to registered local pages, scrolls to heading anchors, or opens web links; `_find_doc_text()` highlights matches one at a time. There is no HTML renderer.

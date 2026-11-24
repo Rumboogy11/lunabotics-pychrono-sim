@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import io
+import json
 import math
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr
 from dataclasses import replace
@@ -236,6 +238,100 @@ class FillMetricTest(unittest.TestCase):
             crm.build_parser().parse_args([
                 "--fill-detector-obj", "detector.obj",
             ])
+
+
+def write_cube_obj(path: Path, half: float) -> None:
+    """Write a closed, outward-wound cube centred on the drum-local origin."""
+    vertices = [
+        (-half, -half, -half), (half, -half, -half),
+        (-half, half, -half), (half, half, -half),
+        (-half, -half, half), (half, -half, half),
+        (-half, half, half), (half, half, half),
+    ]
+    faces = [
+        (0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4),
+        (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5),
+    ]
+    lines = ["v {:.9f} {:.9f} {:.9f}".format(*v) for v in vertices]
+    lines += ["f " + " ".join(str(i + 1) for i in face) for face in faces]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+class CapacityOverlapTest(unittest.TestCase):
+    def setUp(self):
+        try:
+            import pyvista  # noqa: F401
+        except ImportError as exc:  # pragma: no cover - optional in minimal envs
+            self.skipTest(f"pyvista unavailable: {exc}")
+        self._tmp = tempfile.TemporaryDirectory(prefix="capacity_overlap_", dir="/tmp/opencode")
+        self.mesh = Path(self._tmp.name) / "cube.obj"
+        self.run = crm.CrmRunParams(
+            spacing=0.002,
+            inner_radius=0.5,
+            drum_radius=0.6,
+            drum_half_length=0.5,
+        )
+        self.motion = replace(
+            MOTION_DEFAULT,
+            drum_radius=self.run.drum_radius,
+            drum_half_length=self.run.drum_half_length,
+        )
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_mesh_fully_inside_cavity_uses_mesh_volume(self):
+        write_cube_obj(self.mesh, 0.1)
+        volume = crm.excavator_overlap_volume(self.mesh, 0.5, 0.5)
+        self.assertIsNotNone(volume)
+        self.assertAlmostEqual(volume, 0.2**3, places=7)
+
+    def test_cavity_fully_inside_mesh_uses_cylinder_volume(self):
+        write_cube_obj(self.mesh, 2.0)
+        volume = crm.excavator_overlap_volume(self.mesh, 0.5, 0.5)
+        self.assertIsNotNone(volume)
+        expected = math.pi * 0.5**2 * 1.0
+        self.assertAlmostEqual(volume, expected, delta=0.01)
+
+    def test_derived_capacity_subtracts_measured_overlap(self):
+        write_cube_obj(self.mesh, 0.1)
+        volume, details = crm.capacity_volume_from_mesh(self.run, self.motion, self.mesh)
+        nominal = math.pi * self.run.inner_radius**2 * (2.0 * self.run.drum_half_length)
+        self.assertAlmostEqual(details["excavator_overlap_m3"], 0.2**3, places=7)
+        self.assertAlmostEqual(volume, nominal - 0.2**3, places=7)
+        self.assertIn("excavator overlap", details["source"])
+
+    def test_capacity_override_is_not_modified(self):
+        write_cube_obj(self.mesh, 0.1)
+        run = replace(self.run, capacity_volume=0.0123)
+        volume, details = crm.capacity_volume_from_mesh(run, self.motion, self.mesh)
+        self.assertEqual(volume, 0.0123)
+        self.assertEqual(details["excavator_overlap_m3"], 0.0)
+        self.assertIn("free volume", details["source"])
+
+    def test_missing_mesh_keeps_nominal_capacity(self):
+        volume, details = crm.capacity_volume_from_mesh(
+            self.run, self.motion, self.mesh.parent / "missing.obj")
+        nominal = math.pi * self.run.inner_radius**2 * (2.0 * self.run.drum_half_length)
+        self.assertEqual(volume, nominal)
+        self.assertIn("unavailable", details["source"])
+
+    def test_config_records_capacity_provenance(self):
+        write_cube_obj(self.mesh, 0.1)
+        volume, details = crm.capacity_volume_from_mesh(self.run, self.motion, self.mesh)
+        config_path = Path(self._tmp.name) / "config.json"
+        crm.write_config(
+            config_path, crm.DEFAULT_SOIL, self.run, self.mesh, self.motion,
+            volume, 1.0, "test", ((-1.0, -1.0, -1.0), (1.0, 1.0, 1.0)),
+            capacity_details=details,
+        )
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        geometry = config["geometry"]
+        self.assertAlmostEqual(geometry["capacity_volume_m3"], volume)
+        self.assertAlmostEqual(geometry["excavator_overlap_m3"], 0.2**3, places=7)
+        self.assertAlmostEqual(geometry["nominal_capacity_volume_m3"],
+                               details["nominal_volume"])
+        self.assertIn("excavator overlap", geometry["capacity_source"])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,470 @@
+#!/usr/bin/env python3
+"""Regression coverage for simultaneous rigid-CRM and one-way FEA studies."""
+
+from __future__ import annotations
+
+import csv
+import io
+import os
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from contextlib import redirect_stderr
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "crm"))
+os.environ.setdefault("PYCHRONO_GUI_NO_REEXEC", "1")
+
+import crm.lunar_excavator_oneway as oneway  # noqa: E402
+import study_gui as gui  # noqa: E402
+import study_wizard as wiz  # noqa: E402
+
+
+LOAD_FIELDS = [
+    "time_s", "drum_z_m", "force_x_n", "force_y_n", "force_z_n",
+    "torque_x_nm", "torque_y_nm", "torque_z_nm",
+]
+
+
+def write_loads(path: Path, times: tuple[float, ...]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=LOAD_FIELDS)
+        writer.writeheader()
+        for t in times:
+            writer.writerow({name: (f"{t:g}" if name == "time_s" else "0")
+                             for name in LOAD_FIELDS})
+
+
+def full_cfg(output_dir: Path) -> dict:
+    return {
+        "output_dir": output_dir,
+        "geometry": "files",
+        "step_file": None,
+        "crm_obj": output_dir / "mesh" / "surface.obj",
+        "fea_node": output_dir / "mesh" / "drum.node",
+        "fea_ele": output_dir / "mesh" / "drum.ele",
+        "mesh_steps": [],
+        "auto_geometry": False,
+        "drum_radius": 0.061037,
+        "drum_half_length": 0.033,
+        "inner_radius": 0.055,
+        "spacing": 0.002,
+        "d0_multiplier": 1.0,
+        "artificial_viscosity": 0.5,
+        "shifting_ppst_push": 3.0,
+        "crm_dt": None,
+        "capacity_volume": None,
+        "detector_auto_size": True,
+        "duration": 20.0,
+        "fea_duration": 20.0,
+        "crm_fps": 20.0,
+        "fea_fps": 20.0,
+        "loads_fps": 20.0,
+        "particle_fps": 5.0,
+        "particle_writers": 4,
+        "fea_dt": 0.002,
+        "bed_height": 0.06,
+        "bed_padding": 0.25,
+        "active_box": (0.631333, 0.687407, 0.866370),
+        "settle_time": 0.001,
+        "gravity": -9.81,
+        "drum_gravity": False,
+        "descent_mode": "kinematic",
+        "descent_speed": 0.0015,
+        "descent_force_n": 1.0,
+        "descent_force_ramp_s": 0.0,
+        "omega": 3.14,
+        "reverse_spin": False,
+        "spin_axis": "X",
+        "hub_radius": 0.0015,
+        "solver": "pardiso-mkl",
+        "num_threads": 8,
+        "concurrent_crm_fea": False,
+        "load_radius_fraction": 0.95,
+        "raw_stress_every": 5,
+        "export_workers": 1,
+        "save_particles": True,
+        "fea_export_vtk": False,
+        "fea_vtk_stride": 1,
+        "export_vtk": False,
+        "paraview_stride": 1,
+        "paraview_particle_stride": 0,
+        "paraview_particle_render_stride": 1,
+        "soil": dict(wiz.SOIL_DEFAULTS),
+        "pla": dict(wiz.PLA_DEFAULTS),
+    }
+
+
+def build_steps(cfg: dict) -> list[dict]:
+    with redirect_stderr(io.StringIO()):
+        return wiz.build_commands(cfg)
+
+
+class WizardConcurrentTest(unittest.TestCase):
+    def test_parser_exposes_the_toggle(self) -> None:
+        parser = wiz.build_parser()
+        enabled = parser.parse_args(["--concurrent-crm-fea"])
+        disabled = parser.parse_args(["--no-concurrent-crm-fea"])
+
+        self.assertIs(enabled.concurrent_crm_fea, True)
+        self.assertIs(disabled.concurrent_crm_fea, False)
+        self.assertIsNone(parser.parse_args([]).concurrent_crm_fea)
+
+    def test_full_study_marks_the_pair_and_passes_live_flags(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="concurrent_wizard_", dir="/tmp/opencode") as tmp:
+            out_dir = Path(tmp).resolve()
+            cfg = full_cfg(out_dir)
+            steps = build_steps(cfg)
+            crm = next(s for s in steps if s["name"] == "rigid-CRM")
+            fea = next(s for s in steps if s["name"] == "one-way-FEA")
+            self.assertNotIn("concurrent_group", crm)
+            self.assertNotIn("--wait-for-crm", fea["command"])
+
+            cfg["concurrent_crm_fea"] = True
+            steps = build_steps(cfg)
+            crm = next(s for s in steps if s["name"] == "rigid-CRM")
+            fea = next(s for s in steps if s["name"] == "one-way-FEA")
+            marker = wiz.crm_alive_file(cfg)
+
+            self.assertEqual(crm["concurrent_group"], wiz.CONCURRENT_CRM_FEA_GROUP)
+            self.assertEqual(fea["concurrent_group"], wiz.CONCURRENT_CRM_FEA_GROUP)
+            self.assertEqual(crm["crm_alive_file"], str(marker))
+            self.assertIn("--wait-for-crm", fea["command"])
+            self.assertEqual(
+                fea["command"][fea["command"].index("--crm-alive-file") + 1],
+                str(marker),
+            )
+            self.assertIn(str(out_dir / "crm" / "soil_loads.csv"),
+                          crm.get("cleanup_files", []))
+
+    def test_fea_only_never_enables_the_live_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="concurrent_fea_only_", dir="/tmp/opencode") as tmp:
+            out_dir = Path(tmp).resolve()
+            write_loads(out_dir / "crm" / "soil_loads.csv", (0.0, 0.1))
+            (out_dir / "mesh").mkdir(parents=True, exist_ok=True)
+            (out_dir / "mesh" / "drum.node").write_text("1 0 0 0\n", encoding="utf-8")
+            (out_dir / "mesh" / "drum.ele").write_text("1 1 2 3 4\n", encoding="utf-8")
+            cfg = full_cfg(out_dir)
+            cfg["concurrent_crm_fea"] = True
+            with redirect_stderr(io.StringIO()):
+                steps = wiz.build_oneway_fea_only_commands(cfg)
+
+            self.assertFalse(cfg["concurrent_crm_fea"])
+            self.assertNotIn("--wait-for-crm", steps[0]["command"])
+            self.assertNotIn("concurrent_group", steps[0])
+
+    def test_commands_script_runs_the_pair_concurrently(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="concurrent_script_", dir="/tmp/opencode") as tmp:
+            out_dir = Path(tmp).resolve()
+            cfg = full_cfg(out_dir)
+            cfg["concurrent_crm_fea"] = True
+            steps = build_steps(cfg)
+            wiz.write_reproducibility_files(cfg, steps)
+
+            script = (out_dir / "commands.sh").read_text(encoding="utf-8")
+            self.assertIn("# rigid-CRM + one-way-FEA (concurrent)", script)
+            self.assertIn("crm_alive_marker=", script)
+            self.assertIn("crm_pid=$!", script)
+            self.assertIn('trap \'rm -f "$crm_alive_marker"\' EXIT', script)
+            self.assertIn('wait "$crm_pid"', script)
+            self.assertIn("--wait-for-crm", script)
+            self.assertNotIn("# rigid-CRM\n", script)
+
+            cfg["concurrent_crm_fea"] = False
+            steps = build_steps(cfg)
+            wiz.write_reproducibility_files(cfg, steps)
+            sequential = (out_dir / "commands.sh").read_text(encoding="utf-8")
+            self.assertIn("# rigid-CRM", sequential)
+            self.assertNotIn("crm_pid", sequential)
+            self.assertNotIn("--wait-for-crm", sequential)
+
+    def test_concurrent_groups_preserve_step_order(self) -> None:
+        steps = [
+            {"name": "mesh"},
+            {"name": "rigid-CRM", "concurrent_group": wiz.CONCURRENT_CRM_FEA_GROUP},
+            {"name": "one-way-FEA", "concurrent_group": wiz.CONCURRENT_CRM_FEA_GROUP},
+            {"name": "export"},
+        ]
+        groups = [[s["name"] for s in group] for group in wiz.concurrent_groups(steps)]
+        self.assertEqual(groups, [["mesh"], ["rigid-CRM", "one-way-FEA"], ["export"]])
+
+
+class LiveReplayHelperTest(unittest.TestCase):
+    def test_marker_tracks_a_live_pid(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="crm_marker_", dir="/tmp/opencode") as tmp:
+            marker = Path(tmp) / "crm_running.flag"
+            self.assertFalse(oneway.crm_stage_alive(marker))
+            marker.write_text(str(os.getpid()), encoding="utf-8")
+            self.assertTrue(oneway.crm_stage_alive(marker))
+            marker.write_text(f"pid:{os.getpid()}\n", encoding="utf-8")
+            self.assertTrue(oneway.crm_stage_alive(marker))
+            marker.write_text("99999999", encoding="utf-8")
+            self.assertFalse(oneway.crm_stage_alive(marker))
+            marker.unlink()
+            self.assertFalse(oneway.crm_stage_alive(marker))
+
+    def test_load_history_refresh_picks_up_new_rows(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="live_loads_", dir="/tmp/opencode") as tmp:
+            path = Path(tmp) / "soil_loads.csv"
+            write_loads(path, (0.0, 0.01))
+            self.assertTrue(oneway.load_samples_ready(path))
+            loads = oneway.LoadHistory(path)
+            self.assertAlmostEqual(loads.t_end, 0.01)
+
+            time.sleep(0.01)
+            write_loads(path, (0.0, 0.01, 0.02, 0.03))
+            self.assertTrue(loads.refresh())
+            self.assertAlmostEqual(loads.t_end, 0.03)
+            self.assertFalse(loads.refresh())
+
+    def test_wait_decision_requires_live_crm_and_missing_frames(self) -> None:
+        self.assertTrue(oneway.should_wait_for_load_frame(0.02, 0.01, True))
+        self.assertFalse(oneway.should_wait_for_load_frame(0.02, 0.01, False))
+        self.assertFalse(oneway.should_wait_for_load_frame(0.01, 0.01, True))
+
+    def test_wait_for_history_reports_a_dead_crm_without_samples(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wait_loads_", dir="/tmp/opencode") as tmp:
+            path = Path(tmp) / "soil_loads.csv"
+            with self.assertRaisesRegex(SystemExit, "CRM finished"):
+                oneway.wait_for_load_history(path, alive_check=lambda: False)
+
+
+class FakeProc:
+    def __init__(self, text: str = "", *, pid: int | None = None,
+                 wait_hook=None):
+        self.stdout = io.StringIO(text)
+        self.pid = pid if pid is not None else os.getpid()
+        self._wait_hook = wait_hook
+
+    def wait(self) -> int:
+        if self._wait_hook is not None:
+            self._wait_hook()
+        return 0
+
+    def terminate(self) -> None:
+        pass
+
+
+class ConcurrentRunnerTest(unittest.TestCase):
+    def _steps(self, tmp: str) -> list[dict]:
+        out_dir = Path(tmp)
+        marker = out_dir / "crm" / wiz.CRM_ALIVE_NAME
+        loads = out_dir / "crm" / "soil_loads.csv"
+        return [
+            {
+                "name": "rigid-CRM", "command": ["crm"],
+                "log": str(out_dir / "rigid-CRM.log"),
+                "concurrent_group": wiz.CONCURRENT_CRM_FEA_GROUP,
+                "crm_alive_file": str(marker),
+                "cleanup_files": [str(loads), str(marker)],
+            },
+            {
+                "name": "one-way-FEA", "command": ["fea"],
+                "log": str(out_dir / "one-way-FEA.log"),
+                "concurrent_group": wiz.CONCURRENT_CRM_FEA_GROUP,
+                "crm_alive_file": str(marker),
+            },
+        ]
+
+    def test_cli_runner_removes_marker_when_crm_exits(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="concurrent_cli_", dir="/tmp/opencode") as tmp:
+            steps = self._steps(tmp)
+            marker = Path(steps[0]["crm_alive_file"])
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("stale", encoding="utf-8")
+
+            class WaitForMarker(io.StringIO):
+                def __iter__(self):
+                    deadline = time.monotonic() + 5
+                    while marker.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    yield "fea advanced\n"
+
+            procs = [FakeProc("crm running\n"), FakeProc()]
+            procs[1].stdout = WaitForMarker()
+            with patch.object(wiz.subprocess, "Popen", side_effect=procs):
+                results = wiz.run_concurrent_steps(steps)
+
+            self.assertEqual(results, {"rigid-CRM": True, "one-way-FEA": True})
+            self.assertFalse(marker.exists())
+            self.assertIn("fea advanced\n", Path(steps[1]["log"]).read_text(encoding="utf-8"))
+
+
+class ConcurrentGuiFieldTest(unittest.TestCase):
+    def setUp(self) -> None:
+        import tkinter as tk
+
+        self._gui_module = gui
+        self._tmp = tempfile.TemporaryDirectory(prefix="concurrent_gui_", dir="/tmp/opencode")
+        self._original_defaults = gui.DEFAULT_FILE
+        self._original_settings = gui.SETTINGS_FILE
+        gui.DEFAULT_FILE = Path(self._tmp.name) / "defaults.json"
+        # Keep workspace appearance settings (including ui_scale) out of these
+        # tests; otherwise constructing the GUI can perturb later Tk tests.
+        gui.SETTINGS_FILE = Path(self._tmp.name) / "settings.json"
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.app = gui.StudyGUI(self.root)
+
+    def tearDown(self) -> None:
+        self.root.destroy()
+        self._gui_module.DEFAULT_FILE = self._original_defaults
+        self._gui_module.SETTINGS_FILE = self._original_settings
+        self._tmp.cleanup()
+
+    def _events(self):
+        events = []
+        while not self.app.log_queue.empty():
+            events.append(self.app.log_queue.get_nowait())
+        return events
+
+    def _steps(self, tmp: str) -> list[dict]:
+        out_dir = Path(tmp)
+        marker = out_dir / "crm" / wiz.CRM_ALIVE_NAME
+        return [
+            {
+                "name": "rigid-CRM", "command": ["crm"],
+                "log": str(out_dir / "rigid-CRM.log"),
+                "concurrent_group": wiz.CONCURRENT_CRM_FEA_GROUP,
+                "crm_alive_file": str(marker),
+                "cleanup_files": [],
+            },
+            {
+                "name": "one-way-FEA", "command": ["fea"],
+                "log": str(out_dir / "one-way-FEA.log"),
+                "concurrent_group": wiz.CONCURRENT_CRM_FEA_GROUP,
+                "crm_alive_file": str(marker),
+            },
+        ]
+
+    def test_toggle_defaults_off_and_lives_under_fea_threads(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        def descendants(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from descendants(child)
+
+        labels = [
+            child.cget("text") for child in descendants(self.app.pages[2])
+            if isinstance(child, (tk.Label, ttk.Label))
+        ]
+        self.assertIn("FEA threads", labels)
+        self.assertIn("Run CRM + one-way FEA together", labels)
+        self.assertGreater(labels.index("Run CRM + one-way FEA together"),
+                           labels.index("FEA threads"))
+        self.assertFalse(self.app.vars["concurrent_crm_fea"].get())
+        self.assertIn("concurrent_crm_fea", gui.PARAM_INFO)
+        self.assertIn("concurrent_crm_fea", gui.DEFAULT_KEYS)
+
+    def test_toggle_flows_into_generated_commands(self) -> None:
+        self.app.vars["auto_geometry"].set(False)
+        self.app.vars["concurrent_crm_fea"].set(True)
+        cfg = self.app._collect_cfg()
+        self.assertTrue(cfg["concurrent_crm_fea"])
+        with redirect_stderr(io.StringIO()):
+            steps = wiz.build_commands(cfg)
+        fea = next(s for s in steps if s["name"] == "one-way-FEA")
+        self.assertIn("--wait-for-crm", fea["command"])
+
+        self.app.vars["concurrent_crm_fea"].set(False)
+        cfg = self.app._collect_cfg()
+        self.assertFalse(cfg["concurrent_crm_fea"])
+
+    def test_config_round_trip_restores_the_toggle(self) -> None:
+        self.app._apply_config({"concurrent_crm_fea": True})
+        self.assertTrue(self.app.vars["concurrent_crm_fea"].get())
+        self.app._apply_config({"concurrent_crm_fea": False})
+        self.assertFalse(self.app.vars["concurrent_crm_fea"].get())
+
+    def test_run_thread_starts_both_stages_together(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="concurrent_gui_run_", dir="/tmp/opencode") as tmp:
+            steps = self._steps(tmp)
+            tail = {"name": "export-ParaView-VTK", "command": ["export"],
+                    "log": str(Path(tmp) / "export.log")}
+            calls = []
+
+            def fake_popen(command, **_kwargs):
+                calls.append(command)
+                return FakeProc(f"{command[0]} running\n")
+
+            self.app._stop_requested.clear()
+            self.app._skip_requested.clear()
+            with patch.object(gui.subprocess, "Popen", side_effect=fake_popen):
+                self.app._run_thread({"output_dir": tmp}, steps + [tail])
+
+            events = self._events()
+            self.assertEqual(calls, [["crm"], ["fea"], ["export"]])
+            self.assertIn(("step_done", "rigid-CRM"), events)
+            self.assertIn(("step_done", "one-way-FEA"), events)
+            self.assertIn(("step_done", "export-ParaView-VTK"), events)
+            self.assertEqual(events[-1], ("done", "ok"))
+            lines = [text for kind, text in events if kind == "line"]
+            def seconds(line: str) -> float:
+                return float(line.split(": ", 1)[1].removesuffix(" s\n"))
+
+            crm_time = next(line for line in lines if line.startswith("  CRM: "))
+            fea_time = next(line for line in lines if line.startswith("  One-way FEA: "))
+            self.assertAlmostEqual(seconds(crm_time), seconds(fea_time), places=1)
+
+    def test_skip_group_continues_to_later_steps(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="concurrent_gui_skip_", dir="/tmp/opencode") as tmp:
+            steps = self._steps(tmp)
+            tail = {"name": "export-ParaView-VTK", "command": ["export"],
+                    "log": str(Path(tmp) / "export.log")}
+
+            def fake_popen(command, **_kwargs):
+                if command == ["crm"]:
+                    self.app._skip_requested.set()
+                return FakeProc("running\n")
+
+            self.app._stop_requested.clear()
+            self.app._skip_requested.clear()
+            with patch.object(gui.subprocess, "Popen", side_effect=fake_popen):
+                self.app._run_thread({"output_dir": tmp}, steps + [tail])
+
+            events = self._events()
+            self.assertIn(("step_skipped", "rigid-CRM"), events)
+            self.assertIn(("step_skipped", "one-way-FEA"), events)
+            self.assertIn(("step_done", "export-ParaView-VTK"), events)
+            self.assertEqual(events[-1], ("done", "ok"))
+
+    def test_stop_group_aborts_later_steps(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="concurrent_gui_stop_", dir="/tmp/opencode") as tmp:
+            steps = self._steps(tmp)
+            tail = {"name": "export-ParaView-VTK", "command": ["export"],
+                    "log": str(Path(tmp) / "export.log")}
+
+            def fake_popen(command, **_kwargs):
+                if command == ["crm"]:
+                    self.app._stop_requested.set()
+                return FakeProc("running\n")
+
+            self.app._stop_requested.clear()
+            self.app._skip_requested.clear()
+            with patch.object(gui.subprocess, "Popen", side_effect=fake_popen):
+                self.app._run_thread({"output_dir": tmp}, steps + [tail])
+
+            events = self._events()
+            self.assertEqual(events[-1], ("done", "stopped"))
+            self.assertFalse(any(kind == "step_done" for kind, _ in events))
+
+
+class ModernGuiInheritsToggleTest(unittest.TestCase):
+    def test_modern_gui_reuses_the_classic_toggle(self) -> None:
+        import study_gui_modern as modern
+
+        self.assertTrue(issubclass(modern.ModernStudyGUI, gui.StudyGUI))
+        self.assertIn("concurrent_crm_fea", gui.shipped_defaults())
+        self.assertFalse(gui.shipped_defaults()["concurrent_crm_fea"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -29,6 +29,8 @@ Three front ends drive the same pipeline:
 - `study_wizard.py` — interactive/non-interactive CLI; writes `study_config.json` and `commands.sh`.
 - Direct drivers (`crm/run.sh`, `crm/run_oneway_fea.sh`, `step_to_chrono_fea.py`, etc.) for advanced use.
 
+The wizard and both GUIs default to sequential stages. Their **Run CRM + one-way FEA together** toggle (CLI: `--concurrent-crm-fea`) starts the rigid-CRM and one-way stages at the same time; the generated `commands.sh` uses the same background/wait structure. The modern GUI subclasses the classic one, so it shares the toggle and runner unchanged.
+
 `full_model.py` is a separate diagnostic orchestrator for rigid CRM plus two-way coupled FEA. It is not part of the supported study pipeline.
 
 ## Stage 1: geometry preparation
@@ -73,12 +75,15 @@ At each output time, particles are transformed into the drum's local frame using
 The cylinder dimensions normally follow the measured drum radius and full length; they can be set manually. The classifier follows the drum exactly and classification is **instantaneous**: leave the cylinder and the flag is removed on the next metrics call. `lifted` is reported separately as a diagnostic (above the initial bed surface by at least `rp`) but does not gate fill. The same `excavated` set feeds `inside_drum`, `fill_ratio_count`, `fill_ratio_mass`, and the particle CSV flags.
 
 ```text
-retained mass = excavated particle count × particle mass
-capacity mass = bulk density × π × inner_radius² × drum length
-fill ratio    = retained mass / capacity mass
+nominal capacity  = π × inner_radius² × drum length
+mesh overlap      = excavator volume inside the nominal cavity cylinder
+capacity volume   = nominal capacity − mesh overlap       (computed once at startup)
+capacity mass     = bulk density × capacity volume
+retained mass     = excavated particle count × particle mass
+fill ratio        = retained mass / capacity mass
 ```
 
-The denominator is the nominal cylinder; bucket flights displace some of it. Supply `--capacity-volume` for a CAD-derived free volume when comparing designs fairly. The summary reports the X torque component as `fluid_torque_x_nm`; `input_power_w` and `work_j` use the full soil wrench projected onto the configured spin axis, and `specific_energy_j_kg` divides work by excavated mass. Full force/torque components are in `soil_loads.csv`.
+The one-time overlap subtraction removes hubs, spokes, and flights from the unfillable denominator. It uses the same surface mesh the CRM run loads and is recorded in `crm/config.json` as `excavator_overlap_m3`; the constant capacity is then used for every frame. Supply `--capacity-volume` when a CAD-derived *free* volume is already available; that override is used unchanged and is not double-corrected. If the overlap cannot be measured, the run keeps the historical nominal capacity and records that status in the config. The summary reports the X torque component as `fluid_torque_x_nm`; `input_power_w` and `work_j` use the full soil wrench projected onto the configured spin axis, and `specific_energy_j_kg` divides work by excavated mass. Full force/torque components are in `soil_loads.csv`.
 
 **Only SPH fluid markers are counted.** Boundary (BCE) markers represent walls and the floor; older comparisons that included them are invalid.
 
@@ -90,6 +95,8 @@ Two-way SPH/flexible-BCE coupling proved unstable in this project, so the suppor
 2. The replay creates **no SPH/terrain system**. It uses the same motor-driven spindle for descent and spin, ties hub nodes rigidly to the spindle, transforms the recorded wrench into the drum frame, and distributes it over exterior solid nodes as equivalent nodal forces (minimum-norm, mass-weighted) that reproduce the net force and torque.
 3. The drum is a solid PLA mesh with configurable modulus, Poisson ratio, density, and Rayleigh damping. Hub nodes inside `--hub-radius` are rigidly connected to the spindle.
 4. `--load-radius-fraction` limits forces to exterior nodes beyond a fraction of drum radius; `0.95` is cheaper, `0.8` spreads the load more widely. Peak-von-Mises scanning can be sampled with `--raw-stress-every`.
+
+Normally the replay stops at the minimum of the requested FEA duration and the last recorded load frame. In a concurrent full study, the runner keeps a liveness marker (`crm/crm_running.flag`) while CRM is active. The replay starts once two valid samples exist, reloads the growing CSV, and waits at the next output time while CRM is still running. When CRM exits, the marker is removed and the ordinary duration/frame cap applies. This changes only when FEA runs, not the recorded-load physics or the outputs.
 
 Keep motion and gravity settings matched manually. The replay checks the CSV schema and descent mode, needs at least two sorted samples, and in kinematic mode compares the Z trajectory with the expected settle/descent geometry. It does not validate gravity, spin, or actuator force settings. In force mode it follows the recorded Z trajectory with a position motor because there is no soil reaction to balance the actuator.
 

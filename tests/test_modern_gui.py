@@ -78,6 +78,27 @@ class ModernGuiTest(unittest.TestCase):
         self.assertEqual(str(self.app._step_chips["simulate"].cget("style")),
                          "Modern.Chip.Active.TButton")
 
+        # Pages 1-5 are configuration pages: the Configure chip stays lit.
+        for page in range(5):
+            self.app.step_nb.select(page)
+            self.app._update_step_chips()
+            self.assertEqual(str(self.app._step_chips["configure"].cget("style")),
+                             "Modern.Chip.Active.TButton", f"page {page + 1}")
+            self.assertEqual(str(self.app._step_chips["simulate"].cget("style")),
+                             "Modern.Chip.TButton", f"page {page + 1}")
+
+        self.app.step_nb.select(5)
+        self.app._update_step_chips()
+        self.assertEqual(str(self.app._step_chips["simulate"].cget("style")),
+                         "Modern.Chip.Active.TButton")
+        self.assertEqual(str(self.app._step_chips["configure"].cget("style")),
+                         "Modern.Chip.TButton")
+
+        self.app._step_chips["configure"].invoke()
+        self.assertEqual(self.app.step_nb.index(self.app.step_nb.select()), 0)
+        self.assertEqual(str(self.app._step_chips["configure"].cget("style")),
+                         "Modern.Chip.Active.TButton")
+
         self.app._step_chips["review"].invoke()
         self.assertEqual(str(self.app.notebook.select()), str(self.app.tools_tab))
         self.assertEqual(str(self.app._step_chips["review"].cget("style")),

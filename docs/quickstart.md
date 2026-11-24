@@ -65,7 +65,7 @@ Launch the application:
 
 On a machine without a display, use `xvfb-run ./run_study_gui.sh`. The launcher picks a Python with Tkinter for the window and uses the project environment for simulations. For a rounded, colour-coded version of the same application, run `./run_study_gui_modern.sh` instead; it has the same tabs and controls.
 
-The GUI opens on the **Study Wizard** tab with six pages. Work left to right; use **Next >** and **< Back** at the bottom. The top tabs run in this order: **Study Wizard**, **Output Preview**, **Tools / View Results**, **Docs**, **Defaults**, **Settings** — the same order in both GUI launchers.
+The GUI opens on the **Study Wizard** tab with six pages. Work left to right; use **Next >** and **< Back** at the bottom. Long pages scroll with the mouse wheel or the scrollbar. In the modern launcher, the header's **Configure** chip stays lit while you are on pages 1-5 and **Simulate** lights up on page 6 (Review & Run). The top tabs run in this order: **Study Wizard**, **Output Preview**, **Tools / View Results**, **Docs**, **Defaults**, **Settings** — the same order in both GUI launchers.
 
 ### Page 1 — Study
 
@@ -80,7 +80,7 @@ Click **Apply CAD/mesh defaults** after choosing geometry to refresh the suggest
 
 For a STEP study, set the **STEP file**, **CAD axis**, and **Unit scale**. The other mesh controls (target faces, fit tolerance, mesh size, interior coarsening) have good defaults; leave them alone for the first run.
 
-The **Fill-detector cylinder** section controls how "soil inside the drum" is counted. Leave **Auto-size fill detector** checked initially. If you want to tune it visually, click **Open live 3D detector sizer**: drag the radius/length sliders until the orange cylinder matches your drum's inside, then close the viewer.
+The **Fill-detector cylinder** section controls how "soil inside the drum" is counted. Leave **Auto-size fill detector** checked initially. If you want to tune it visually, click **Open live 3D detector sizer**: drag the radius/length sliders until the orange cylinder matches your drum's inside, use the excavator/detector opacity sliders to see through either layer, and check the magenta arrow for the configured spin direction before closing the viewer.
 
 ### Page 3 — Run & Domain
 
@@ -92,6 +92,7 @@ For a first check, use a short run so you can see results quickly:
 - **Particle CSV FPS**: `5` is enough for visualization; the CRM summary can stay at `20`.
 - **Descent mode**: `kinematic` (default) gives a constant lowering speed. `force` uses a downward actuator and is an advanced option.
 - **Reverse spin**: tick it if the drum turns the wrong way in the preview.
+- **Run CRM + one-way FEA together**: leave off for the usual CRM-then-FEA order. Turn it on (under **FEA threads**) to start both stages together; FEA follows newly written CRM load frames while CRM runs and then applies the normal duration/frame cap.
 
 The live label under the bed settings estimates how many SPH particles will be created. If it is enormous (millions), reduce duration, increase spacing, or shrink the bed/domain before running.
 
@@ -112,7 +113,7 @@ Recommended for a first study:
 
 Click **Refresh preview** to see the exact commands that will run. This is also a good moment to click **Save config/commands (dry run)** if you want a reproducible recipe without simulating.
 
-Click **Run study**. Watch the log panel: the runner executes the STEP conversion (if needed), the rigid CRM stage, the one-way FEA replay, and finally the ParaView export. At the end, the log reports elapsed time for the CRM and one-way FEA stages plus the total wall time, even if a stage was skipped or stopped partway through; a stage that never ran shows `not run`. You can **Skip current step** to terminate the active command and continue, or **Stop running process** to abort the remaining stages.
+Click **Run study**. Watch the log panel: the runner executes the STEP conversion (if needed), the rigid CRM stage, the one-way FEA replay, and finally the ParaView export. If **Run CRM + one-way FEA together** is enabled, the CRM and FEA log streams appear together and their elapsed times overlap; the later export still waits for both. At the end, the log reports elapsed time for the CRM and one-way FEA stages plus the total wall time, even if a stage was skipped or stopped partway through; a stage that never ran shows `not run`. **Skip current step** terminates the active step, or both members of the concurrent pair, and continues with later stages. **Stop running process** aborts the remaining stages.
 
 ## 4. Find and view your results
 

@@ -37,7 +37,10 @@ Use identical motion options (settle time, descent speed, bed height, spin axis,
 and omega) in both runs; the driver checks that the recorded drum trajectory
 matches the FEA motion.  If ``--duration`` reaches past the last CRM load
 frame, the replay stops at that frame and prints a notice instead of holding a
-stale wrench.  The reported peak stress excludes tetrahedra below
+stale wrench.  In a full-study concurrent run the orchestrator passes
+``--wait-for-crm`` plus a liveness marker: the replay then follows newly
+written load frames while CRM is running and applies the ordinary duration/frame
+cap once CRM exits.  The reported peak stress excludes tetrahedra below
 ``--min-stress-volume`` (default 1e-12 m^3) to avoid sliver-element artifacts;
 the raw peak is also written to the CSV.
 
@@ -58,6 +61,7 @@ import csv
 import json
 import math
 import multiprocessing as mp
+import os
 import queue
 import sys
 import time
@@ -75,6 +79,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # targets so a coarse structural dt (for example 5 ms) cannot leak into the
 # printed and CSV times.
 FEA_TIME_QUANTUM_S = 0.001
+
+# Live (concurrent) replays poll the CRM marker and the growing loads CSV at
+# this interval while they wait for the next soil-wrench frame.
+CRM_FRAME_POLL_S = 0.1
 
 import lunar_excavator_crm as rigid  # noqa: E402
 import lunar_excavator_crm_fea as fea_driver  # noqa: E402
@@ -164,6 +172,78 @@ def fea_duration_from_crm_frames(
             "Continuing with the shorter run (this is not a failure)."
         )
     return requested_duration, None
+
+
+def should_wait_for_load_frame(target: float, last_frame_time: float, crm_alive: bool) -> bool:
+    """True when a live replay must hold its next output time for CRM frames."""
+    return crm_alive and target > last_frame_time + 1.0e-12
+
+
+def crm_stage_alive(marker: Path | None) -> bool:
+    """True while the study runner's CRM-liveness marker is current.
+
+    The runner writes the CRM process PID into the marker and removes it when
+    the stage ends.  Checking the PID as well as the file means a crashed
+    runner cannot leave a live replay waiting forever on a stale marker.
+    """
+    if marker is None:
+        return False
+    try:
+        if not marker.is_file():
+            return False
+        token = marker.read_text(encoding="utf-8", errors="replace").strip()
+        if token.startswith("pid:"):
+            token = token[4:].strip()
+        if token:
+            os.kill(int(token), 0)
+    except (OSError, ValueError, UnicodeError):
+        return False
+    return True
+
+
+def load_samples_ready(path: Path, minimum: int = 2) -> bool:
+    """True once a (possibly still growing) loads CSV has usable samples."""
+    try:
+        handle = path.open(newline="", encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    with handle:
+        reader = csv.DictReader(handle)
+        required = {"time_s", "drum_z_m", *LoadHistory.FIELDS}
+        if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
+            return False
+        count = 0
+        for row in reader:
+            try:
+                float(row["time_s"])
+                float(row["drum_z_m"])
+                for name in LoadHistory.FIELDS:
+                    float(row[name])
+            except (TypeError, ValueError):
+                # Ignore a partially written trailing row.
+                continue
+            count += 1
+            if count >= minimum:
+                return True
+    return False
+
+
+def wait_for_load_history(path: Path, *, alive_check, poll: float = CRM_FRAME_POLL_S) -> LoadHistory:
+    """Wait for the first CRM load samples, then return their history.
+
+    Used only for a concurrent full study: CRM has just been started and may
+    still be creating ``soil_loads.csv``.  A finished CRM with no samples is a
+    hard error because there is nothing to replay.
+    """
+    while True:
+        if load_samples_ready(path):
+            return LoadHistory(path)
+        if not alive_check():
+            raise SystemExit(
+                f"CRM finished before {path} contained at least two load samples; "
+                "no one-way replay is possible"
+            )
+        time.sleep(poll)
 
 
 def read_tetgen_ele(path: Path) -> np.ndarray:
@@ -506,6 +586,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--vtk-stride", type=int, default=1,
                    help="write every Nth recorded FEA frame as a VTU frame (default: 1 = full animation; "
                         "the final frame is always included)")
+    p.add_argument("--wait-for-crm", action="store_true",
+                   help="live replay mode for a concurrent full study: wait for new load frames "
+                        "while rigid CRM is running instead of stopping at the initially available "
+                        "frames; once CRM exits, keep the usual minimum(duration, frames) limit")
+    p.add_argument("--crm-alive-file", type=Path, default=None,
+                   help="marker file maintained by the study runner while CRM is active; contains "
+                        "the CRM PID. Implies a live replay when used with --wait-for-crm "
+                        "(default: <study>/crm/crm_running.flag)")
     p.set_defaults(export_vtk=False)
     p.add_argument("--raw-stress-every", type=int, default=1,
                    help="compute the unfiltered raw peak von Mises (stride 1, no volume filter) "
@@ -528,6 +616,7 @@ class LoadHistory:
         path = path.resolve()
         if not path.is_file():
             raise SystemExit(f"missing soil loads file: {path}")
+        signature = self._file_signature(path)
         times: list[float] = []
         drum_z: list[float] = []
         values: list[np.ndarray] = []
@@ -567,6 +656,38 @@ class LoadHistory:
         self.actuator = np.asarray(actuator, dtype=float)
         self.vertical = np.asarray(vertical, dtype=float)
         self.warned = False
+        self._signature = signature
+
+    def _file_signature(self, path: Path | None = None) -> tuple[int, int] | None:
+        try:
+            stat = (path or self.path).stat()
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def refresh(self) -> bool:
+        """Reload newly written rows from a live CRM loads file.
+
+        Returns True when the history changed.  A partially written trailing
+        row is ignored by retrying on the next poll, so the replay never reads
+        a torn sample.  This is a no-op for ordinary completed-load studies.
+        """
+        signature = self._file_signature()
+        if signature is None or signature == self._signature:
+            return False
+        try:
+            updated = LoadHistory(self.path)
+        except (SystemExit, ValueError, TypeError):
+            return False
+        self.times = updated.times
+        self.drum_z = updated.drum_z
+        self.values = updated.values
+        self.mode = updated.mode
+        self.states = updated.states
+        self.actuator = updated.actuator
+        self.vertical = updated.vertical
+        self._signature = signature
+        return True
 
     @property
     def t_end(self) -> float:
@@ -807,10 +928,38 @@ def main() -> int:
     args.check_fea_embedded = False
     args.initial_gap = 0.0
     node_path, ele_path = fea_driver.resolve_fea_mesh(args)
-    loads = LoadHistory(args.loads)
-    effective_duration, duration_notice = fea_duration_from_crm_frames(
-        run.duration, loads.t_end, len(loads.times)
+    requested_duration = run.duration
+    live_crm = bool(args.wait_for_crm)
+    alive_file = args.crm_alive_file or (
+        Path(args.output_dir).parent / "crm" / "crm_running.flag"
     )
+    if live_crm:
+        print(
+            "Live CRM overlap: waiting for the first CRM soil-load frames "
+            f"(marker: {alive_file})",
+            flush=True,
+        )
+        loads = wait_for_load_history(
+            args.loads, alive_check=lambda: crm_stage_alive(alive_file)
+        )
+        if crm_stage_alive(alive_file):
+            # CRM is still producing frames: do not cap to the short CSV yet.
+            effective_duration = requested_duration
+            duration_notice = None
+            print(
+                "Live CRM overlap: the replay will follow new CRM load frames until "
+                "CRM exits, then stop at the usual duration/frame limit.",
+                flush=True,
+            )
+        else:
+            effective_duration, duration_notice = fea_duration_from_crm_frames(
+                requested_duration, loads.t_end, len(loads.times)
+            )
+    else:
+        loads = LoadHistory(args.loads)
+        effective_duration, duration_notice = fea_duration_from_crm_frames(
+            requested_duration, loads.t_end, len(loads.times)
+        )
     if duration_notice is not None:
         print(duration_notice, flush=True)
         run = replace(run, duration=effective_duration)
@@ -1120,10 +1269,52 @@ def main() -> int:
     output_index, next_output = next_output_time(1, run.fps, 0.0)
     next_output = min(next_output, run.duration)
 
+    def refresh_live_loads() -> None:
+        """Pick up frames CRM wrote since the last solver step."""
+        if not live_crm or not loads.refresh():
+            return
+        if run.descent_mode == "force":
+            # The recorded-Z position motor was built from the first two
+            # samples.  Rebuild it as CRM extends the trajectory.
+            drive["linear_motor"].SetMotionFunction(
+                fea_driver.build_recorded_position_function(
+                    chrono, loads.times, loads.drum_z,
+                    motion.drum_center_z0, requested_duration,
+                )
+            )
+
     t = 0.0
+    last_wait_notice = 0.0
     try:
         while t < run.duration - 1.0e-12:
             target = min(next_output, run.duration)
+            if live_crm:
+                refresh_live_loads()
+                # While CRM is alive, keep the replay process alive even when
+                # the current loads CSV ends before the next output time.
+                while should_wait_for_load_frame(target, loads.t_end,
+                                                  crm_stage_alive(alive_file)):
+                    time.sleep(CRM_FRAME_POLL_S)
+                    refresh_live_loads()
+                    if time.monotonic() - last_wait_notice >= 5.0:
+                        print(
+                            f"  waiting for CRM load frames: replay t={target:g}s, "
+                            f"last CRM frame t={loads.t_end:g}s",
+                            flush=True,
+                        )
+                        last_wait_notice = time.monotonic()
+                if target > loads.t_end + 1.0e-12:
+                    # CRM has exited.  Restore the ordinary rule: stop at the
+                    # minimum of the requested duration and the frames it wrote.
+                    capped, notice = fea_duration_from_crm_frames(
+                        requested_duration, loads.t_end, len(loads.times)
+                    )
+                    if notice is not None:
+                        print(notice, flush=True)
+                    run = replace(run, duration=max(t, capped))
+                    target = min(next_output, run.duration)
+                    if target <= t + 1.0e-12:
+                        break
             step_start = t
             t, h = step_to_target(t, target, run.dt)
             if h > 1.0e-12:
