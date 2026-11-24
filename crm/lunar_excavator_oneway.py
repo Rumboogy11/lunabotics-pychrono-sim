@@ -40,9 +40,11 @@ frame, the replay stops at that frame and prints a notice instead of holding a
 stale wrench.  In a full-study concurrent run the orchestrator passes
 ``--wait-for-crm`` plus a liveness marker: the replay then follows newly
 written load frames while CRM is running and applies the ordinary duration/frame
-cap once CRM exits.  The reported peak stress excludes tetrahedra below
-``--min-stress-volume`` (default 1e-12 m^3) to avoid sliver-element artifacts;
-the raw peak is also written to the CSV.
+cap once CRM exits.  The console prints one detailed ``FEA frame`` line per
+output time plus a short ``FEA t=...`` line only at t=0 and each whole second,
+matching rigid CRM's progress cadence.  The reported peak stress excludes
+tetrahedra below ``--min-stress-volume`` (default 1e-12 m^3) to avoid
+sliver-element artifacts; the raw peak is also written to the CSV.
 
 The fast default writes scalar summaries only.  Pass ``--export-vtk`` (or use
 the UI toggle) to additionally write a full 3D stress/deformation animation to
@@ -1269,7 +1271,11 @@ def main() -> int:
 
     force_world, torque_world = loads.at(0.0)
     record(0.0, force_world, torque_world, 0.0)
+    # Like rigid CRM, print the short coarse line at t=0 and then only when
+    # the replay crosses a whole second.  The detailed FEA frame line above
+    # already reports every output time.
     print(run_status.time_progress("FEA", 0.0, run.duration), flush=True)
+    next_progress = 1.0
     output_index, next_output = next_output_time(1, run.fps, 0.0)
     next_output = min(next_output, run.duration)
 
@@ -1345,7 +1351,11 @@ def main() -> int:
                 report_force, report_torque = loads.at(t)
                 record(t, report_force, report_torque, motor_speed,
                        is_final=(t >= run.duration - 1.0e-12))
-                print(run_status.time_progress("FEA", t, run.duration), flush=True)
+                due_progress, next_progress = run_status.integer_progress_times(
+                    t, next_progress)
+                for stamp in due_progress:
+                    print(run_status.time_progress("FEA", stamp, run.duration),
+                          flush=True)
                 output_index, next_raw = next_output_time(
                     output_index + 1, run.fps, t)
                 next_output = min(next_raw, run.duration)

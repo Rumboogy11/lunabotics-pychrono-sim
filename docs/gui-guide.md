@@ -128,7 +128,7 @@ The note at the bottom of the page summarizes the ParaView behaviour; the same i
 
 ### Page 6 — Review & Run
 
-The top pane shows the generated commands; the lower pane streams the stage log while running. Frame and time-progress lines are prefixed `CRM` or `FEA`, which keeps concurrent logs readable. Use **Refresh preview** after changing a field. When a run ends — successfully or after a stage is skipped, stopped, or fails — the log prints wall-clock elapsed times for the CRM and one-way FEA stages plus the total wall time. A stage that was launched keeps the time it spent running even if it was cancelled partway through; only stages that never started (`rigid-CRM` in a one-way-FEA-only run, or stages after an early stop) are shown as `not run`.
+The top pane shows the generated commands; the lower pane streams the stage log while running. Frame and time-progress lines are prefixed `CRM` or `FEA`, which keeps concurrent logs readable; FEA's short progress line appears only at t=0 and whole seconds. Use **Refresh preview** after changing a field. When a run ends — successfully or after a stage is skipped, stopped, or fails — the log prints wall-clock elapsed times for the CRM and one-way FEA stages plus the total wall time. A stage that was launched keeps the time it spent running even if it was cancelled partway through; only stages that never started (`rigid-CRM` in a one-way-FEA-only run, or stages after an early stop) are shown as `not run`.
 
 Along the bottom of the Study Wizard tab (outside page 6):
 
@@ -139,7 +139,7 @@ Along the bottom of the Study Wizard tab (outside page 6):
 
 Inside page 6's lower run bar:
 
-- **Skip current step** — terminate the active command and mark it skipped; remaining queued stages still run. With a concurrent CRM/FEA pair, the first press stops only rigid CRM and lets FEA finish against the frames already recorded; press again to stop FEA too. The whole process group of the targeted stage is signalled, so worker processes such as the CRM particle writers are stopped too and the runner can advance. If no command is currently running, nothing is skipped and the status line says so.
+- **Skip current step** — terminate the active command and mark it skipped; remaining queued stages still run. With a concurrent CRM/FEA pair, the first press stops only rigid CRM and lets FEA finish against the frames already recorded; press again to stop FEA too. The whole process group of the targeted stage is signalled, so worker processes such as the CRM particle writers are stopped too and the runner can advance. CRM traps that termination signal and closes its writer pool, so no leaked-semaphore warning is printed. If no command is currently running, nothing is skipped and the status line says so.
 - **Stop running process** — terminate the active stage (including its worker processes) and abort the remaining steps.
 
 The status line reports what is happening (for example, "Viewing <doc>" when you use the Docs tab).

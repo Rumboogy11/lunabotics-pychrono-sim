@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 import io
 import os
+import signal
 import sys
 import tempfile
 import threading
@@ -20,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "crm"))
 os.environ.setdefault("PYCHRONO_GUI_NO_REEXEC", "1")
 
+import crm.lunar_excavator_crm as crm_driver  # noqa: E402
 import crm.lunar_excavator_oneway as oneway  # noqa: E402
 import run_status  # noqa: E402
 import study_gui as gui  # noqa: E402
@@ -130,6 +132,20 @@ class RuntimeStatusLabelTest(unittest.TestCase):
             "  FEA t=  0.000s / 0.2s",
         )
 
+    def test_integer_progress_helper_fires_once_per_whole_second(self) -> None:
+        self.assertEqual(
+            run_status.integer_progress_times(0.133, 1.0), ([], 1.0),
+        )
+        self.assertEqual(
+            run_status.integer_progress_times(1.0, 1.0), ([1.0], 2.0),
+        )
+        self.assertEqual(
+            run_status.integer_progress_times(2.0, 1.0), ([1.0, 2.0], 3.0),
+        )
+        self.assertEqual(
+            run_status.integer_progress_times(1.0 + 1.0e-13, 1.0), ([1.0], 2.0),
+        )
+
     def test_drivers_route_status_lines_through_the_helper(self) -> None:
         import re
 
@@ -146,6 +162,64 @@ class RuntimeStatusLabelTest(unittest.TestCase):
             pattern = rf'run_status\.frame_status\(\s*"{stage}"'
             self.assertRegex(source, pattern)
             self.assertRegex(source, rf'run_status\.time_progress\(\s*"{stage}"')
+        self.assertRegex(sources["oneway"], r'run_status\.integer_progress_times\(')
+        self.assertNotRegex(
+            sources["oneway"], r'run_status\.time_progress\(\s*"FEA",\s*t,',
+        )
+
+
+class CrmTerminationTest(unittest.TestCase):
+    def tearDown(self) -> None:
+        crm_driver._TERMINATING = False
+
+    @unittest.skipIf(os.name == "nt", "POSIX signal handling test")
+    def test_sigterm_is_converted_to_the_cleanup_path(self) -> None:
+        with patch.object(crm_driver.signal, "signal") as register:
+            crm_driver.install_termination_handler()
+
+        register.assert_called_once()
+        self.assertEqual(register.call_args.args[0], signal.SIGTERM)
+        handler = register.call_args.args[1]
+        with self.assertRaises(KeyboardInterrupt):
+            handler(signal.SIGTERM, None)
+        self.assertTrue(crm_driver._TERMINATING)
+
+    def test_terminated_shutdown_cancels_pending_writer_work(self) -> None:
+        class FakeExecutor:
+            def __init__(self) -> None:
+                self.kwargs = None
+
+            def shutdown(self, **kwargs) -> None:
+                self.kwargs = kwargs
+
+        class FakeFuture:
+            def result(self) -> None:
+                raise AssertionError("pending writes must not be awaited on stop")
+
+        executor = FakeExecutor()
+        crm_driver.shutdown_particle_executor(
+            executor, [FakeFuture()], terminating=True,
+        )
+        self.assertEqual(executor.kwargs, {"wait": True, "cancel_futures": True})
+
+    def test_normal_shutdown_waits_for_pending_writer_work(self) -> None:
+        class FakeExecutor:
+            def __init__(self) -> None:
+                self.kwargs = None
+
+            def shutdown(self, **kwargs) -> None:
+                self.kwargs = kwargs
+
+        results: list[str] = []
+
+        class FakeFuture:
+            def result(self) -> None:
+                results.append("done")
+
+        executor = FakeExecutor()
+        crm_driver.shutdown_particle_executor(executor, [FakeFuture()])
+        self.assertEqual(results, ["done"])
+        self.assertEqual(executor.kwargs, {"wait": True})
 
 
 class WizardConcurrentTest(unittest.TestCase):

@@ -18,3 +18,17 @@ def frame_status(stage: str, frame: int, time_s: float, detail: str) -> str:
 def time_progress(stage: str, time_s: float, duration_s: float) -> str:
     """Format one stage-labelled coarse time-progress line."""
     return f"  {stage} t={time_s:7.3f}s / {duration_s:g}s"
+
+
+def integer_progress_times(time_s: float, next_integer_s: float) -> tuple[list[float], float]:
+    """Return integer-second stamps reached by ``time_s`` and the next target.
+
+    The one-way replay only moves between output times, so it can cross several
+    whole seconds in one step.  Emitting one short progress line per integer
+    keeps its console cadence aligned with the rigid-CRM driver.
+    """
+    due: list[float] = []
+    while next_integer_s <= time_s + 1.0e-12:
+        due.append(next_integer_s)
+        next_integer_s += 1.0
+    return due, next_integer_s

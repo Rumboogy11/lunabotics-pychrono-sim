@@ -71,6 +71,8 @@ import csv
 import json
 import math
 import multiprocessing
+import os
+import signal
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -94,6 +96,35 @@ from lunar_excavator_config import (  # noqa: E402
     bed_half_extents,
 )
 import run_status  # noqa: E402
+
+
+# The GUI stops a skipped CRM stage with SIGTERM.  Handling it in-process lets
+# the particle-writer pool close its multiprocessing semaphores before exit;
+# an abrupt SIGTERM leaves the resource tracker reporting leaked semaphores.
+_TERMINATING = False
+
+
+def request_clean_termination(_signum=None, _frame=None) -> None:
+    """Turn a termination signal into the driver's normal cleanup path."""
+    global _TERMINATING
+    _TERMINATING = True
+    raise KeyboardInterrupt
+
+
+def install_termination_handler() -> None:
+    """Install the SIGTERM cleanup handler on POSIX systems."""
+    if os.name != "nt":
+        signal.signal(signal.SIGTERM, request_clean_termination)
+
+
+def shutdown_particle_executor(executor, pending_writes, terminating: bool = False) -> None:
+    """Close the writer pool, cancelling queued work on an interrupted run."""
+    if terminating:
+        executor.shutdown(wait=True, cancel_futures=True)
+        return
+    for future in pending_writes:
+        future.result()
+    executor.shutdown(wait=True)
 
 
 @dataclass(frozen=True)
@@ -1514,6 +1545,7 @@ def configure_gravity(chrono, system, terrain, run: CrmRunParams) -> None:
 
 def main() -> int:
     args = build_parser().parse_args()
+    install_termination_handler()
     soil = make_soil(args)
     run = make_run_params(args)
 
@@ -1846,6 +1878,7 @@ def main() -> int:
     next_load_output = 1.0 / run.loads_fps
 
     t = 0.0
+    interrupted = False
     try:
         while t < run.duration - 1.0e-12:
             h = min(run.dt, run.duration - t)
@@ -1893,16 +1926,21 @@ def main() -> int:
             force = vec_parts(terrain.GetFsiBodyForce(drum)) if hasattr(terrain, "GetFsiBodyForce") else (0.0, 0.0, 0.0)
             torque = vec_parts(terrain.GetFsiBodyTorque(drum)) if hasattr(terrain, "GetFsiBodyTorque") else (0.0, 0.0, 0.0)
             write_loads(t, force, torque)
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\nCRM run interrupted; closing particle writers", flush=True)
     finally:
         if particle_executor is not None:
-            for future in pending_particle_writes:
-                future.result()
-            particle_executor.shutdown(wait=True)
+            shutdown_particle_executor(
+                particle_executor, pending_particle_writes, terminating=_TERMINATING,
+            )
         if state_file is not None:
             state_file.close()
         if loads_file is not None:
             loads_file.close()
 
+    if interrupted:
+        return 130
     print(
         "\nCRM run complete: "
         f"final_fill={last_row.get('fill_ratio_mass')} "
@@ -1919,4 +1957,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)

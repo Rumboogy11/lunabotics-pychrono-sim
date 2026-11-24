@@ -29,7 +29,7 @@ Three front ends drive the same pipeline:
 - `study_wizard.py` — interactive/non-interactive CLI; writes `study_config.json` and `commands.sh`.
 - Direct drivers (`crm/run.sh`, `crm/run_oneway_fea.sh`, `step_to_chrono_fea.py`, etc.) for advanced use.
 
-The wizard and both GUIs default to sequential stages. Their **Run CRM + one-way FEA together** toggle (CLI: `--concurrent-crm-fea`) starts the rigid-CRM and one-way stages at the same time; the generated `commands.sh` uses the same background/wait structure. Frame and coarse time-progress lines carry a `CRM` or `FEA` prefix so the interleaved log is unambiguous. In the GUI, the first **Skip current step** press terminates CRM and leaves FEA running; a second press terminates FEA. The modern GUI subclasses the classic one, so it shares the toggle and runner unchanged.
+The wizard and both GUIs default to sequential stages. Their **Run CRM + one-way FEA together** toggle (CLI: `--concurrent-crm-fea`) starts the rigid-CRM and one-way stages at the same time; the generated `commands.sh` uses the same background/wait structure. Frame and coarse time-progress lines carry a `CRM` or `FEA` prefix so the interleaved log is unambiguous; FEA's coarse progress line is limited to t=0 and whole seconds while its detailed frame line covers every output time. In the GUI, the first **Skip current step** press terminates CRM and leaves FEA running; a second press terminates FEA. The modern GUI subclasses the classic one, so it shares the toggle and runner unchanged.
 
 `full_model.py` is a separate diagnostic orchestrator for rigid CRM plus two-way coupled FEA. It is not part of the supported study pipeline.
 
