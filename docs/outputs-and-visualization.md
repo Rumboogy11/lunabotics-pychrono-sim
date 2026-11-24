@@ -39,6 +39,8 @@ Output_<study_name>/
 
 `study_config.json` and `commands.sh` are the reproducibility pair. If you want to rerun or audit a study, start there. `commands.sh` shows each stage command together with its log destination; the config's `commands` array stores the stage names and command argument lists. For a concurrent study, `commands.sh` starts rigid CRM in a background subshell, writes its PID to `crm/crm_running.flag`, runs one-way FEA in the foreground, and waits for CRM before continuing. The flag is transient and is removed as soon as CRM exits; it is not a result file.
 
+Each stage log also mirrors the GUI progress stream. Frame and coarse time-progress lines start with `CRM`, `FEA`, or `two-way FEA` (diagnostic), so interleaved output can be attributed without relying on the log filename.
+
 ## Numeric outputs
 
 ### `crm/summary.csv`

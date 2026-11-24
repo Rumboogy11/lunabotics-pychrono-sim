@@ -47,7 +47,7 @@ Starts `study_gui_modern.py`, a thin subclass of `study_gui.py` with a modern th
 
 ### `./run_study.sh`
 
-Forwards all arguments to `study_wizard.py`. `--help` prints every wizard flag; see the [wizard guide](wizard-guide.md). Pass `--concurrent-crm-fea` to start rigid CRM and one-way FEA together; `--no-concurrent-crm-fea` forces the default sequential order. A real run prints a `Simulation elapsed times` block with the CRM, one-way FEA, and total wall times, including partial times if a stage fails or the run is interrupted; stages that never started show `not run`. In concurrent mode the two stage times overlap, so their sum can exceed the total wall time.
+Forwards all arguments to `study_wizard.py`. `--help` prints every wizard flag; see the [wizard guide](wizard-guide.md). Pass `--concurrent-crm-fea` to start rigid CRM and one-way FEA together; `--no-concurrent-crm-fea` forces the default sequential order. Concurrent frame and time-progress lines are tagged `CRM` or `FEA` (the diagnostic two-way driver uses `two-way FEA`), so a shared log remains readable. A real run prints a `Simulation elapsed times` block with the CRM, one-way FEA, and total wall times, including partial times if a stage fails or the run is interrupted; stages that never started show `not run`. In concurrent mode the two stage times overlap, so their sum can exceed the total wall time.
 
 ## Simulation drivers
 

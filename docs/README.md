@@ -47,7 +47,7 @@ The original detailed documents are still available and are linked from the Docs
 
 - The **rigid Chrono::CRM** stage is the production/design model. Use it for geometry comparisons of fill, torque, and specific energy.
 - The **one-way CRM → FEA replay** is a structural screening tool: it replays recorded soil loads on a solid mesh. It is not two-way fluid–structure interaction.
-- Full studies run sequentially by default. The wizard and both GUIs offer an opt-in **Run CRM + one-way FEA together** mode (`--concurrent-crm-fea`) that overlaps the stages while keeping the replay tied to real CRM load frames.
+- Full studies run sequentially by default. The wizard and both GUIs offer an opt-in **Run CRM + one-way FEA together** mode (`--concurrent-crm-fea`) that overlaps the stages while keeping the replay tied to real CRM load frames. Interleaved progress lines name their stage, and the first GUI **Skip current step** press stops CRM while FEA continues; a second press stops FEA.
 - The **two-way FEA** and combined `full_model.py` paths are diagnostics only. Their stress and fill results are **not engineering-validated**.
 - Soil and excavation metrics count **SPH fluid markers only**. Older comparisons that included boundary (BCE) markers are invalid.
 - No CAD or mesh geometry is bundled with the project. You supply your own STEP or mesh files; `geometry/` is ignored by git.

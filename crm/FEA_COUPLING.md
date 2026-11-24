@@ -43,7 +43,9 @@ valid CRM samples, reloads the CSV as it grows, and does not stop at a
 temporarily short file while the marker is current. When CRM exits, the runner
 removes the marker and the replay applies the same duration/frame cap described
 above. The load interpolation, motor settings, and outputs are unchanged; only
-the timing of the cap is deferred.
+the timing of the cap is deferred. Frame and coarse time-progress lines are
+prefixed `CRM` or `FEA` (and `two-way FEA` for the diagnostic coupled driver),
+so interleaved console output identifies its stage.
 
 This avoids flex-BCE instability and gives stable short-run PLA stress
 estimates. It is a structural response to rigid-CRM loads, not two-way FSI:

@@ -114,7 +114,7 @@ Remember that `--drum-gravity` is off by default and only changes force-mode dyn
 
 ### "Skip current step" stops the log instead of reaching FEA
 
-The CRM and export drivers spawn worker processes (for example, particle CSV writers) that inherit the runner's stdout pipe. Signalling only the step's parent PID leaves those workers alive, so the runner blocks reading stdout and never advances to the one-way FEA stage. The GUI now starts each step in its own process group and **Skip current step** / **Stop running process** signal the whole group, which closes the pipe and lets the pipeline continue (or abort cleanly). If you must skip CRM very early, `crm/soil_loads.csv` may not yet contain enough samples for FEA; in that case re-run CRM or use **Run one-way FEA only (existing CRM)** against a completed study.
+The CRM and export drivers spawn worker processes (for example, particle CSV writers) that inherit the runner's stdout pipe. Signalling only the step's parent PID leaves those workers alive, so the runner blocks reading stdout and never advances to the one-way FEA stage. The GUI now starts each step in its own process group and **Skip current step** / **Stop running process** signal the whole group, which closes the pipe and lets the pipeline continue (or abort cleanly). In a concurrent run, the first **Skip current step** press targets only rigid CRM and leaves FEA running; a second press targets FEA. If you must skip CRM very early, `crm/soil_loads.csv` may not yet contain enough samples for FEA; in that case re-run CRM or use **Run one-way FEA only (existing CRM)** against a completed study.
 
 ## FEA and viewing
 
@@ -126,7 +126,7 @@ The CSV is missing required telemetry, has too few or unsorted samples, uses a d
 
 A `NOTICE: one-way FEA duration limited by the available CRM load frames` message means the FEA duration was longer than the recorded load history. The replay stops at the last row of `soil_loads.csv` and exits normally; this is not a failure. Run rigid CRM longer (or with a higher `--loads-fps`) and re-run the replay if you need the extra time.
 
-In a concurrent full study, `waiting for CRM load frames` is expected: the replay has reached the next output time before CRM has written it. The one-way driver keeps polling `crm/soil_loads.csv` while the `crm/crm_running.flag` liveness marker is current, then applies the ordinary cap as soon as CRM exits. If that message never advances, check that CRM is still running and writing load samples; a FEA-only run never waits because no liveness marker is created. Concurrent mode is opt-in; turning **Run CRM + one-way FEA together** off restores the original sequential run.
+In a concurrent full study, `waiting for CRM load frames` is expected: the replay has reached the next output time before CRM has written it. Frame and time-progress lines are prefixed `CRM` or `FEA`, so interleaved output can be read per stage. The one-way driver keeps polling `crm/soil_loads.csv` while the `crm/crm_running.flag` liveness marker is current, then applies the ordinary cap as soon as CRM exits. If that message never advances, check that CRM is still running and writing load samples; a FEA-only run never waits because no liveness marker is created. Concurrent mode is opt-in; turning **Run CRM + one-way FEA together** off restores the original sequential run.
 
 ### FEA results look noisy or implausible
 

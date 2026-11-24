@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "crm"))
 os.environ.setdefault("PYCHRONO_GUI_NO_REEXEC", "1")
 
 import crm.lunar_excavator_oneway as oneway  # noqa: E402
+import run_status  # noqa: E402
 import study_gui as gui  # noqa: E402
 import study_wizard as wiz  # noqa: E402
 
@@ -104,6 +105,47 @@ def full_cfg(output_dir: Path) -> dict:
 def build_steps(cfg: dict) -> list[dict]:
     with redirect_stderr(io.StringIO()):
         return wiz.build_commands(cfg)
+
+
+class RuntimeStatusLabelTest(unittest.TestCase):
+    def test_frame_and_progress_lines_name_their_stage(self) -> None:
+        self.assertEqual(
+            run_status.frame_status("CRM", 3, 1.25, "inside=4 fill=0.1"),
+            "CRM frame 00003  t=  1.250s  inside=4 fill=0.1",
+        )
+        self.assertEqual(
+            run_status.frame_status("FEA", 0, 0.0, "vm=12MPa"),
+            "FEA frame 00000  t=  0.000s  vm=12MPa",
+        )
+        self.assertEqual(
+            run_status.frame_status("two-way FEA", 7, 2.0, "tau=1Nm"),
+            "two-way FEA frame 00007  t=  2.000s  tau=1Nm",
+        )
+        self.assertEqual(
+            run_status.time_progress("CRM", 2.0, 4.0),
+            "  CRM t=  2.000s / 4s",
+        )
+        self.assertEqual(
+            run_status.time_progress("FEA", 0.0, 0.2),
+            "  FEA t=  0.000s / 0.2s",
+        )
+
+    def test_drivers_route_status_lines_through_the_helper(self) -> None:
+        import re
+
+        sources = {
+            "crm": (ROOT / "crm" / "lunar_excavator_crm.py").read_text(encoding="utf-8"),
+            "oneway": (ROOT / "crm" / "lunar_excavator_oneway.py").read_text(encoding="utf-8"),
+            "coupled": (ROOT / "crm" / "lunar_excavator_crm_fea.py").read_text(encoding="utf-8"),
+        }
+        for source in sources.values():
+            self.assertIn("import run_status", source)
+        for stage, source in (("CRM", sources["crm"]),
+                              ("FEA", sources["oneway"]),
+                              ("two-way FEA", sources["coupled"])):
+            pattern = rf'run_status\.frame_status\(\s*"{stage}"'
+            self.assertRegex(source, pattern)
+            self.assertRegex(source, rf'run_status\.time_progress\(\s*"{stage}"')
 
 
 class WizardConcurrentTest(unittest.TestCase):
@@ -434,6 +476,114 @@ class ConcurrentGuiFieldTest(unittest.TestCase):
             self.assertIn(("step_skipped", "rigid-CRM"), events)
             self.assertIn(("step_skipped", "one-way-FEA"), events)
             self.assertIn(("step_done", "export-ParaView-VTK"), events)
+            self.assertEqual(events[-1], ("done", "ok"))
+
+    def test_skip_step_stops_crm_before_fea(self) -> None:
+        class LiveProc(FakeProc):
+            def __init__(self) -> None:
+                super().__init__("running\n")
+                self.stopped = False
+
+            def poll(self) -> int | None:
+                return 0 if self.stopped else None
+
+        crm, fea = LiveProc(), LiveProc()
+        self.app._concurrent_by_name = {"rigid-CRM": crm, "one-way-FEA": fea}
+        self.app._concurrent_planned_names = ("rigid-CRM", "one-way-FEA")
+        self.app._concurrent_procs = [crm, fea]
+        self.app._concurrent_skip_targets.clear()
+        self.app._skip_requested.clear()
+        stopped: list[object] = []
+
+        with patch.object(self.app, "_step_process_alive",
+                          side_effect=lambda p: p.poll() is None), \
+             patch.object(self.app, "_terminate_step_process",
+                          side_effect=lambda p: stopped.append(p)):
+            self.app._skip_step()
+            self.assertEqual(stopped, [crm])
+            self.assertEqual(self.app._concurrent_skip_targets, {"rigid-CRM"})
+            self.app._skip_step()
+            self.assertEqual(stopped, [crm, fea])
+            self.assertEqual(
+                self.app._concurrent_skip_targets,
+                {"rigid-CRM", "one-way-FEA"},
+            )
+
+        self.assertTrue(self.app._skip_requested.is_set())
+        lines = [text for kind, text in self._events() if kind == "line"]
+        self.assertTrue(any("skip requested for rigid-CRM" in line
+                            and "one-way-FEA keeps running" in line for line in lines))
+        self.assertTrue(any("skip requested for one-way-FEA" in line
+                            for line in lines))
+
+    def test_first_gui_skip_leaves_fea_complete(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="concurrent_gui_first_skip_",
+                                         dir="/tmp/opencode") as tmp:
+            steps = self._steps(tmp)
+            tail = {"name": "export-ParaView-VTK", "command": ["export"],
+                    "log": str(Path(tmp) / "export.log")}
+            procs: dict[str, FakeProc] = {}
+            stopped: list[object] = []
+
+            def fake_popen(command, **_kwargs):
+                proc = FakeProc("running\n")
+                procs[command[0]] = proc
+                if command == ["crm"]:
+                    self.app._concurrent_skip_targets.add("rigid-CRM")
+                    self.app._skip_requested.set()
+                return proc
+
+            self.app._stop_requested.clear()
+            self.app._skip_requested.clear()
+            self.app._concurrent_by_name.clear()
+            self.app._concurrent_skip_targets.clear()
+            with patch.object(gui.subprocess, "Popen", side_effect=fake_popen), \
+                 patch.object(self.app, "_terminate_step_process",
+                              side_effect=lambda p: stopped.append(p)):
+                self.app._run_thread({"output_dir": tmp}, steps + [tail])
+
+            self.assertEqual(stopped, [procs["crm"]])
+            events = self._events()
+            self.assertIn(("step_skipped", "rigid-CRM"), events)
+            self.assertIn(("step_done", "one-way-FEA"), events)
+            self.assertIn(("step_done", "export-ParaView-VTK"), events)
+            self.assertEqual(events[-1], ("done", "ok"))
+
+    def test_queued_fea_skip_applies_when_it_launches(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="concurrent_gui_queued_skip_",
+                                         dir="/tmp/opencode") as tmp:
+            steps = self._steps(tmp)
+            procs: dict[str, FakeProc] = {}
+            stopped: list[object] = []
+            original_put = self.app.log_queue.put
+
+            def fake_popen(command, **_kwargs):
+                proc = FakeProc("running\n")
+                procs[command[0]] = proc
+                return proc
+
+            def put(item):
+                # Simulate a second skip press arriving after CRM started but
+                # before FEA's Popen has been published.
+                if item[0] == "line" and "[rigid-CRM]" in str(item[1]):
+                    self.app._concurrent_skip_targets = {"one-way-FEA"}
+                    self.app._skip_requested.set()
+                original_put(item)
+
+            self.app._stop_requested.clear()
+            self.app._skip_requested.clear()
+            self.app._concurrent_by_name.clear()
+            self.app._concurrent_skip_targets.clear()
+            with patch.object(gui.subprocess, "Popen", side_effect=fake_popen), \
+                 patch.object(self.app, "_terminate_step_process",
+                              side_effect=lambda p: stopped.append(p)), \
+                 patch.object(self.app.log_queue, "put", side_effect=put):
+                self.app._run_thread({"output_dir": tmp}, steps)
+
+            self.assertEqual(stopped, [procs["fea"]])
+            events = self._events()
+            self.assertIn(("step_done", "rigid-CRM"), events)
+            self.assertIn(("step_skipped", "one-way-FEA"), events)
             self.assertEqual(events[-1], ("done", "ok"))
 
     def test_stop_group_aborts_later_steps(self) -> None:

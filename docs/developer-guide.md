@@ -11,6 +11,7 @@ For contributors and advanced users who want to change the tools, understand the
 │   ├── lunar_excavator_oneway.py     one-way CRM → FEA replay driver
 │   ├── lunar_excavator_crm_fea.py    two-way coupled FEA (diagnostic)
 │   ├── crm_soil.py                   soil parameter definitions
+│   ├── run_status.py                 shared stage-labelled progress formatter
 │   ├── run.sh / run_oneway_fea.sh / run_fea.sh
 │   ├── README.md / FEA_COUPLING.md
 │   └── chrono_runtime_env.sh        local Chrono runtime helper

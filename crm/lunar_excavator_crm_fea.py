@@ -52,6 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import lunar_excavator_crm as rigid  # noqa: E402
 from lunar_excavator_config import DEFAULT as MOTION_DEFAULT  # noqa: E402
+import run_status  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -1203,10 +1204,13 @@ def main() -> int:
         last_row = row
         frame += 1
         print(
-            f"frame {frame - 1:05d}  t={t:7.3f}s  inside={metrics['inside_drum']:6d}  "
-            f"fill={metrics['fill_ratio_mass']:.4f}  peak={peak_fill:.4f}  "
-            f"disp={max_disp:.4g}m  vm={max_stress / 1e6:.4g}MPa  "
-            f"tau={axis_torque:.4g}Nm",
+            run_status.frame_status(
+                "two-way FEA", frame - 1, t,
+                f"inside={metrics['inside_drum']:6d}  "
+                f"fill={metrics['fill_ratio_mass']:.4f}  peak={peak_fill:.4f}  "
+                f"disp={max_disp:.4g}m  vm={max_stress / 1e6:.4g}MPa  "
+                f"tau={axis_torque:.4g}Nm",
+            ),
             flush=True,
         )
         if args.debug_stress:
@@ -1282,7 +1286,7 @@ def main() -> int:
                 next_output += 1.0 / run.fps
 
             if t >= next_progress:
-                print(f"  t={t:7.3f}s / {run.duration:g}s", flush=True)
+                print(run_status.time_progress("two-way FEA", t, run.duration), flush=True)
                 next_progress += 1.0
     finally:
         if state_file is not None:

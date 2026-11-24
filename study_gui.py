@@ -357,7 +357,7 @@ PARAM_INFO: dict[str, str] = {
         "Cost: helps Pardiso up to about 8 threads on a 16-core machine and speeds CAD meshing; Eigen SparseLU/QR factorization stays single-threaded, so extra threads do not help those solvers.",
     ),
     "concurrent_crm_fea": _info(
-        "Start rigid CRM and one-way FEA together instead of waiting for CRM to finish. The FEA replay watches the CRM liveness marker and keeps waiting for new soil-load frames while CRM is running; once CRM exits it stops at the smaller of the requested FEA duration and the frames CRM wrote. Off means the original sequential CRM-then-FEA run.",
+        "Start rigid CRM and one-way FEA together instead of waiting for CRM to finish. The FEA replay watches the CRM liveness marker and keeps waiting for new soil-load frames while CRM is running; once CRM exits it stops at the smaller of the requested FEA duration and the frames CRM wrote. With this on, Skip current step stops CRM first and leaves FEA running; press it again to stop FEA. Off means the original sequential CRM-then-FEA run.",
         "Cost: overlaps the two stages, so the total wall time can be shorter, but both solvers compete for CPU, memory, and disk. The physics and outputs are unchanged; the replay still uses only recorded CRM frames.",
     ),
     "load_radius_fraction": _info(
@@ -1115,6 +1115,10 @@ class StudyGUI:
         self._apply_ui_settings(self.settings)
         self.proc: subprocess.Popen | None | str = None
         self._concurrent_procs: list[subprocess.Popen] = []
+        self._concurrent_by_name: dict[str, subprocess.Popen] = {}
+        self._concurrent_planned_names: tuple[str, ...] = ()
+        self._concurrent_skip_targets: set[str] = set()
+        self._skip_lock = threading.Lock()
         self.log_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self.tools_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
         # Stop ends the whole pipeline; skip terminates only the active step.
@@ -1499,7 +1503,7 @@ class StudyGUI:
         top = ttk.Frame(p)
         top.pack(fill=X, padx=6, pady=6)
         ttk.Label(top, text="Review generated configuration/commands. Go back to any step to change parameters. "
-                            "Skip current step bypasses one command and continues the run.",
+                            "Skip current step stops one command (CRM first, then FEA when concurrent) and continues the run.",
                   font=HEADER_FONT).pack(side=LEFT)
         ttk.Button(top, text="Refresh preview", command=self._refresh_preview).pack(side=RIGHT)
         paned = ttk.Panedwindow(p, orient=VERTICAL)
@@ -3445,6 +3449,9 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         self._stop_requested.clear()
         self._skip_requested.clear()
         self._concurrent_procs = []
+        self._concurrent_by_name.clear()
+        self._concurrent_planned_names = ()
+        self._concurrent_skip_targets.clear()
         self.proc = "starting"  # marker until the worker publishes the Popen
         self.status_var.set(status)
         threading.Thread(target=self._run_thread, args=(cfg, steps), daemon=True).start()
@@ -3484,6 +3491,12 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         procs: dict[str, subprocess.Popen] = {}
         threads: list[threading.Thread] = []
         watcher: threading.Thread | None = None
+        with self._skip_lock:
+            self._concurrent_by_name.clear()
+            self._concurrent_planned_names = tuple(
+                step["name"] for step in (crm_step, fea_step)
+            )
+            self._concurrent_skip_targets.clear()
         group_started = time.perf_counter()
         try:
             for step in (crm_step, fea_step):
@@ -3499,10 +3512,21 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                     stderr=subprocess.STDOUT, text=True, bufsize=1, **popen_kwargs,
                 )
                 procs[name] = proc
+                with self._skip_lock:
+                    # Publish each process as it starts so a skip press can
+                    # target CRM before FEA has finished launching.
+                    self._concurrent_by_name = dict(procs)
+                    self._concurrent_procs = list(procs.values())
+                    queued_skip = name in self._concurrent_skip_targets
                 if name == "rigid-CRM":
                     # Published before FEA starts so it cannot mistake a live
                     # CRM stage for a finished one.
                     marker.write_text(str(getattr(proc, "pid", os.getpid())), encoding="utf-8")
+                if queued_skip:
+                    # A second skip press can arrive before FEA is launched;
+                    # honour it as soon as that stage exists.
+                    self._terminate_step_process(proc)
+                    self.log_queue.put(("line", f"\n[{name}] skipped before launch\n"))
                 thread = threading.Thread(
                     target=self._pump_concurrent_output, args=(proc, log, name), daemon=True,
                 )
@@ -3535,20 +3559,27 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                 self._log_simulation_timings(step_times, started)
                 self.log_queue.put(("done", "stopped"))
                 return False
-            if self._skip_requested.is_set():
-                for step in group:
-                    self.log_queue.put(("line", f"[{step['name']}] skipped by user\n"))
-                    self.log_queue.put(("step_skipped", step["name"]))
-                return True
-            failed = next((name for name, rc in returncodes.items() if rc != 0), None)
+            with self._skip_lock:
+                skipped = set(self._concurrent_skip_targets)
+            if self._skip_requested.is_set() and not skipped:
+                # Direct event setters (older callers/tests) still skip the
+                # whole group rather than one named member.
+                skipped = {step["name"] for step in group}
+            failed = next((name for name, rc in returncodes.items()
+                           if rc != 0 and name not in skipped), None)
             if failed is not None:
                 self.log_queue.put(("line", f"[{failed}] FAILED (exit {returncodes[failed]})\n"))
                 self._log_simulation_timings(step_times, started)
                 self.log_queue.put(("done", f"failed:{failed}"))
                 return False
             for step in group:
-                self.log_queue.put(("line", f"[{step['name']}] complete\n"))
-                self.log_queue.put(("step_done", step["name"]))
+                name = step["name"]
+                if name in skipped:
+                    self.log_queue.put(("line", f"[{name}] skipped by user\n"))
+                    self.log_queue.put(("step_skipped", name))
+                else:
+                    self.log_queue.put(("line", f"[{name}] complete\n"))
+                    self.log_queue.put(("step_done", name))
             return True
         except (Exception, KeyboardInterrupt):
             for proc in procs.values():
@@ -3561,6 +3592,10 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             marker.unlink(missing_ok=True)
             for log in logs.values():
                 log.close()
+            with self._skip_lock:
+                self._concurrent_by_name.clear()
+                self._concurrent_planned_names = ()
+                self._concurrent_skip_targets.clear()
             self._concurrent_procs = []
             self.proc = None
 
@@ -3700,12 +3735,62 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         self.log_queue.put(("line", "\n[stop requested]\n"))
 
     def _skip_step(self):
-        """Terminate only the active command(s); the remaining steps still run."""
-        procs = [p for p in self._active_processes() if self._step_process_alive(p)]
-        if not procs:
-            messagebox.showinfo("Skip", "No step is currently running.")
+        """Skip the active stage; concurrent pairs stop CRM first, then FEA."""
+        procs: list[subprocess.Popen] = []
+        proc: subprocess.Popen | None = None
+        target: str | None = None
+        other: str | None = None
+        with self._skip_lock:
+            planned = self._concurrent_planned_names or tuple(self._concurrent_by_name)
+            by_name = dict(self._concurrent_by_name)
+            if planned:
+                skipped = set(self._concurrent_skip_targets)
+                target = next(
+                    (
+                        name for name in ("rigid-CRM", "one-way-FEA")
+                        if name in planned and name not in skipped
+                        and (name not in by_name or self._step_process_alive(by_name[name]))
+                    ),
+                    None,
+                )
+                if target is None:
+                    messagebox.showinfo("Skip", "No concurrent stage is still running.")
+                    return
+                self._concurrent_skip_targets = skipped | {target}
+                self._skip_requested.set()
+                proc = by_name.get(target)
+                # A stage may be selected before its Popen is published; treat
+                # it as still ahead of us when deciding what remains running.
+                other = next(
+                    (
+                        name for name in ("rigid-CRM", "one-way-FEA")
+                        if name in planned and name != target
+                        and name not in self._concurrent_skip_targets
+                        and (name not in by_name or self._step_process_alive(by_name[name]))
+                    ),
+                    None,
+                )
+            else:
+                procs = [p for p in self._active_processes() if self._step_process_alive(p)]
+                if not procs:
+                    messagebox.showinfo("Skip", "No step is currently running.")
+                    return
+                self._skip_requested.set()
+
+        if target is not None:
+            if proc is not None:
+                self._terminate_step_process(proc)
+            if target == "rigid-CRM" and other == "one-way-FEA":
+                self.log_queue.put(
+                    ("line", "\n[skip requested for rigid-CRM; one-way-FEA keeps running]\n"))
+                self.status_var.set("Skipped rigid-CRM; one-way-FEA keeps running.")
+            elif target == "rigid-CRM":
+                self.log_queue.put(("line", "\n[skip requested for rigid-CRM]\n"))
+                self.status_var.set("Skipped rigid-CRM.")
+            else:
+                self.log_queue.put(("line", "\n[skip requested for one-way-FEA]\n"))
+                self.status_var.set("Skipped one-way-FEA; no concurrent stage remains.")
             return
-        self._skip_requested.set()
         for p in procs:
             self._terminate_step_process(p)
         self.log_queue.put(("line", "\n[skip requested; continuing with next step]\n"))

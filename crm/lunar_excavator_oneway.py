@@ -87,6 +87,7 @@ CRM_FRAME_POLL_S = 0.1
 import lunar_excavator_crm as rigid  # noqa: E402
 import lunar_excavator_crm_fea as fea_driver  # noqa: E402
 from lunar_excavator_config import DEFAULT as MOTION_DEFAULT  # noqa: E402
+import run_status  # noqa: E402
 
 ONEWAY_FIELDS = [
     "frame",
@@ -1256,16 +1257,19 @@ def main() -> int:
                 vtk_exporter = None
         frame += 1
         print(
-            f"frame {frame - 1:05d}  t={t:7.3f}s  F={np.linalg.norm(applied_force) * args.load_scale:.4g}N  "
-            f"tau={axis_torque:.4g}Nm  deform={max_deformation:.4g}m  "
-            f"vm={max_stress / 1e6:.4g}MPa (raw {raw_stress / 1e6:.4g}MPa)  "
-            f"hot={index} (V={element_volume:.3g}m^3)",
+            run_status.frame_status(
+                "FEA", frame - 1, t,
+                f"F={np.linalg.norm(applied_force) * args.load_scale:.4g}N  "
+                f"tau={axis_torque:.4g}Nm  deform={max_deformation:.4g}m  "
+                f"vm={max_stress / 1e6:.4g}MPa (raw {raw_stress / 1e6:.4g}MPa)  "
+                f"hot={index} (V={element_volume:.3g}m^3)",
+            ),
             flush=True,
         )
 
     force_world, torque_world = loads.at(0.0)
     record(0.0, force_world, torque_world, 0.0)
-    print(f"  t={0.0:7.3f}s / {run.duration:g}s", flush=True)
+    print(run_status.time_progress("FEA", 0.0, run.duration), flush=True)
     output_index, next_output = next_output_time(1, run.fps, 0.0)
     next_output = min(next_output, run.duration)
 
@@ -1341,7 +1345,7 @@ def main() -> int:
                 report_force, report_torque = loads.at(t)
                 record(t, report_force, report_torque, motor_speed,
                        is_final=(t >= run.duration - 1.0e-12))
-                print(f"  t={t:7.3f}s / {run.duration:g}s", flush=True)
+                print(run_status.time_progress("FEA", t, run.duration), flush=True)
                 output_index, next_raw = next_output_time(
                     output_index + 1, run.fps, t)
                 next_output = min(next_raw, run.duration)

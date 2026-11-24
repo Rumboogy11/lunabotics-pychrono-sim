@@ -93,6 +93,7 @@ from lunar_excavator_config import (  # noqa: E402
     OBJ_MEDIUM,
     bed_half_extents,
 )
+import run_status  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -1824,8 +1825,11 @@ def main() -> int:
         last_row = row
         frame += 1
         print(
-            f"frame {frame - 1:05d}  t={t:7.3f}s  inside={metrics['inside_drum']:6d}  "
-            f"fill={metrics['fill_ratio_mass']:.4f}  peak={peak_fill:.4f}",
+            run_status.frame_status(
+                "CRM", frame - 1, t,
+                f"inside={metrics['inside_drum']:6d}  "
+                f"fill={metrics['fill_ratio_mass']:.4f}  peak={peak_fill:.4f}",
+            ),
             flush=True,
         )
 
@@ -1882,7 +1886,7 @@ def main() -> int:
                 next_output += 1.0 / run.fps
 
             if t >= next_progress:
-                print(f"  t={t:7.3f}s / {run.duration:g}s", flush=True)
+                print(run_status.time_progress("CRM", t, run.duration), flush=True)
                 next_progress += 1.0
 
         if loads_writer is not None and last_load_time < t - 1.0e-12:
