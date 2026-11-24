@@ -44,7 +44,7 @@ temporarily short file while the marker is current. When CRM exits, the runner
 removes the marker and the replay applies the same duration/frame cap described
 above. The load interpolation, motor settings, and outputs are unchanged; only
 the timing of the cap is deferred. Frame and coarse time-progress lines are
-prefixed `CRM` or `FEA` (and `two-way FEA` for the diagnostic coupled driver),
+prefixed `[CRM]` or `[FEA]` (and `[two-way FEA]` for the diagnostic coupled driver),
 so interleaved console output identifies its stage. The replay emits one
 detailed frame line per output time but only prints the short progress line at
 t=0 and whole seconds, matching rigid CRM's console cadence.

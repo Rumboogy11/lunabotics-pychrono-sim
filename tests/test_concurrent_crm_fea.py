@@ -113,23 +113,23 @@ class RuntimeStatusLabelTest(unittest.TestCase):
     def test_frame_and_progress_lines_name_their_stage(self) -> None:
         self.assertEqual(
             run_status.frame_status("CRM", 3, 1.25, "inside=4 fill=0.1"),
-            "CRM frame 00003  t=  1.250s  inside=4 fill=0.1",
+            "[CRM] frame 00003  t=  1.250s  inside=4 fill=0.1",
         )
         self.assertEqual(
             run_status.frame_status("FEA", 0, 0.0, "vm=12MPa"),
-            "FEA frame 00000  t=  0.000s  vm=12MPa",
+            "[FEA] frame 00000  t=  0.000s  vm=12MPa",
         )
         self.assertEqual(
             run_status.frame_status("two-way FEA", 7, 2.0, "tau=1Nm"),
-            "two-way FEA frame 00007  t=  2.000s  tau=1Nm",
+            "[two-way FEA] frame 00007  t=  2.000s  tau=1Nm",
         )
         self.assertEqual(
             run_status.time_progress("CRM", 2.0, 4.0),
-            "  CRM t=  2.000s / 4s",
+            "  [CRM] t=  2.000s / 4s",
         )
         self.assertEqual(
             run_status.time_progress("FEA", 0.0, 0.2),
-            "  FEA t=  0.000s / 0.2s",
+            "  [FEA] t=  0.000s / 0.2s",
         )
 
     def test_integer_progress_helper_fires_once_per_whole_second(self) -> None:

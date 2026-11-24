@@ -128,7 +128,7 @@ The note at the bottom of the page summarizes the ParaView behaviour; the same i
 
 ### Page 6 — Review & Run
 
-The top pane shows the generated commands; the lower pane streams the stage log while running. Frame and time-progress lines are prefixed `CRM` or `FEA`, which keeps concurrent logs readable; FEA's short progress line appears only at t=0 and whole seconds. Use **Refresh preview** after changing a field. When a run ends — successfully or after a stage is skipped, stopped, or fails — the log prints wall-clock elapsed times for the CRM and one-way FEA stages plus the total wall time. A stage that was launched keeps the time it spent running even if it was cancelled partway through; only stages that never started (`rigid-CRM` in a one-way-FEA-only run, or stages after an early stop) are shown as `not run`.
+The top pane shows the generated commands; the lower pane streams the stage log while running. Frame and time-progress lines are prefixed `[CRM]` or `[FEA]`, which keeps concurrent logs readable; FEA's short progress line appears only at t=0 and whole seconds. Use **Refresh preview** after changing a field. When a run ends — successfully or after a stage is skipped, stopped, or fails — the log prints wall-clock elapsed times for the CRM and one-way FEA stages plus the total wall time. A stage that was launched keeps the time it spent running even if it was cancelled partway through; only stages that never started (`rigid-CRM` in a one-way-FEA-only run, or stages after an early stop) are shown as `not run`.
 
 Along the bottom of the Study Wizard tab (outside page 6):
 

@@ -40,8 +40,8 @@ frame, the replay stops at that frame and prints a notice instead of holding a
 stale wrench.  In a full-study concurrent run the orchestrator passes
 ``--wait-for-crm`` plus a liveness marker: the replay then follows newly
 written load frames while CRM is running and applies the ordinary duration/frame
-cap once CRM exits.  The console prints one detailed ``FEA frame`` line per
-output time plus a short ``FEA t=...`` line only at t=0 and each whole second,
+cap once CRM exits.  The console prints one detailed ``[FEA] frame`` line per
+output time plus a short ``[FEA] t=...`` line only at t=0 and each whole second,
 matching rigid CRM's progress cadence.  The reported peak stress excludes
 tetrahedra below ``--min-stress-volume`` (default 1e-12 m^3) to avoid
 sliver-element artifacts; the raw peak is also written to the CSV.
@@ -1272,7 +1272,7 @@ def main() -> int:
     force_world, torque_world = loads.at(0.0)
     record(0.0, force_world, torque_world, 0.0)
     # Like rigid CRM, print the short coarse line at t=0 and then only when
-    # the replay crosses a whole second.  The detailed FEA frame line above
+    # the replay crosses a whole second.  The detailed [FEA] frame line above
     # already reports every output time.
     print(run_status.time_progress("FEA", 0.0, run.duration), flush=True)
     next_progress = 1.0
