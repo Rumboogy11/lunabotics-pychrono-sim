@@ -65,6 +65,7 @@ import math
 import multiprocessing as mp
 import os
 import queue
+import signal
 import sys
 import time
 import traceback
@@ -85,6 +86,25 @@ FEA_TIME_QUANTUM_S = 0.001
 # Live (concurrent) replays poll the CRM marker and the growing loads CSV at
 # this interval while they wait for the next soil-wrench frame.
 CRM_FRAME_POLL_S = 0.1
+
+# The GUI stops a skipped FEA stage with SIGTERM.  Handling it in-process lets
+# the background VTK writer release its multiprocessing queues before exit;
+# an abrupt SIGTERM leaves the resource tracker reporting leaked semaphores.
+_TERMINATING = False
+
+
+def request_clean_termination(_signum=None, _frame=None) -> None:
+    """Turn a termination signal into the driver's normal cleanup path."""
+    global _TERMINATING
+    _TERMINATING = True
+    raise KeyboardInterrupt
+
+
+def install_termination_handler() -> None:
+    """Install the SIGTERM cleanup handler on POSIX systems."""
+    if os.name != "nt":
+        signal.signal(signal.SIGTERM, request_clean_termination)
+
 
 import lunar_excavator_crm as rigid  # noqa: E402
 import lunar_excavator_crm_fea as fea_driver  # noqa: E402
@@ -390,11 +410,29 @@ class BackgroundVtkWriter:
                 self._raise_if_failed()
         self._raise_if_failed()
 
-    def close(self) -> None:
-        """Flush queued frames and join the writer before final output."""
+    def _force_stop_writer(self) -> None:
+        if self._process.is_alive():
+            self._process.terminate()
+            self._process.join(timeout=10)
+        if self._process.is_alive():
+            self._process.kill()
+            self._process.join(timeout=10)
+        self._drain_results()
+
+    def close(self, terminating: bool = False) -> None:
+        """Flush queued frames and join the writer before final output.
+
+        On an interrupted run there is no time to drain queued frames: stop the
+        writer promptly so multiprocessing queues and semaphores are released.
+        """
         if self.closed:
+            if terminating and self._process.is_alive():
+                self._force_stop_writer()
             return
         self.closed = True
+        if terminating:
+            self._force_stop_writer()
+            return
         deadline = time.monotonic() + 30.0
         while True:
             try:
@@ -779,6 +817,29 @@ def _vec3(value) -> tuple[float, float, float]:
         return rigid.vec_parts(value)
 
 
+def nonfinite_fea_values(values: dict[str, object]) -> list[str]:
+    """Return the names of scalar/vector FEA quantities that are not finite."""
+    bad: list[str] = []
+    for name, value in values.items():
+        array = np.asarray(value, dtype=float)
+        if array.size == 0 or not np.all(np.isfinite(array)):
+            bad.append(name)
+    return bad
+
+
+def require_finite_fea_state(t: float, values: dict[str, object]) -> None:
+    """Stop before recording/exporting a poisoned solver state."""
+    bad = nonfinite_fea_values(values)
+    if not bad:
+        return
+    raise SystemExit(
+        f"FEA solver state became non-finite at t={t:g} s "
+        f"({', '.join(bad)}). Stopping before continuing to step on invalid "
+        "state. Try a smaller FEA timestep, the HHT timestepper, or a better-"
+        "quality mesh."
+    )
+
+
 def worst_deformation(nodes, local_positions: np.ndarray, spindle) -> tuple[int, float, np.ndarray]:
     """Largest displacement relative to the prescribed rigid spindle motion.
 
@@ -900,6 +961,7 @@ def write_config(path: Path, args, run, pla, motion, node_path: Path, ele_path: 
 
 def main() -> int:
     args = build_parser().parse_args()
+    install_termination_handler()
     # --smoke-test is removed from the one-way CLI, but the shared CRM run
     # parameter builder still reads the attribute.
     args.smoke_test = False
@@ -1201,6 +1263,28 @@ def main() -> int:
         command_angle = fea_driver.spin_ramp_angle(motion, t, args.spin_ramp_time)
         descent_error = abs(float(linear.GetMotorPos()) - command_z)
         angle_error = abs(float(motor.GetMotorAngle()) - command_angle)
+        # NaN comparisons are always false, so the kinematics guard alone would
+        # let a poisoned solve continue until Chrono fails inside a native
+        # solver call.  Check every reported state before writing the frame.
+        state_values = {
+            "max deformation": max_deformation,
+            "von Mises stress": max_stress,
+            "raw von Mises stress": raw_stress,
+            "hot element volume": element_volume,
+            "spindle position": _vec3(spindle.GetPos()),
+            "spindle rotation": rigid.quat_parts(spindle.GetRot()),
+            "linear motor position": linear.GetMotorPos(),
+            "rotation motor angle": motor.GetMotorAngle(),
+            "motor speed": motor_speed,
+            "applied force": applied_force,
+            "applied torque": applied_torque,
+            "commanded height": command_z,
+            "commanded angle": command_angle,
+            "accumulated work": work_j,
+        }
+        if vtu_stresses is not None:
+            state_values["VTU stress field"] = vtu_stresses
+        require_finite_fea_state(t, state_values)
         if descent_error > 2.0e-4 or angle_error > 2.0e-2:
             source = "recorded force-mode trajectory" if run.descent_mode == "force" else "FEA motion"
             raise SystemExit(
@@ -1252,7 +1336,7 @@ def main() -> int:
             except Exception as exc:
                 print(f"  FEA 3D VTK export frame {frame} failed: {exc}", flush=True)
                 try:
-                    vtk_writer.close()
+                    vtk_writer.close(terminating=_TERMINATING)
                 except Exception as close_exc:
                     print(f"  FEA 3D VTK writer shutdown failed: {close_exc}", flush=True)
                 vtk_writer = None
@@ -1362,7 +1446,7 @@ def main() -> int:
     finally:
         if vtk_writer is not None:
             try:
-                vtk_writer.close()
+                vtk_writer.close(terminating=_TERMINATING)
             except Exception as exc:
                 print(f"FEA 3D VTK writer shutdown failed: {exc}", flush=True)
         if state_file is not None:

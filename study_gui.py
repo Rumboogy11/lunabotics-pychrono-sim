@@ -3465,14 +3465,10 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
 
     def _pump_concurrent_output(self, proc: subprocess.Popen, log, name: str) -> None:
         """Forward one concurrent stage's stdout to its log and the GUI queue."""
-        assert proc.stdout is not None
-        try:
-            for line in proc.stdout:
-                log.write(line)
-                log.flush()
-                self.log_queue.put(("line", line))
-        finally:
-            proc.stdout.close()
+        wiz.forward_process_output(
+            proc, log=log, emit=lambda line: self.log_queue.put(("line", line)),
+            on_parent_exit=self._terminate_step_process,
+        )
 
     def _run_concurrent_group(self, group, step_times: dict[str, float], started: float) -> bool:
         """Run a CRM/FEA group together; return False when the study must stop."""
@@ -3490,7 +3486,8 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         logs: dict[str, Any] = {}
         procs: dict[str, subprocess.Popen] = {}
         threads: list[threading.Thread] = []
-        watcher: threading.Thread | None = None
+        watchers: list[threading.Thread] = []
+        finished: dict[str, float] = {}
         with self._skip_lock:
             self._concurrent_by_name.clear()
             self._concurrent_planned_names = tuple(
@@ -3509,7 +3506,7 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                 popen_kwargs = {"start_new_session": True} if os.name != "nt" else {}
                 proc = subprocess.Popen(
                     step["command"], cwd=ROOT, stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT, text=True, bufsize=1, **popen_kwargs,
+                    stderr=subprocess.STDOUT, bufsize=0, **popen_kwargs,
                 )
                 procs[name] = proc
                 with self._skip_lock:
@@ -3536,22 +3533,32 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
             self.proc = procs["rigid-CRM"]
             self._concurrent_procs = list(procs.values())
 
-            def watch_crm() -> None:
-                # Reap CRM and drop the marker immediately on exit.  A zombie
-                # PID would otherwise keep the replay waiting forever.
-                procs["rigid-CRM"].wait()
-                marker.unlink(missing_ok=True)
+            def watch_stage(name: str, proc: subprocess.Popen) -> None:
+                # Record each stage's own finish.  A CRM stage that ends before
+                # FEA must not inherit the slower stage's elapsed time.  The
+                # CRM watcher also drops the liveness marker on exit so a
+                # zombie PID cannot keep the replay waiting forever.
+                proc.wait()
+                finished[name] = time.perf_counter()
+                if name == "rigid-CRM":
+                    marker.unlink(missing_ok=True)
 
-            watcher = threading.Thread(target=watch_crm, daemon=True)
-            watcher.start()
+            for name, proc in procs.items():
+                watcher = threading.Thread(
+                    target=watch_stage, args=(name, proc), daemon=True
+                )
+                watcher.start()
+                watchers.append(watcher)
             for thread in threads:
                 thread.join()
-            watcher.join()
+            for watcher in watchers:
+                watcher.join()
 
             returncodes = {name: proc.wait() for name, proc in procs.items()}
-            elapsed = time.perf_counter() - group_started
+            now = time.perf_counter()
             for step in group:
-                step_times[step["name"]] = elapsed
+                name = step["name"]
+                step_times[name] = finished.get(name, now) - group_started
 
             if self._stop_requested.is_set():
                 for step in group:
@@ -3636,17 +3643,15 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
                     # writers die and _run_thread's stdout read gets EOF.
                     popen_kwargs = {"start_new_session": True} if os.name != "nt" else {}
                     proc = subprocess.Popen(step["command"], cwd=ROOT, stdout=subprocess.PIPE,
-                                            stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                            stderr=subprocess.STDOUT, bufsize=0,
                                             **popen_kwargs)
                     self.proc = proc
                     assert proc.stdout is not None
-                    try:
-                        for line in proc.stdout:
-                            log.write(line)
-                            log.flush()
-                            self.log_queue.put(("line", line))
-                    finally:
-                        proc.stdout.close()
+                    wiz.forward_process_output(
+                        proc, log=log,
+                        emit=lambda line: self.log_queue.put(("line", line)),
+                        on_parent_exit=self._terminate_step_process,
+                    )
                     rc = proc.wait()
                 # Keep the elapsed time even when the step was skipped, stopped,
                 # or failed: the user still spent that time waiting on it.
@@ -3700,9 +3705,9 @@ print(json.dumps({'axis': axis, 'measured': m}, default=float))
         Each step runs in its own session (see ``_run_thread``), so on POSIX the
         step and every worker it spawned share a process group.  Signalling only
         the parent leaves CRM/export worker processes holding the inherited
-        stdout pipe open; the run thread then blocks in ``for line in stdout``
-        and never advances to the next stage.  Killing the group closes the
-        pipe so the pipeline can continue.
+        stdout pipe open.  Killing the group closes the pipe so the shared
+        output pump can advance to the next stage, including when it notices
+        that the parent has already exited.
         """
         try:
             if os.name != "nt":

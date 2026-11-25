@@ -7,6 +7,7 @@ import csv
 import io
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -15,6 +16,8 @@ import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -222,6 +225,76 @@ class CrmTerminationTest(unittest.TestCase):
         self.assertEqual(executor.kwargs, {"wait": True})
 
 
+class FeaTerminationAndStateTest(unittest.TestCase):
+    def tearDown(self) -> None:
+        oneway._TERMINATING = False
+
+    @unittest.skipIf(os.name == "nt", "POSIX signal handling test")
+    def test_sigterm_is_converted_to_the_cleanup_path(self) -> None:
+        with patch.object(oneway.signal, "signal") as register:
+            oneway.install_termination_handler()
+
+        register.assert_called_once()
+        self.assertEqual(register.call_args.args[0], signal.SIGTERM)
+        handler = register.call_args.args[1]
+        with self.assertRaises(KeyboardInterrupt):
+            handler(signal.SIGTERM, None)
+        self.assertTrue(oneway._TERMINATING)
+
+    def test_nonfinite_values_are_named(self) -> None:
+        values = {
+            "deformation": 1.0e-5,
+            "force": np.array([1.0, 2.0, 3.0]),
+            "motor": 0.5,
+        }
+        self.assertEqual(oneway.nonfinite_fea_values(values), [])
+        values["force"] = np.array([1.0, float("nan"), 3.0])
+        values["motor"] = float("inf")
+        self.assertEqual(
+            oneway.nonfinite_fea_values(values), ["force", "motor"]
+        )
+
+    def test_nonfinite_state_fails_before_a_frame_is_recorded(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "t=0.7 s.*deformation"):
+            oneway.require_finite_fea_state(
+                0.7, {"deformation": float("nan"), "stress": 1.0}
+            )
+
+    def test_terminated_vtk_writer_is_stopped_without_draining(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.alive = True
+                self.terminated = False
+                self.killed = False
+                self.joined = []
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+            def terminate(self) -> None:
+                self.terminated = True
+                self.alive = False
+
+            def kill(self) -> None:
+                self.killed = True
+                self.alive = False
+
+            def join(self, timeout=None) -> None:
+                self.joined.append(timeout)
+
+        writer = oneway.BackgroundVtkWriter.__new__(oneway.BackgroundVtkWriter)
+        writer._process = FakeProcess()
+        writer.closed = False
+        with patch.object(writer, "_drain_results") as drain:
+            writer.close(terminating=True)
+
+        self.assertTrue(writer.closed)
+        self.assertTrue(writer._process.terminated)
+        self.assertFalse(writer._process.killed)
+        self.assertEqual(writer._process.joined, [10])
+        drain.assert_called_once_with()
+
+
 class WizardConcurrentTest(unittest.TestCase):
     def test_parser_exposes_the_toggle(self) -> None:
         parser = wiz.build_parser()
@@ -231,6 +304,43 @@ class WizardConcurrentTest(unittest.TestCase):
         self.assertIs(enabled.concurrent_crm_fea, True)
         self.assertIs(disabled.concurrent_crm_fea, False)
         self.assertIsNone(parser.parse_args([]).concurrent_crm_fea)
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-group test")
+    def test_output_pump_detects_parent_exit_with_inherited_stdout(self) -> None:
+        # The child holds stdout open after the parent exits.  A plain
+        # ``for line in stdout`` loop would wait for that sleeping child.
+        script = (
+            "import subprocess, sys\n"
+            "subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(10)'], stdout=sys.stdout)\n"
+            "print('parent output', flush=True)\n"
+            "sys.exit(7)\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script], stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, bufsize=0,
+            start_new_session=True,
+        )
+        lines: list[str] = []
+        stopped: list[subprocess.Popen] = []
+
+        def stop_group(target: subprocess.Popen) -> None:
+            stopped.append(target)
+            try:
+                os.killpg(target.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+        started = time.perf_counter()
+        wiz.forward_process_output(
+            proc, emit=lines.append, on_parent_exit=stop_group
+        )
+        elapsed = time.perf_counter() - started
+
+        self.assertIn("parent output\n", lines)
+        self.assertEqual(proc.wait(), 7)
+        self.assertEqual(stopped, [proc])
+        self.assertLess(elapsed, 3.0)
 
     def test_full_study_marks_the_pair_and_passes_live_flags(self) -> None:
         with tempfile.TemporaryDirectory(prefix="concurrent_wizard_", dir="/tmp/opencode") as tmp:
@@ -357,9 +467,11 @@ class FakeProc:
         self.stdout = io.StringIO(text)
         self.pid = pid if pid is not None else os.getpid()
         self._wait_hook = wait_hook
+        self.waits = 0
 
     def wait(self) -> int:
-        if self._wait_hook is not None:
+        self.waits += 1
+        if self.waits == 1 and self._wait_hook is not None:
             self._wait_hook()
         return 0
 
@@ -410,6 +522,23 @@ class ConcurrentRunnerTest(unittest.TestCase):
             self.assertEqual(results, {"rigid-CRM": True, "one-way-FEA": True})
             self.assertFalse(marker.exists())
             self.assertIn("fea advanced\n", Path(steps[1]["log"]).read_text(encoding="utf-8"))
+
+    def test_cli_records_each_stage_finish_time(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="concurrent_cli_timing_", dir="/tmp/opencode") as tmp:
+            steps = self._steps(tmp)
+            procs = [
+                FakeProc(wait_hook=lambda: time.sleep(0.05)),
+                FakeProc(wait_hook=lambda: time.sleep(0.30)),
+            ]
+            elapsed: dict[str, float] = {}
+            with patch.object(wiz.subprocess, "Popen", side_effect=procs):
+                results = wiz.run_concurrent_steps(steps, elapsed=elapsed)
+
+            self.assertTrue(all(results.values()))
+            self.assertLess(elapsed["rigid-CRM"], elapsed["one-way-FEA"])
+            self.assertGreater(
+                elapsed["one-way-FEA"] - elapsed["rigid-CRM"], 0.1
+            )
 
 
 class ConcurrentGuiFieldTest(unittest.TestCase):
@@ -529,6 +658,43 @@ class ConcurrentGuiFieldTest(unittest.TestCase):
             crm_time = next(line for line in lines if line.startswith("  CRM: "))
             fea_time = next(line for line in lines if line.startswith("  One-way FEA: "))
             self.assertAlmostEqual(seconds(crm_time), seconds(fea_time), places=1)
+
+    def test_gui_records_crm_finish_before_slower_fea(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="concurrent_gui_timing_", dir="/tmp/opencode") as tmp:
+            steps = self._steps(tmp)
+            tail = {"name": "export-ParaView-VTK", "command": ["export"],
+                    "log": str(Path(tmp) / "export.log")}
+            procs = [
+                FakeProc(wait_hook=lambda: time.sleep(0.05)),
+                FakeProc(wait_hook=lambda: time.sleep(0.30)),
+                FakeProc(),
+            ]
+
+            self.app._stop_requested.clear()
+            self.app._skip_requested.clear()
+            with patch.object(gui.subprocess, "Popen", side_effect=procs):
+                self.app._run_thread({"output_dir": tmp}, steps + [tail])
+
+            lines = [text for kind, text in self._events() if kind == "line"]
+            def seconds(line: str) -> float:
+                return float(line.split(": ", 1)[1].removesuffix(" s\n"))
+
+            crm_time = seconds(next(line for line in lines if line.startswith("  CRM: ")))
+            fea_time = seconds(next(line for line in lines if line.startswith("  One-way FEA: ")))
+            self.assertGreater(fea_time - crm_time, 0.1)
+
+    def test_gui_pumps_with_a_parent_exit_callback(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="concurrent_gui_pump_", dir="/tmp/opencode") as tmp:
+            steps = self._steps(tmp)
+            with patch.object(gui.subprocess, "Popen",
+                              side_effect=[FakeProc(), FakeProc()]), \
+                 patch.object(wiz, "forward_process_output") as forward:
+                self.app._run_thread({"output_dir": tmp}, steps)
+
+            self.assertEqual(forward.call_count, 2)
+            for call in forward.call_args_list:
+                self.assertEqual(call.kwargs["on_parent_exit"],
+                                 self.app._terminate_step_process)
 
     def test_skip_group_continues_to_later_steps(self) -> None:
         with tempfile.TemporaryDirectory(prefix="concurrent_gui_skip_", dir="/tmp/opencode") as tmp:

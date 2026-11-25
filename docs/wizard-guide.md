@@ -115,7 +115,7 @@ Run `./run_study.sh --help` for the authoritative complete list. The tables belo
   --drum-gravity --duration 30
 ```
 
-Every real run ends with a `Simulation elapsed times` block showing the rigid CRM and one-way FEA wall times and the total wall time. This also appears when a stage fails or the run is interrupted with Ctrl+C: a stage that was started keeps the time spent on it, even if it was cancelled partway through, while stages that never started show `not run`. The GUI prints the same block in its log.
+Every real run ends with a `Simulation elapsed times` block showing the rigid CRM and one-way FEA wall times and the total wall time. This also appears when a stage fails or the run is interrupted with Ctrl+C: a stage that was started keeps the time spent on it, even if it was cancelled partway through, while stages that never started show `not run`. In concurrent mode each stage time stops when that stage exits, so CRM can show a shorter time than the FEA replay that keeps running; the times overlap and can sum to more than the total wall time. The GUI prints the same block in its log.
 
 ## What the wizard writes
 

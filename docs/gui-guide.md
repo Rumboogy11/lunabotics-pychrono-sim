@@ -139,7 +139,7 @@ Along the bottom of the Study Wizard tab (outside page 6):
 
 Inside page 6's lower run bar:
 
-- **Skip current step** — terminate the active command and mark it skipped; remaining queued stages still run. With a concurrent CRM/FEA pair, the first press stops only rigid CRM and lets FEA finish against the frames already recorded; press again to stop FEA too. The whole process group of the targeted stage is signalled, so worker processes such as the CRM particle writers are stopped too and the runner can advance. CRM traps that termination signal and closes its writer pool, so no leaked-semaphore warning is printed. If no command is currently running, nothing is skipped and the status line says so.
+- **Skip current step** — terminate the active command and mark it skipped; remaining queued stages still run. With a concurrent CRM/FEA pair, the first press stops only rigid CRM and lets FEA finish against the frames already recorded; press again to stop FEA too. The whole process group of the targeted stage is signalled, so worker processes such as the CRM particle writers and the FEA VTK writer are stopped too and the runner can advance. CRM and one-way FEA trap that termination signal and close their writer pools/queues, so no leaked-semaphore warning is printed. The log pump also notices a parent process that exits while a worker still holds stdout, stops the orphaned group, and records the stage's own elapsed time. If no command is currently running, nothing is skipped and the status line says so.
 - **Stop running process** — terminate the active stage (including its worker processes) and abort the remaining steps.
 
 The status line reports what is happening (for example, "Viewing <doc>" when you use the Docs tab).

@@ -22,6 +22,7 @@ import json
 import math
 import os
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -2198,6 +2199,86 @@ def print_timing_summary(step_times: dict[str, float], started: float) -> None:
     print(f"Total wall time: {time.perf_counter() - started:.1f} s", flush=True)
 
 
+# Stage output is pumped with a short poll so a worker that inherits stdout
+# cannot keep a finished parent looking active forever.  After the parent exits,
+# output is drained briefly before the pipe is abandoned.
+OUTPUT_POLL_S = 0.1
+OUTPUT_DRAIN_AFTER_EXIT_S = 1.0
+
+
+def _emit_process_line(text: str, *, log, emit) -> None:
+    if emit is not None:
+        emit(text)
+    if log is not None:
+        log.write(text)
+        log.flush()
+
+
+def forward_process_output(proc: subprocess.Popen, *, log=None, emit=None,
+                           on_parent_exit=None) -> None:
+    """Forward stage output and notice parent exit even if a child holds stdout.
+
+    ``for line in proc.stdout`` waits for EOF.  A spawned writer can inherit the
+    pipe and outlive a crashed parent, so POSIX runners poll the descriptor and
+    call ``on_parent_exit`` (normally a process-group termination) instead of
+    hanging.  Windows keeps the blocking reader; the GUI still detects a
+    finished parent through its existing watchdog.
+    """
+    stdout = proc.stdout
+    assert stdout is not None
+
+    def blocking_reader() -> None:
+        try:
+            for line in stdout:
+                text = (line.decode("utf-8", errors="replace")
+                        if isinstance(line, bytes) else line)
+                _emit_process_line(text, log=log, emit=emit)
+        finally:
+            stdout.close()
+
+    if os.name == "nt":
+        blocking_reader()
+        return
+    try:
+        fd = stdout.fileno()
+    except (AttributeError, OSError, ValueError):
+        # Tests and a few launchers supply in-memory stdout objects.
+        blocking_reader()
+        return
+
+    pending = b""
+    parent_exited = False
+    exited_at = 0.0
+    try:
+        while True:
+            readable, _, _ = select.select([fd], [], [], OUTPUT_POLL_S)
+            if readable:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                pending += chunk
+                *complete, pending = pending.split(b"\n")
+                for raw in complete:
+                    _emit_process_line(
+                        raw.decode("utf-8", errors="replace") + "\n",
+                        log=log, emit=emit,
+                    )
+            if not parent_exited and proc.poll() is not None:
+                parent_exited = True
+                exited_at = time.monotonic()
+                if on_parent_exit is not None:
+                    on_parent_exit(proc)
+            if (parent_exited and not readable
+                    and time.monotonic() - exited_at >= OUTPUT_DRAIN_AFTER_EXIT_S):
+                break
+    finally:
+        if pending:
+            _emit_process_line(
+                pending.decode("utf-8", errors="replace"), log=log, emit=emit
+            )
+        stdout.close()
+
+
 def run_step(step: dict[str, Any]) -> bool:
     name = step["name"]
     command = step["command"]
@@ -2205,19 +2286,21 @@ def run_step(step: dict[str, Any]) -> bool:
     log_path = Path(step["log"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as log:
+        kwargs = {"start_new_session": True} if os.name != "nt" else {}
         proc = subprocess.Popen(
             command,
             cwd=ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+            bufsize=0,
+            **kwargs,
         )
         assert proc.stdout is not None
-        for line in proc.stdout:
-            print(line, end="", flush=True)
-            log.write(line)
-            log.flush()
+        forward_process_output(
+            proc, log=log,
+            emit=lambda line: print(line, end="", flush=True),
+            on_parent_exit=_terminate_process_group,
+        )
         returncode = proc.wait()
     if returncode != 0:
         print(f"[{name}] FAILED with exit code {returncode}", flush=True)
@@ -2261,12 +2344,16 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
         pass
 
 
-def run_concurrent_steps(steps: list[dict[str, Any]]) -> dict[str, bool]:
+def run_concurrent_steps(
+    steps: list[dict[str, Any]], elapsed: dict[str, float] | None = None
+) -> dict[str, bool]:
     """Launch a marked CRM/FEA pair together and keep the FEA replay alive.
 
     The CRM stage owns a liveness marker file written before either process
     starts.  A watcher removes it as soon as CRM exits, so the one-way driver
     sees a live marker only while CRM is genuinely still producing frames.
+    When *elapsed* is supplied, each stage gets its own finish time instead of
+    both stages sharing the duration of the slower one.
     """
     by_name = {step["name"]: step for step in steps}
     crm_step = by_name.get("rigid-CRM")
@@ -2285,25 +2372,26 @@ def run_concurrent_steps(steps: list[dict[str, Any]]) -> dict[str, bool]:
     procs: dict[str, subprocess.Popen] = {}
     logs: dict[str, Any] = {}
     results = {step["name"]: False for step in steps}
+    finished: dict[str, float] = {}
+    group_started = time.perf_counter()
 
     def pump(proc: subprocess.Popen, log, name: str) -> None:
-        assert proc.stdout is not None
-        try:
-            for line in proc.stdout:
-                print(f"[{name}] {line}", end="", flush=True)
-                log.write(line)
-                log.flush()
-        finally:
-            proc.stdout.close()
+        forward_process_output(
+            proc, log=log,
+            emit=lambda line: print(f"[{name}] {line}", end="", flush=True),
+            on_parent_exit=_terminate_process_group,
+        )
 
-    def watch_crm() -> None:
-        # Reap CRM promptly so the marker never outlives the stage.  Without
-        # this, FEA could wait forever on a zombie PID after CRM has exited.
-        procs["rigid-CRM"].wait()
-        marker.unlink(missing_ok=True)
+    def watch_stage(name: str, proc: subprocess.Popen) -> None:
+        # Reap every stage promptly so each timer ends when that stage exits,
+        # not when its slower partner finishes.  The CRM watcher also drops the
+        # liveness marker before FEA can mistake a zombie PID for a live stage.
+        proc.wait()
+        finished[name] = time.perf_counter()
+        if name == "rigid-CRM":
+            marker.unlink(missing_ok=True)
 
     threads: list[threading.Thread] = []
-    watcher: threading.Thread | None = None
     try:
         for step in (crm_step, fea_step):
             name = step["name"]
@@ -2315,7 +2403,7 @@ def run_concurrent_steps(steps: list[dict[str, Any]]) -> dict[str, bool]:
             kwargs = {"start_new_session": True} if os.name != "nt" else {}
             proc = subprocess.Popen(
                 step["command"], cwd=ROOT, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, bufsize=1, **kwargs,
+                stderr=subprocess.STDOUT, bufsize=0, **kwargs,
             )
             procs[name] = proc
             if name == "rigid-CRM":
@@ -2326,11 +2414,22 @@ def run_concurrent_steps(steps: list[dict[str, Any]]) -> dict[str, bool]:
             thread.start()
             threads.append(thread)
 
-        watcher = threading.Thread(target=watch_crm, daemon=True)
+        watcher = threading.Thread(
+            target=watch_stage, args=("rigid-CRM", procs["rigid-CRM"]), daemon=True
+        )
         watcher.start()
+        watchers = [watcher]
+        fea_proc = procs.get("one-way-FEA")
+        if fea_proc is not None:
+            fea_watcher = threading.Thread(
+                target=watch_stage, args=("one-way-FEA", fea_proc), daemon=True
+            )
+            fea_watcher.start()
+            watchers.append(fea_watcher)
         for thread in threads:
             thread.join()
-        watcher.join()
+        for watcher in watchers:
+            watcher.join()
         for name, proc in procs.items():
             returncode = proc.wait()
             if returncode != 0:
@@ -2339,6 +2438,11 @@ def run_concurrent_steps(steps: list[dict[str, Any]]) -> dict[str, bool]:
             else:
                 print(f"[{name}] complete", flush=True)
             results[name] = returncode == 0
+        if elapsed is not None:
+            now = time.perf_counter()
+            for step in steps:
+                name = step["name"]
+                elapsed[name] = finished.get(name, now) - group_started
         return results
     except (Exception, KeyboardInterrupt):
         for proc in procs.values():
@@ -2547,19 +2651,21 @@ def main() -> int:
             step_started = time.perf_counter()
             try:
                 if len(group) > 1:
-                    outcomes = run_concurrent_steps(group)
+                    outcomes = run_concurrent_steps(group, elapsed=step_times)
                     ok = all(outcomes.values())
                     failed = next((name for name, passed in outcomes.items() if not passed), None)
                 else:
                     step = group[0]
                     outcomes = None
                     ok = run_step(step)
+                    step_times[step["name"]] = time.perf_counter() - step_started
                     failed = step["name"] if not ok else None
             finally:
-                # Keep the time even when a stage fails or is interrupted.
-                # Concurrent stages start together, so they share a wall time.
+                # Keep a time even when a stage fails or is interrupted.  A
+                # concurrent group already recorded each stage's own finish.
+                group_elapsed = time.perf_counter() - step_started
                 for step in group:
-                    step_times[step["name"]] = time.perf_counter() - step_started
+                    step_times.setdefault(step["name"], group_elapsed)
             if not ok:
                 name = failed or group[0]["name"]
                 log = next(s["log"] for s in group if s["name"] == name)

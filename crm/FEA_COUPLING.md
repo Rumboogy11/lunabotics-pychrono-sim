@@ -200,6 +200,17 @@ rechecks the PVD and frame files rather than trusting the manifest: a lone
 `t=0` frame is ignored, while a structurally usable partial multi-frame series
 can be displayed.
 
+The one-way driver checks each recorded frame for finite deformation, filtered/raw
+stress, element volume, spindle/motor state, applied wrench, and accumulated work.
+A non-finite solve now stops with `FEA solver state became non-finite` before the
+CSV row or VTU snapshot is written; continuing to step on `NaN` state previously
+let Chrono fail inside a native solver call. This is a numerical guard, not a
+physics change: the recorded one-way solution is unchanged while it remains
+finite. Smaller structural timesteps, HHT, and better mesh quality are the
+appropriate remedies. The SIGTERM path also terminates the background VTK writer
+without draining queued frames so a skipped stage does not leak multiprocessing
+semaphores.
+
 Driver and SPH-coupling fixes applied in the local source/runtime:
 
 - spindle motion is prescribed by Chrono motor constraints with motion functions
