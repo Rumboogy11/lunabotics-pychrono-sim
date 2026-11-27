@@ -207,9 +207,18 @@ CSV row or VTU snapshot is written; continuing to step on `NaN` state previously
 let Chrono fail inside a native solver call. This is a numerical guard, not a
 physics change: the recorded one-way solution is unchanged while it remains
 finite. Smaller structural timesteps, HHT, and better mesh quality are the
-appropriate remedies. The SIGTERM path also terminates the background VTK writer
-without draining queued frames so a skipped stage does not leak multiprocessing
-semaphores.
+appropriate remedies. On SIGTERM the replay only sets a flag and stops at the
+next Python-controlled checkpoint (between solver steps and at live-load waits),
+so a skip cannot raise through a native PardisoMKL call. The background VTK
+writer ignores the runner's process-group SIGTERM, discards queued snapshots on
+its own stop event, and finishes any current VTU write before exiting; this
+avoids both native unwinding and leaked multiprocessing semaphores. A very small
+`--fea-dt` with many threads is not automatically more stable: on the 52k-node
+mesh here, `dt=0.0005` with `--num-threads 16` and stride-1 VTU export advanced
+only a few output frames before it was stopped. That was excessive wall time and
+a thread-sensitive solver setup, not evidence that the smaller timestep is
+invalid. Start smoke tests with 4 threads, export disabled or a coarse
+`--vtk-stride`, and a short `--duration`.
 
 Driver and SPH-coupling fixes applied in the local source/runtime:
 

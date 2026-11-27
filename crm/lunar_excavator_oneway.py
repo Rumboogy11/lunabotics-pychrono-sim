@@ -90,18 +90,25 @@ CRM_FRAME_POLL_S = 0.1
 # The GUI stops a skipped FEA stage with SIGTERM.  Handling it in-process lets
 # the background VTK writer release its multiprocessing queues before exit;
 # an abrupt SIGTERM leaves the resource tracker reporting leaked semaphores.
+# The handler only records the request: raising here can unwind through a
+# native Chrono/MKL solve and crash inside ``DoStepDynamics()``.  The replay
+# checks this flag between solver steps and at its wait points.
 _TERMINATING = False
 
 
 def request_clean_termination(_signum=None, _frame=None) -> None:
-    """Turn a termination signal into the driver's normal cleanup path."""
+    """Record a termination request without unwinding the current call stack."""
     global _TERMINATING
     _TERMINATING = True
-    raise KeyboardInterrupt
+
+
+def termination_requested() -> bool:
+    """True after SIGTERM; read only at safe points in the replay loop."""
+    return _TERMINATING
 
 
 def install_termination_handler() -> None:
-    """Install the SIGTERM cleanup handler on POSIX systems."""
+    """Install the deferred SIGTERM handler on POSIX systems."""
     if os.name != "nt":
         signal.signal(signal.SIGTERM, request_clean_termination)
 
@@ -337,12 +344,20 @@ class FeaVtkFrameSnapshot:
     vm: np.ndarray
 
 
-def _run_vtk_writer(exporter, task_queue, result_queue) -> None:
+def _run_vtk_writer(exporter, task_queue, result_queue, stop_event) -> None:
     """Process entry point: consume snapshots in order and write VTU/PVD files."""
+    # The runner signals the whole process group on Skip/Stop.  Writer shutdown
+    # must come from its own stop event: SIGTERM could interrupt a native VTK
+    # write and leave the queue's semaphores with the resource tracker.
+    if os.name != "nt":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
     try:
-        while True:
-            snapshot = task_queue.get()
-            if snapshot is None:
+        while not stop_event.is_set():
+            try:
+                snapshot = task_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if snapshot is None or stop_event.is_set():
                 break
             path = exporter.write_snapshot(snapshot)
             result_queue.put(("ok", snapshot.frame_index, str(path), len(exporter.entries)))
@@ -365,9 +380,10 @@ class BackgroundVtkWriter:
         self._ctx = mp.get_context("spawn")
         self._tasks = self._ctx.Queue(maxsize=2)
         self._results = self._ctx.Queue()
+        self._stop = self._ctx.Event()
         self._process = self._ctx.Process(
             target=_run_vtk_writer,
-            args=(exporter, self._tasks, self._results),
+            args=(exporter, self._tasks, self._results, self._stop),
             daemon=True,
         )
         self._process.start()
@@ -395,7 +411,7 @@ class BackgroundVtkWriter:
 
     def submit(self, snapshot: FeaVtkFrameSnapshot) -> None:
         """Enqueue a copied frame, waiting briefly if the writer is behind."""
-        if self.closed:
+        if self.closed or termination_requested():
             return
         if not self._process.is_alive():
             self._raise_if_failed()
@@ -410,10 +426,8 @@ class BackgroundVtkWriter:
                 self._raise_if_failed()
         self._raise_if_failed()
 
-    def _force_stop_writer(self) -> None:
-        if self._process.is_alive():
-            self._process.terminate()
-            self._process.join(timeout=10)
+    def _kill_writer(self) -> None:
+        """Last-resort stop after the writer has ignored its graceful stop."""
         if self._process.is_alive():
             self._process.kill()
             self._process.join(timeout=10)
@@ -422,16 +436,21 @@ class BackgroundVtkWriter:
     def close(self, terminating: bool = False) -> None:
         """Flush queued frames and join the writer before final output.
 
-        On an interrupted run there is no time to drain queued frames: stop the
-        writer promptly so multiprocessing queues and semaphores are released.
+        On an interrupted run, discard queued frames and let the writer finish
+        its current VTU write before it exits.  The writer ignores the runner's
+        group SIGTERM, so shutdown comes only from ``_stop`` and never unwinds
+        a native VTK call.
         """
-        if self.closed:
-            if terminating and self._process.is_alive():
-                self._force_stop_writer()
+        if self.closed and not terminating:
             return
         self.closed = True
         if terminating:
-            self._force_stop_writer()
+            self._stop.set()
+            self._process.join(timeout=30)
+            if self._process.is_alive():
+                self._kill_writer()
+            else:
+                self._drain_results()
             return
         deadline = time.monotonic() + 30.0
         while True:
@@ -442,13 +461,11 @@ class BackgroundVtkWriter:
                 if not self._process.is_alive():
                     break
                 if time.monotonic() >= deadline:
-                    self._process.terminate()
-                    self._process.join(timeout=10)
+                    self._kill_writer()
                     raise RuntimeError("FEA VTK writer did not accept shutdown in time")
         self._process.join(timeout=120)
         if self._process.is_alive():
-            self._process.terminate()
-            self._process.join(timeout=10)
+            self._kill_writer()
             raise RuntimeError("FEA VTK writer did not finish in time")
         self._drain_results()
         if self.failure is not None:
@@ -1379,8 +1396,14 @@ def main() -> int:
 
     t = 0.0
     last_wait_notice = 0.0
+    interrupted = False
     try:
         while t < run.duration - 1.0e-12:
+            # SIGTERM only sets a flag.  Check it at Python-controlled points so
+            # a stop never raises through a native PardisoMKL solver call.
+            if termination_requested():
+                interrupted = True
+                break
             target = min(next_output, run.duration)
             if live_crm:
                 refresh_live_loads()
@@ -1388,6 +1411,9 @@ def main() -> int:
                 # the current loads CSV ends before the next output time.
                 while should_wait_for_load_frame(target, loads.t_end,
                                                   crm_stage_alive(alive_file)):
+                    if termination_requested():
+                        interrupted = True
+                        break
                     time.sleep(CRM_FRAME_POLL_S)
                     refresh_live_loads()
                     if time.monotonic() - last_wait_notice >= 5.0:
@@ -1397,6 +1423,8 @@ def main() -> int:
                             flush=True,
                         )
                         last_wait_notice = time.monotonic()
+                if interrupted:
+                    break
                 if target > loads.t_end + 1.0e-12:
                     # CRM has exited.  Restore the ordinary rule: stop at the
                     # minimum of the requested duration and the frames it wrote.
@@ -1421,6 +1449,9 @@ def main() -> int:
                 )
                 apply_loads(chrono, load_nodes, matrix, wrench, q_tuple, args.load_scale)
                 system.DoStepDynamics(h)
+                if termination_requested():
+                    interrupted = True
+                    break
                 motor_speed = drive["rotation_motor"].GetMotorAngleDt()
                 axis_torque = float(np.dot(torque_world, axis)) * args.load_scale
                 work_j += max(0.0, -axis_torque * motor_speed) * h
@@ -1443,14 +1474,24 @@ def main() -> int:
                 output_index, next_raw = next_output_time(
                     output_index + 1, run.fps, t)
                 next_output = min(next_raw, run.duration)
+            if termination_requested():
+                interrupted = True
+                break
     finally:
         if vtk_writer is not None:
             try:
-                vtk_writer.close(terminating=_TERMINATING)
+                vtk_writer.close(terminating=termination_requested())
             except Exception as exc:
                 print(f"FEA 3D VTK writer shutdown failed: {exc}", flush=True)
         if state_file is not None:
             state_file.close()
+
+    if interrupted or termination_requested():
+        print(
+            f"One-way CRM -> FEA stopped by termination request after {frame} frame(s).",
+            flush=True,
+        )
+        return 130
 
     print(
         "\nOne-way CRM -> FEA run complete: "

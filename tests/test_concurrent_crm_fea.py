@@ -230,16 +230,24 @@ class FeaTerminationAndStateTest(unittest.TestCase):
         oneway._TERMINATING = False
 
     @unittest.skipIf(os.name == "nt", "POSIX signal handling test")
-    def test_sigterm_is_converted_to_the_cleanup_path(self) -> None:
+    def test_sigterm_only_records_a_deferred_cleanup_request(self) -> None:
         with patch.object(oneway.signal, "signal") as register:
             oneway.install_termination_handler()
 
         register.assert_called_once()
         self.assertEqual(register.call_args.args[0], signal.SIGTERM)
         handler = register.call_args.args[1]
-        with self.assertRaises(KeyboardInterrupt):
-            handler(signal.SIGTERM, None)
-        self.assertTrue(oneway._TERMINATING)
+        # Raising here can unwind through Chrono's native PardisoMKL call.
+        handler(signal.SIGTERM, None)
+        self.assertTrue(oneway.termination_requested())
+
+    def test_replay_checks_termination_between_solver_steps(self) -> None:
+        source = Path(oneway.__file__).read_text(encoding="utf-8")
+        self.assertRegex(
+            source,
+            r"system\.DoStepDynamics\(h\)\s+if termination_requested\(\):",
+        )
+        self.assertNotRegex(source, r"raise KeyboardInterrupt")
 
     def test_nonfinite_values_are_named(self) -> None:
         values = {
@@ -260,7 +268,7 @@ class FeaTerminationAndStateTest(unittest.TestCase):
                 0.7, {"deformation": float("nan"), "stress": 1.0}
             )
 
-    def test_terminated_vtk_writer_is_stopped_without_draining(self) -> None:
+    def test_terminated_vtk_writer_stops_via_event_without_draining(self) -> None:
         class FakeProcess:
             def __init__(self) -> None:
                 self.alive = True
@@ -282,17 +290,40 @@ class FeaTerminationAndStateTest(unittest.TestCase):
             def join(self, timeout=None) -> None:
                 self.joined.append(timeout)
 
+        class FakeEvent:
+            def __init__(self, process: FakeProcess) -> None:
+                self.process = process
+                self.set_calls = 0
+
+            def set(self) -> None:
+                self.set_calls += 1
+                self.process.alive = False
+
+        process = FakeProcess()
         writer = oneway.BackgroundVtkWriter.__new__(oneway.BackgroundVtkWriter)
-        writer._process = FakeProcess()
+        writer._process = process
+        writer._stop = FakeEvent(process)
         writer.closed = False
         with patch.object(writer, "_drain_results") as drain:
             writer.close(terminating=True)
 
         self.assertTrue(writer.closed)
-        self.assertTrue(writer._process.terminated)
-        self.assertFalse(writer._process.killed)
-        self.assertEqual(writer._process.joined, [10])
+        self.assertEqual(writer._stop.set_calls, 1)
+        self.assertFalse(process.terminated)
+        self.assertFalse(process.killed)
+        self.assertEqual(process.joined, [30])
         drain.assert_called_once_with()
+
+    @unittest.skipIf(os.name == "nt", "POSIX signal handling test")
+    def test_vtk_writer_ignores_the_runner_sigterm(self) -> None:
+        class StoppedEvent:
+            def is_set(self) -> bool:
+                return True
+
+        with patch.object(oneway.signal, "signal") as register:
+            oneway._run_vtk_writer(object(), object(), object(), StoppedEvent())
+
+        register.assert_called_once_with(signal.SIGTERM, signal.SIG_IGN)
 
 
 class WizardConcurrentTest(unittest.TestCase):
